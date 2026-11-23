@@ -45,7 +45,10 @@ workers="${WORKERS:-4}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The version measured, taken now: the binaries are what the tree held when they were built, and
 # a file edited while the run goes on must not mark the report "-dirty" after the fact.
-measured="$(git -C "$repo" describe --always --dirty)"
+# core.autocrlf=input: a checkout made on Windows (core.autocrlf=true writes CRLF) and measured
+# from WSL would otherwise read as modified in every file and mark a clean tree "-dirty"; input
+# only normalizes CRLF for the comparison (every file is LF in the index) and writes nothing.
+measured="$(git -C "$repo" -c core.autocrlf=input describe --always --dirty)"
 work="$(mktemp -d)"
 mkdir -p "$repo/benchmarks/results"
 report="$repo/benchmarks/results/$(date +%F-%H%M).md"
