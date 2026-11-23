@@ -9,3 +9,4 @@ TestResults/
 .vs/
 .idea/
 *.user
+tests/.tools/

@@ -20,6 +20,10 @@
 # elsewhere, and HTTPASM_REQUIRE_LINUX=1 makes such a skip a failure here, so this run can only
 # pass by running them.
 #
+# External tools: tests/tools.sh fetches them (pinned by SHA-256) into tests/.tools/, and each
+# runner sees h2spec at HTTPASM_H2SPEC (docker: mounted at /tools), with HTTPASM_REQUIRE_H2SPEC=1:
+# Http2Tests.PassesH2spec must run its 146 cases, never skip them.
+#
 # Exit status: the test app's (0 = every test passed).
 # =============================================================================
 set -euo pipefail
@@ -29,6 +33,7 @@ shift || true
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 dotnet build "$here/tests/HttpAsm.Tests/HttpAsm.Tests.csproj" -c "$config" -nologo -v q
+tools="$(bash "$here/tests/tools.sh")"
 
 out="$here/tests/HttpAsm.Tests/bin/$config/net10.0"
 runner="${HTTPASM_RUNNER:-}"
@@ -45,25 +50,28 @@ fi
 case "$runner" in
   native)
     cd "$out"
-    HTTPASM_REQUIRE_LINUX=1 dotnet HttpAsm.Tests.dll "$@"
+    HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC="$tools/h2spec" HTTPASM_REQUIRE_H2SPEC=1 dotnet HttpAsm.Tests.dll "$@"
     ;;
   docker)
     # Docker Desktop on Windows needs a Windows path; Git Bash's /k/... form means nothing to it.
-    if command -v cygpath >/dev/null 2>&1; then out="$(cygpath -m "$out")"; fi
+    if command -v cygpath >/dev/null 2>&1; then out="$(cygpath -m "$out")"; tools="$(cygpath -m "$tools")"; fi
     # MSYS_NO_PATHCONV keeps Git Bash from rewriting /t into a Windows path.
     MSYS_NO_PATHCONV=1 docker run --rm \
-      -v "$out:/t:ro" -w /t \
+      -v "$out:/t:ro" -w /t -v "$tools:/tools:ro" \
       -e HTTPASM_REQUIRE_LINUX=1 -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+      -e HTTPASM_H2SPEC=/tools/h2spec -e HTTPASM_REQUIRE_H2SPEC=1 \
       mcr.microsoft.com/dotnet/runtime:10.0 \
       dotnet HttpAsm.Tests.dll "$@"
     ;;
   wsl)
     # K:/source/... is /mnt/k/source/... inside WSL.
-    if command -v cygpath >/dev/null 2>&1; then out="$(cygpath -m "$out")"; fi
+    if command -v cygpath >/dev/null 2>&1; then out="$(cygpath -m "$out")"; tools="$(cygpath -m "$tools")"; fi
     drive="$(printf '%s' "${out:0:1}" | tr 'A-Z' 'a-z')"
     wslout="/mnt/$drive${out:2}"
+    drive="$(printf '%s' "${tools:0:1}" | tr 'A-Z' 'a-z')"
+    wsltools="/mnt/$drive${tools:2}"
     wsl.exe -d "${HTTPASM_WSL_DISTRO:-Ubuntu}" -e bash -lc \
-      "cd '$wslout' && HTTPASM_REQUIRE_LINUX=1 DOTNET_NOLOGO=1 \$HOME/.dotnet/dotnet HttpAsm.Tests.dll $*"
+      "cd '$wslout' && HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC='$wsltools/h2spec' HTTPASM_REQUIRE_H2SPEC=1 DOTNET_NOLOGO=1 \$HOME/.dotnet/dotnet HttpAsm.Tests.dll $*"
     ;;
   *)
     echo "run-linux.sh: HTTPASM_RUNNER must be docker, wsl or native" >&2

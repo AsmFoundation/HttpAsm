@@ -140,6 +140,14 @@ typedef struct httpasm_request {
 #define HTTPASM_ERROR_HPACK_HUFFMAN         31  /* EOS in a string, or bad padding */
 #define HTTPASM_ERROR_HPACK_SIZE_UPDATE     32  /* a size update after a field, or above the limit */
 #define HTTPASM_ERROR_HPACK_LIMIT           33  /* httpasm_hpack_init: limit too large, or memory too small */
+/* HTTP/2 malformed requests (RFC 9113 8.1.1): a stream error PROTOCOL_ERROR for that request. */
+#define HTTPASM_ERROR_H2_PSEUDO             34  /* a pseudo-field unknown, repeated, a response's,
+                                                   after a regular field, or in trailers */
+#define HTTPASM_ERROR_H2_MISSING            35  /* :method, :scheme or :path (CONNECT: :authority)
+                                                   missing or empty */
+#define HTTPASM_ERROR_H2_CONNECTION_FIELD   36  /* a connection-specific field, or TE but "trailers" */
+#define HTTPASM_ERROR_H2_AUTHORITY          37  /* :authority empty or with userinfo, or a Host
+                                                   naming another authority */
 
 /* What a server answers (48 octets), for httpasm_h1_write_response. flags is in and out. */
 typedef struct httpasm_response {
@@ -383,6 +391,24 @@ uint32_t httpasm_hpack_table_size(const httpasm_hpack *table, uint32_t *max_size
 /* The entry at an HPACK index (1-61 static, 62 on dynamic, newest first) into *field; valid
  * until the table changes. 0, or -HTTPASM_ERROR_HPACK_INDEX. */
 int httpasm_hpack_entry(const httpasm_hpack *table, uint32_t index, httpasm_field *field);
+
+/* ------------------------------------------------------------------------------------------
+ * HTTP/2 (RFC 9113): the request view of a decoded header list. The server speaks HTTP/2 on
+ * its own (h2c with prior knowledge); these are its rules, for callers that decode themselves.
+ * ------------------------------------------------------------------------------------------ */
+
+/* Checks a request's decoded header list (RFC 9113 8.2, 8.3: lower-case token names, valid
+ * values, pseudo-fields first and once, no connection-specific field, TE only "trailers",
+ * :path with HTTP/1.1's target octets, :authority without userinfo and matching any Host) and
+ * fills request: method, target (:path; :authority for CONNECT), authority (else Host), scheme,
+ * version 20, flags, content_length, and fields/field_count (the regular fields, after the
+ * pseudo-fields in the same array). 0, or -HTTPASM_ERROR_* with request->error set: malformed
+ * (a stream error PROTOCOL_ERROR), except -HTTPASM_ERROR_EXPECT (answer 417). */
+int httpasm_h2_request(httpasm_field *fields, uint32_t count, httpasm_request *request);
+
+/* Checks a request's trailer section: no pseudo-field, valid names and values. Flags each
+ * record HTTPASM_FIELD_FLAG_TRAILER. 0, or -HTTPASM_ERROR_H2_PSEUDO / -FIELD_NAME / -FIELD_VALUE. */
+int httpasm_h2_trailers(httpasm_field *fields, uint32_t count);
 
 /* ------------------------------------------------------------------------------------------
  * The server (Linux): one worker thread per core, each with its own listening socket

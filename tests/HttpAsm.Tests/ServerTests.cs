@@ -306,6 +306,34 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// A first message that is no HTTP at all (no HTTP-version on its line: an HTTP/2 client's
+    /// broken preface, another protocol) is not answered in HTTP/1.1: the connection closes,
+    /// with not one octet sent. A broken line that does carry an HTTP-version is answered 400.
+    /// </summary>
+    /// <param name="request">The octets sent.</param>
+    /// <param name="answered">Whether a 400 is expected before the close.</param>
+    [Theory]
+    [InlineData("INVALID CONNECTION PREFACE\r\n\r\n", false)]
+    [InlineData("\r\nSSH-2.0-OpenSSH_9.6\r\n\r\n", false)]
+    [InlineData("GET /a b HTTP/1.1\r\nHost: t\r\n\r\n", true)]
+    [Requirement("RFC9112-2.2-9")]
+    public void ClosesSilentlyOnWhatIsNotHttp(string request, bool answered)
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200));
+        using var c = new RawConnection(server.Port);
+
+        c.Send(request);
+
+        if (answered)
+        {
+            Assert.Equal(400, c.ReadResponse().Status);
+        }
+
+        Assert.True(c.ServerClosed());
+    }
+
+    /// <summary>
     /// A body past max_body is refused with 413 and the connection closes (its unread body
     /// would otherwise be taken for the next request): a declared length at once, before any
     /// body octet is read; a chunked body as soon as the decoded octets pass the limit. A body

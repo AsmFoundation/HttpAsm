@@ -133,10 +133,12 @@ lru_unlink:
 
 ; -----------------------------------------------------------------------------
 ; ha_conn_close: closes a connection's descriptor. Its memory is not freed here:
-;   - With an exchange still deferred, the memory must outlive the descriptor (the handler's
-;     code holds the exchange, and another thread reads the request when it answers): the
-;     connection becomes a zombie, released by the worker when the response arrives
-;     (ha_conn_release).
+;   - With an exchange still deferred (conn.deferred above 0), the memory must outlive the
+;     descriptor (the handler's code holds the exchange, and another thread reads the request
+;     and the connection's worker when it answers): the connection becomes a zombie, released
+;     by the worker when the last deferred answer arrives (ha_conn_release).
+;   - An HTTP/2 connection's state is freed here in either case (ha_h2_free); its deferred
+;     streams are detached, each freed when its answer arrives.
 ;   - Otherwise it goes on the worker's closed list, freed by ha_conn_reap once the current
 ;     event batch is done: an event later in the same epoll_wait may still carry this
 ;     connection's pointer (handle_completions or close_idle can close a connection whose own
@@ -161,8 +163,13 @@ ha_conn_close:
     mov     eax, SYS_close                  ; closing the descriptor removes it from epoll
     syscall
     mov     dword [rbx + conn.fd], -1
-    test    dword [rbx + conn.flags], C_DEFERRED
-    jz      .closed
+    cmp     qword [rbx + conn.h2], 0
+    je      .state_freed
+    mov     rdi, rbx                        ; HTTP/2: its streams go; deferred ones are detached
+    call    ha_h2_free                      ; and wait for their answers
+.state_freed:
+    cmp     dword [rbx + conn.deferred], 0  ; a handler still holds an exchange: the memory stays
+    je      .closed
     or      dword [rbx + conn.flags], C_ZOMBIE
     mov     rsi, [rbx + conn.worker]
     inc     qword [rsi + worker.zombies]
@@ -320,8 +327,12 @@ ha_conn_flush:
 ;   In: rdi = conn, rsi = octets. Out: eax = 0, or -ENOMEM. Sent octets at the front are
 ;   dropped first; the buffer doubles (or more) only when that is not enough.
 ;   Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
+;   Also ha_output_reserve, for h2.asm. Any pointer into the output is stale afterwards (the
+;   octets may move, or the buffer): callers reserve a whole frame first, then write it.
 ; -----------------------------------------------------------------------------
+global ha_output_reserve:function hidden
 align 16
+ha_output_reserve:
 output_reserve:
     push    rbx
     push    r12
@@ -378,8 +389,12 @@ output_reserve:
 ; pointers if realloc moved the buffer.
 ;   In: rdi = conn, rsi = the capacity needed. Out: eax = 0, or -ENOMEM.
 ;   Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
+;   Also ha_input_reserve, for h2.asm (whose frames keep no pointer into the input: the
+;   rebase finds nothing to move for an HTTP/2 connection, whose conn.state stays CS_HEAD).
 ; -----------------------------------------------------------------------------
+global ha_input_reserve:function hidden
 align 16
+ha_input_reserve:
 input_reserve:
     push    rbx
     push    r12
@@ -711,6 +726,8 @@ ha_conn_process:
     sub     rax, [rbx + conn.wsent]
     cmp     rax, HA_OUTPUT_HIGH
     ja      .pressure                       ; back-pressure: answer more only after a flush
+    cmp     dword [rbx + conn.proto], HA_PROTO_H2
+    je      .h2
     mov     eax, [rbx + conn.state]
     cmp     eax, CS_HEAD
     je      .head
@@ -725,6 +742,25 @@ ha_conn_process:
 .head:
     cmp     qword [rbx + conn.rlen], 0
     je      .out
+    cmp     dword [rbx + conn.proto], HA_PROTO_UNKNOWN
+    jne     .parse_head
+    ; The connection's first octets decide its protocol, once: HTTP/2's preface (h2c with prior
+    ; knowledge, RFC 9113 3.3), or anything else as HTTP/1.1 (which would refuse "PRI * HTTP/2.0"
+    ; as an unsupported version).
+    mov     rdi, rbx
+    call    ha_h2_detect
+    test    eax, eax
+    js      .out                            ; a prefix of the preface: wait for more
+    jz      .is_h1
+    mov     rdi, rbx
+    call    ha_h2_start
+    test    eax, eax
+    jnz     .no_memory
+    mov     dword [rbx + conn.proto], HA_PROTO_H2
+    jmp     .h2
+.is_h1:
+    mov     dword [rbx + conn.proto], HA_PROTO_H1
+.parse_head:
     mov     rdi, [rbx + conn.rbuf]
     mov     rsi, [rbx + conn.rlen]
     lea     rdx, [rbx + conn.scan_from]
@@ -735,6 +771,7 @@ ha_conn_process:
     test    rax, rax
     jz      .need_more
     js      .head_refused
+    or      dword [rbx + conn.flags], C_SPOKE
     mov     [rbx + conn.head_length], rax
     xor     ecx, ecx
     mov     [rbx + conn.exchange + exchange.state], ecx
@@ -766,6 +803,56 @@ ha_conn_process:
     jmp     .loop
 .head_refused:
     neg     rax                             ; the status to answer
+    ; A connection's first message whose request-line is broken and carries no HTTP-version is
+    ; not an HTTP/1.x request at all (an HTTP/2 client's invalid preface, another protocol).
+    ; RFC 9112 2.2's 400 is for what "appears from the start-line to be an HTTP request
+    ; message" (RFC9112-2.2-9); with no protocol to answer in, the connection just closes
+    ; (h2spec 3.5/2 expects exactly that of an HTTP/2 server).
+    test    dword [rbx + conn.flags], C_SPOKE
+    jnz     .answer_refusal
+    movzx   ecx, word [rbx + conn.request + httpasm_request.error]
+    cmp     ecx, HTTPASM_ERROR_METHOD
+    je      .is_it_http
+    cmp     ecx, HTTPASM_ERROR_REQUEST_LINE
+    je      .is_it_http
+    cmp     ecx, HTTPASM_ERROR_TARGET
+    je      .is_it_http
+    cmp     ecx, HTTPASM_ERROR_TARGET_FORM
+    je      .is_it_http
+    cmp     ecx, HTTPASM_ERROR_VERSION
+    jne     .answer_refusal
+.is_it_http:
+    ; "HTTP/" before the first line's end (or the first 8 KiB) says it is.
+    mov     rsi, [rbx + conn.rbuf]
+    mov     rcx, [rbx + conn.rlen]
+    mov     edx, 8192
+    cmp     rcx, rdx
+    cmova   rcx, rdx
+    sub     rcx, 4                          ; the last place "HTTP/" can start
+    jbe     .not_http
+    xor     edx, edx
+.empty_line:
+    cmp     rdx, rcx                        ; the empty lines the parser skips (RFC 9112 2.2)
+    jae     .not_http
+    cmp     word [rsi + rdx], 0x0A0D
+    jne     .scan
+    add     rdx, 2
+    jmp     .empty_line
+.scan:
+    cmp     byte [rsi + rdx], 10
+    je      .not_http
+    cmp     dword [rsi + rdx], 'HTTP'
+    jne     .scan_next
+    cmp     byte [rsi + rdx + 4], '/'
+    je      .answer_refusal
+.scan_next:
+    inc     rdx
+    cmp     rdx, rcx
+    jb      .scan
+.not_http:
+    or      dword [rbx + conn.flags], C_CLOSE_AFTER
+    jmp     .out
+.answer_refusal:
     mov     rdi, rbx
     mov     esi, eax
     call    error_response
@@ -884,6 +971,9 @@ ha_conn_process:
     shl     rax, 5
     add     rax, [rbx + conn.fields]
     mov     [r14 + exchange.trailers], rax
+    lea     rax, [rbx + conn.request]
+    mov     [r14 + exchange.request], rax
+    mov     qword [r14 + exchange.stream], 0
     mov     dword [r14 + exchange.state], X_IN_HANDLER
     mov     rdi, [r13 + server.context]
     mov     rsi, r14
@@ -909,9 +999,16 @@ ha_conn_process:
     jmp     .loop
 .deferred:
     or      dword [rbx + conn.flags], C_DEFERRED
+    inc     dword [rbx + conn.deferred]
     mov     rdi, rbx
     call    ha_set_interest                 ; stop reading until the response comes
     jmp     .out
+
+.h2:
+    ; An HTTP/2 connection: the engine takes the input (h2.asm), with the same contract.
+    mov     rdi, rbx
+    call    ha_h2_process
+    jmp     .return
 
 .need_more:
     ; The input is full and the message is not complete: grow it (the parsers refuse heads over

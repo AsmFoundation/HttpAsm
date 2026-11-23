@@ -24,8 +24,7 @@ section .text
 global httpasm_exchange_request:function (httpasm_exchange_request.end - httpasm_exchange_request)
 align 16
 httpasm_exchange_request:
-    mov     rax, [rdi + exchange.conn]
-    add     rax, conn.request
+    mov     rax, [rdi + exchange.request]   ; the connection's (HTTP/1.1) or the stream's (HTTP/2)
     ret
 .end:
 
@@ -120,6 +119,8 @@ httpasm_exchange_respond:
 
 .now:
     ; Inside the handler, on the worker's thread: straight into the output.
+    cmp     qword [rbx + exchange.stream], 0
+    jne     .now_h2
     mov     rdi, [rbx + exchange.conn]
     movzx   esi, r12w
     mov     rdx, r13
@@ -129,6 +130,22 @@ httpasm_exchange_respond:
     sub     rsp, 16
     mov     qword [rsp], 0                  ; close: only as the request decides
     call    ha_conn_respond
+    add     rsp, 16
+    test    eax, eax
+    jnz     .out
+    mov     dword [rbx + exchange.state], X_RESPONDED
+    jmp     .out
+.now_h2:
+    ; HTTP/2: HEADERS and as much DATA as the windows allow, on the stream.
+    mov     rdi, [rbx + exchange.conn]
+    mov     rsi, [rbx + exchange.stream]
+    movzx   edx, r12w
+    mov     rcx, r13
+    mov     r8d, r14d
+    mov     r9, r15
+    sub     rsp, 16
+    mov     [rsp], rbp                      ; the body's length
+    call    ha_h2_respond
     add     rsp, 16
     test    eax, eax
     jnz     .out
@@ -144,6 +161,8 @@ httpasm_exchange_respond:
     mov     eax, -EINVAL
     jmp     .out
 .claimed:
+    cmp     qword [rbx + exchange.stream], 0
+    jne     .later_h2
     ; The response record. The Date is formatted on this thread: the worker's cached value
     ; belongs to the worker.
     lea     rdi, [rsp + httpasm_response_size]
@@ -200,7 +219,8 @@ httpasm_exchange_respond:
     add     r14, rbp
 .no_body:
     mov     [r13 + completion.length], r14
-    mov     rax, [rbx + exchange.conn]
+    mov     qword [r13 + completion.stream], 0  ; HTTP/1.1 (malloc'd: every field the worker
+    mov     rax, [rbx + exchange.conn]          ; reads is set, this one decides the path)
     mov     [r13 + completion.conn], rax
     xor     ecx, ecx
     test    dword [rsp + httpasm_response.flags], HTTPASM_RESPONSE_CLOSE
@@ -223,6 +243,112 @@ httpasm_exchange_respond:
     mov     dword [rbx + exchange.state], X_DEFERRED   ; the caller may answer again, correctly
     mov     rax, r12
     jmp     .out
+
+.later_h2:
+    ; HTTP/2: the connection's HPACK encoder is the worker's alone, so this thread checks the
+    ; answer (errors come back here, synchronously, as with HTTP/1.1) and posts copies of its
+    ; fields and body; the worker encodes them (ha_h2_completion).
+    mov     eax, -HTTPASM_ERROR_STATUS
+    cmp     r12d, 200
+    jb      .h2_refused
+    cmp     r12d, 599
+    ja      .h2_refused
+    mov     rdi, r13
+    mov     esi, r14d
+    mov     edx, HA_CHECK_H2_RESPONSE
+    call    ha_check_fields
+    test    eax, eax
+    jz      .h2_checked
+    neg     eax
+    jmp     .h2_refused
+.h2_checked:
+    ; One block: the completion, the records, their strings, the body.
+    mov     eax, r14d
+    shl     rax, 5
+    lea     rdi, [rax + rbp + completion_size]
+    mov     ecx, r14d
+    mov     rdx, r13
+.h2_strings:
+    test    ecx, ecx
+    jz      .h2_sized
+    mov     eax, [rdx + httpasm_field.name_length]
+    add     rdi, rax
+    mov     eax, [rdx + httpasm_field.value_length]
+    add     rdi, rax
+    add     rdx, httpasm_field_size
+    dec     ecx
+    jmp     .h2_strings
+.h2_sized:
+    call    malloc wrt ..plt
+    test    rax, rax
+    jz      .no_memory
+    mov     [rsp + httpasm_response_size], rax      ; the completion (the date slot is unused here)
+    mov     rdx, rax
+    mov     rax, [rbx + exchange.conn]
+    mov     [rdx + completion.conn], rax
+    mov     rax, [rbx + exchange.stream]
+    mov     [rdx + completion.stream], rax
+    mov     qword [rdx + completion.length], 0
+    mov     dword [rdx + completion.close], 0
+    mov     [rdx + completion.status], r12d
+    mov     [rdx + completion.field_count], r14d
+    lea     rdi, [rdx + completion_size]    ; the records
+    mov     [rdx + completion.fields], rdi
+    mov     eax, r14d
+    shl     rax, 5
+    lea     r8, [rdi + rax]                 ; the strings, after them
+    mov     ecx, r14d
+    mov     rsi, r13
+.h2_copy:
+    ; The record, then its strings into the block, the copy's pointers set to them. (No call in
+    ; this loop: r9-r11 hold the caller's record, the copy and the records left.)
+    test    ecx, ecx
+    jz      .h2_body
+    movdqu  xmm0, [rsi]
+    movdqu  xmm1, [rsi + 16]
+    movdqu  [rdi], xmm0
+    movdqu  [rdi + 16], xmm1
+    mov     r9, rsi
+    mov     r10, rdi
+    mov     r11d, ecx
+    mov     [r10 + httpasm_field.name], r8
+    mov     rdi, r8
+    mov     rsi, [r9 + httpasm_field.name]
+    mov     ecx, [r9 + httpasm_field.name_length]
+    rep     movsb
+    mov     [r10 + httpasm_field.value], rdi
+    mov     rsi, [r9 + httpasm_field.value]
+    mov     ecx, [r9 + httpasm_field.value_length]
+    rep     movsb
+    mov     r8, rdi                         ; the next strings go here
+    lea     rdi, [r10 + httpasm_field_size]
+    lea     rsi, [r9 + httpasm_field_size]
+    mov     ecx, r11d
+    dec     ecx
+    jmp     .h2_copy
+.h2_body:
+    mov     rdx, [rsp + httpasm_response_size]
+    mov     [rdx + completion.body], r8
+    mov     [rdx + completion.body_length], rbp
+    mov     rdi, r8
+    mov     rsi, r15
+    mov     rcx, rbp
+    rep     movsb
+    mov     r13, rdx                        ; post it, as HTTP/1.1's completions are
+    mov     rax, [rbx + exchange.conn]
+    mov     rdi, [rax + conn.worker]
+.h2_push:
+    mov     rax, [rdi + worker.queue]
+    mov     [r13 + completion.next], rax
+    lock cmpxchg [rdi + worker.queue], r13
+    jnz     .h2_push
+    call    ha_wake_worker
+    xor     eax, eax
+    jmp     .out
+.h2_refused:
+    mov     dword [rbx + exchange.state], X_DEFERRED   ; the caller may answer again, correctly
+    jmp     .out
+
 .no_memory:
     mov     dword [rbx + exchange.state], X_DEFERRED
     mov     eax, -ENOMEM

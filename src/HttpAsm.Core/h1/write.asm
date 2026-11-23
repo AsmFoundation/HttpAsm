@@ -60,6 +60,7 @@ s_hex_digits:   db "0123456789abcdef"
 WR_RESPONSE     equ 0
 WR_REQUEST      equ 1
 WR_TRAILER      equ 2
+WR_H2_RESPONSE  equ 3       ; an HTTP/2 response: as WR_RESPONSE, and Upgrade too (RFC 9113 8.2.2)
 
 section .text
 
@@ -133,13 +134,18 @@ wr_hex:
     ret
 
 ; -----------------------------------------------------------------------------
-; wr_check_fields: are fields[0..count) fit to send?
-;   In: rdi = fields, esi = count, edx = WR_RESPONSE, WR_REQUEST or WR_TRAILER.
+; wr_check_fields (also ha_check_fields, for the driver's HTTP/2 responses): are
+; fields[0..count) fit to send?
+;   In: rdi = fields, esi = count, edx = WR_RESPONSE, WR_REQUEST, WR_TRAILER or WR_H2_RESPONSE.
 ;   Out: eax = 0, or HTTPASM_ERROR_FIELD_NAME (not a token), _FIELD_VALUE (a CTL, or whitespace
 ;   at an end), _FRAMING_FIELD (an id the writer owns); ecx = 1 when a Date field is among
 ;   them. Clobbers rdx, rsi, rdi, r8-r11, xmm0-xmm5 and the flags. Keeps rbx, rbp, r12-r15.
+;   One rule set for every version's responses: a field HTTP/1.1 would refuse to send is
+;   refused in HTTP/2 too, so a handler cannot behave differently per version by accident.
 ; -----------------------------------------------------------------------------
+global ha_check_fields:function hidden
 align 16
+ha_check_fields:
 wr_check_fields:
     push    rbx
     push    r12
@@ -183,6 +189,12 @@ wr_check_fields:
     je      .framing
     cmp     r14d, WR_RESPONSE
     je      .value
+    cmp     r14d, WR_H2_RESPONSE
+    jne     .request_rules
+    cmp     eax, HA_FIELD_UPGRADE           ; connection-specific in HTTP/2 (RFC9113-8.2.2-1)
+    je      .framing
+    jmp     .value
+.request_rules:
     cmp     eax, HA_FIELD_HOST              ; requests and trailers: Host is the writer's
     je      .framing
     cmp     eax, HA_FIELD_EXPECT

@@ -120,6 +120,11 @@ HTTPASM_ERROR_HPACK_TRUNCATED       equ 30  ; the block ends inside a representa
 HTTPASM_ERROR_HPACK_HUFFMAN         equ 31  ; EOS in a string, or padding longer than 7 bits or not all ones
 HTTPASM_ERROR_HPACK_SIZE_UPDATE     equ 32  ; a table size update after a field, or above the limit
 HTTPASM_ERROR_HPACK_LIMIT           equ 33  ; httpasm_hpack_init: a limit past HTTPASM_HPACK_MAX_LIMIT, or memory too small
+; HTTP/2 malformed requests (RFC 9113 8.1.1): a stream error PROTOCOL_ERROR for that request only.
+HTTPASM_ERROR_H2_PSEUDO             equ 34  ; a pseudo-field unknown, repeated, a response's, after a regular field, or in trailers
+HTTPASM_ERROR_H2_MISSING            equ 35  ; :method, :scheme or :path (CONNECT: :authority) missing or empty
+HTTPASM_ERROR_H2_CONNECTION_FIELD   equ 36  ; Connection, Keep-Alive, Proxy-Connection, Transfer-Encoding, Upgrade; TE other than "trailers"
+HTTPASM_ERROR_H2_AUTHORITY          equ 37  ; :authority empty or with userinfo, or Host naming another authority
 
 ; -----------------------------------------------------------------------------
 ; httpasm_response: what a server answers (48 octets), for httpasm_h1_write_response. flags is

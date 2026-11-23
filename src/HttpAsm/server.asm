@@ -349,9 +349,20 @@ free_server:
     imul    rcx, r13, worker_size
     mov     edi, [r12 + rcx + worker.wake_fd]
     test    edi, edi
-    js      .next                           ; never made (a failed create)
+    js      .scratch                        ; never made (a failed create)
     mov     eax, SYS_close
     syscall
+.scratch:
+    ; The worker's HTTP/2 scratch, if it ever served HTTP/2 (free(NULL) is a no-op).
+    imul    rcx, r13, worker_size
+    mov     rdi, [r12 + rcx + worker.h2_fields]
+    call    free wrt ..plt
+    imul    rcx, r13, worker_size
+    mov     rdi, [r12 + rcx + worker.h2_space]
+    call    free wrt ..plt
+    imul    rcx, r13, worker_size
+    mov     rdi, [r12 + rcx + worker.h2_out]
+    call    free wrt ..plt
 .next:
     inc     r13d
     jmp     .worker
@@ -833,13 +844,32 @@ handle_completions:
     mov     r15, r14
     mov     r14, [r15 + completion.next]
     mov     r13, [r15 + completion.conn]
+    dec     dword [r13 + conn.deferred]     ; one answer fewer outstanding on its connection
+    cmp     qword [r15 + completion.stream], 0
+    jne     .h2
     test    dword [r13 + conn.flags], C_ZOMBIE
     jz      .live
     mov     rdi, r15                        ; its client is gone: drop the response, and the
     call    free wrt ..plt                  ; connection after this batch
+.zombie_answered:
+    cmp     dword [r13 + conn.deferred], 0
+    jne     .reversed                       ; HTTP/2: other streams' answers still to come
     dec     qword [rbx + worker.zombies]
     mov     rdi, r13
     call    ha_conn_release
+    jmp     .reversed
+.h2:
+    ; An HTTP/2 stream's answer: the worker encodes and frames it (a stream detached meanwhile
+    ; is freed and the answer dropped), then the output goes.
+    mov     rdi, r13
+    mov     rsi, r15
+    call    ha_h2_completion
+    mov     rdi, r15
+    call    free wrt ..plt
+    test    dword [r13 + conn.flags], C_ZOMBIE
+    jnz     .zombie_answered
+    mov     rdi, r13
+    call    ha_conn_drive
     jmp     .reversed
 .live:
     and     dword [r13 + conn.flags], ~C_DEFERRED
@@ -937,6 +967,14 @@ close_idle:
     jne     .skip
     test    dword [r13 + conn.flags], C_DEFERRED | C_WANT_WRITE
     jnz     .skip
+    cmp     dword [r13 + conn.deferred], 0
+    jne     .skip                           ; HTTP/2: a stream's answer is still to come
+    mov     rax, [r13 + conn.h2]
+    test    rax, rax
+    jz      .idle
+    cmp     dword [rax + h2.stream_count], 0
+    jne     .skip                           ; HTTP/2: requests in progress
+.idle:
     mov     rdi, r13
     call    ha_conn_close
 .skip:
@@ -1073,8 +1111,8 @@ worker_main:
     mov     rax, [r13 + conn.deadline]
     cmp     rax, [rbx + worker.now_ms]
     ja      .expired
-    test    dword [r13 + conn.flags], C_DEFERRED
-    jz      .expire_close
+    cmp     dword [r13 + conn.deferred], 0  ; a handler's answer is coming (HTTP/1.1 or a stream)
+    je      .expire_close
     mov     rdi, r13
     call    ha_lru_touch                    ; to the tail with a future deadline: the loop ends
     jmp     .expire                         ; at it at the latest
