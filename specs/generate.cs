@@ -523,6 +523,38 @@ internal static class Emit
             offset += name.Length + value.Length;
         }
 
+        // The entries of each known field, so an encoder finds a field's candidates with one
+        // load instead of a scan of the whole table. QPACK's entries with one name are not all
+        // adjacent (:status has two runs), so each id lists its indices rather than a range.
+        var byId = new List<int>[fields.Count + 1];
+        foreach ((int index, string name, _) in rows)
+        {
+            int id = fields.ToList().IndexOf(name) + 1;
+            (byId[id] ??= []).Add(index);
+        }
+
+        s.Append($"\n; ha_{lower}_by_id[field id] (dw): the offset of the id's indices in ha_{lower}_by_id_list << 8\n");
+        s.Append("; | how many there are (0: no entry has this name). Indices ascend.\n");
+        s.Append($"align 2\nha_{lower}_by_id:\n");
+        var list = new List<int>();
+        for (int id = 0; id <= fields.Count; id++)
+        {
+            int count = byId[id]?.Count ?? 0;
+            if (list.Count > 255)
+            {
+                throw new GenerateException($"{table}: the by-id list outgrew an 8-bit offset");
+            }
+
+            s.Append($"    dw 0x{(count == 0 ? 0 : list.Count << 8 | count):X4}    ; {id}{(id == 0 ? "" : ": " + fields[id - 1])}\n");
+            list.AddRange(byId[id] ?? []);
+        }
+
+        s.Append($"\n; ha_{lower}_by_id_list: static indices, grouped by field id.\nha_{lower}_by_id_list:\n");
+        for (int row = 0; row < list.Count; row += 16)
+        {
+            s.Append("    db ").Append(string.Join(", ", list.Skip(row).Take(16))).Append('\n');
+        }
+
         s.Append($"\nha_{lower}_text:\n");
         foreach ((_, string name, string value) in rows)
         {

@@ -193,6 +193,96 @@ ha_hpack_static:
     dw 16, 0
     db 52, 0, 0, 0    ; 61: www-authenticate: 
 
+; ha_hpack_by_id[field id] (dw): the offset of the id's indices in ha_hpack_by_id_list << 8
+; | how many there are (0: no entry has this name). Indices ascend.
+align 2
+ha_hpack_by_id:
+    dw 0x0000    ; 0
+    dw 0x0001    ; 1: :authority
+    dw 0x0102    ; 2: :method
+    dw 0x0302    ; 3: :path
+    dw 0x0502    ; 4: :scheme
+    dw 0x0707    ; 5: :status
+    dw 0x0E01    ; 6: accept-charset
+    dw 0x0F01    ; 7: accept-encoding
+    dw 0x1001    ; 8: accept-language
+    dw 0x1101    ; 9: accept-ranges
+    dw 0x1201    ; 10: accept
+    dw 0x1301    ; 11: access-control-allow-origin
+    dw 0x1401    ; 12: age
+    dw 0x1501    ; 13: allow
+    dw 0x1601    ; 14: authorization
+    dw 0x1701    ; 15: cache-control
+    dw 0x1801    ; 16: content-disposition
+    dw 0x1901    ; 17: content-encoding
+    dw 0x1A01    ; 18: content-language
+    dw 0x1B01    ; 19: content-length
+    dw 0x1C01    ; 20: content-location
+    dw 0x1D01    ; 21: content-range
+    dw 0x1E01    ; 22: content-type
+    dw 0x1F01    ; 23: cookie
+    dw 0x2001    ; 24: date
+    dw 0x2101    ; 25: etag
+    dw 0x2201    ; 26: expect
+    dw 0x2301    ; 27: expires
+    dw 0x2401    ; 28: from
+    dw 0x2501    ; 29: host
+    dw 0x2601    ; 30: if-match
+    dw 0x2701    ; 31: if-modified-since
+    dw 0x2801    ; 32: if-none-match
+    dw 0x2901    ; 33: if-range
+    dw 0x2A01    ; 34: if-unmodified-since
+    dw 0x2B01    ; 35: last-modified
+    dw 0x2C01    ; 36: link
+    dw 0x2D01    ; 37: location
+    dw 0x2E01    ; 38: max-forwards
+    dw 0x2F01    ; 39: proxy-authenticate
+    dw 0x3001    ; 40: proxy-authorization
+    dw 0x3101    ; 41: range
+    dw 0x3201    ; 42: referer
+    dw 0x3301    ; 43: refresh
+    dw 0x3401    ; 44: retry-after
+    dw 0x3501    ; 45: server
+    dw 0x3601    ; 46: set-cookie
+    dw 0x3701    ; 47: strict-transport-security
+    dw 0x3801    ; 48: transfer-encoding
+    dw 0x3901    ; 49: user-agent
+    dw 0x3A01    ; 50: vary
+    dw 0x3B01    ; 51: via
+    dw 0x3C01    ; 52: www-authenticate
+    dw 0x0000    ; 53: access-control-allow-headers
+    dw 0x0000    ; 54: x-content-type-options
+    dw 0x0000    ; 55: x-xss-protection
+    dw 0x0000    ; 56: access-control-allow-credentials
+    dw 0x0000    ; 57: access-control-allow-methods
+    dw 0x0000    ; 58: access-control-expose-headers
+    dw 0x0000    ; 59: access-control-request-headers
+    dw 0x0000    ; 60: access-control-request-method
+    dw 0x0000    ; 61: alt-svc
+    dw 0x0000    ; 62: content-security-policy
+    dw 0x0000    ; 63: early-data
+    dw 0x0000    ; 64: expect-ct
+    dw 0x0000    ; 65: forwarded
+    dw 0x0000    ; 66: origin
+    dw 0x0000    ; 67: purpose
+    dw 0x0000    ; 68: timing-allow-origin
+    dw 0x0000    ; 69: upgrade-insecure-requests
+    dw 0x0000    ; 70: x-forwarded-for
+    dw 0x0000    ; 71: x-frame-options
+    dw 0x0000    ; 72: connection
+    dw 0x0000    ; 73: keep-alive
+    dw 0x0000    ; 74: proxy-connection
+    dw 0x0000    ; 75: te
+    dw 0x0000    ; 76: trailer
+    dw 0x0000    ; 77: upgrade
+
+; ha_hpack_by_id_list: static indices, grouped by field id.
+ha_hpack_by_id_list:
+    db 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+    db 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32
+    db 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48
+    db 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61
+
 ha_hpack_text:
     db ":authority"
     db ":methodGET"

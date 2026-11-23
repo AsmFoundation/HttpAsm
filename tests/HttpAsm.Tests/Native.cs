@@ -145,6 +145,68 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_h1_write_last_chunk")]
     internal static partial long H1WriteLastChunk(byte* output, nuint capacity, HttpField* trailers, uint count);
 
+    /// <summary>size_t httpasm_hpack_size(uint32_t limit).</summary>
+    /// <param name="limit">The table's limit.</param>
+    /// <returns>The octets its memory needs; 0 past HTTPASM_HPACK_MAX_LIMIT.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_size")]
+    internal static partial nuint HpackSize(uint limit);
+
+    /// <summary>int httpasm_hpack_init(void *memory, size_t size, uint32_t limit, uint32_t flags).</summary>
+    /// <param name="memory">The table's memory.</param>
+    /// <param name="size">Its octets.</param>
+    /// <param name="limit">The limit.</param>
+    /// <param name="flags">HTTPASM_HPACK_*.</param>
+    /// <returns>0, or -HTTPASM_ERROR_HPACK_LIMIT.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_init")]
+    internal static partial int HpackInit(byte* memory, nuint size, uint limit, uint flags);
+
+    /// <summary>int64_t httpasm_hpack_decode(table, block, length, output).</summary>
+    /// <param name="table">The decoder's table.</param>
+    /// <param name="block">The header block.</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="output">Where the fields go.</param>
+    /// <returns>0, 1 when the output ran out, or -HTTPASM_ERROR_HPACK_*.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_decode")]
+    internal static partial long HpackDecode(byte* table, byte* block, nuint length, HpackOutput* output);
+
+    /// <summary>size_t httpasm_hpack_encode_bound(fields, count).</summary>
+    /// <param name="fields">The fields.</param>
+    /// <param name="count">How many.</param>
+    /// <returns>The most octets the encoding can take.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_encode_bound")]
+    internal static partial nuint HpackEncodeBound(HttpField* fields, uint count);
+
+    /// <summary>int64_t httpasm_hpack_encode(table, fields, count, out, cap).</summary>
+    /// <param name="table">The encoder's table.</param>
+    /// <param name="fields">The fields.</param>
+    /// <param name="count">How many.</param>
+    /// <param name="output">Where the block goes.</param>
+    /// <param name="cap">Its room.</param>
+    /// <returns>The block's length, or 0 when cap is below the bound.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_encode")]
+    internal static partial long HpackEncode(byte* table, HttpField* fields, uint count, byte* output, nuint cap);
+
+    /// <summary>void httpasm_hpack_encoder_limit(table, limit).</summary>
+    /// <param name="table">The encoder's table.</param>
+    /// <param name="limit">The peer's SETTINGS_HEADER_TABLE_SIZE.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_encoder_limit")]
+    internal static partial void HpackEncoderLimit(byte* table, uint limit);
+
+    /// <summary>uint32_t httpasm_hpack_table_size(table, uint32_t *max_size).</summary>
+    /// <param name="table">The table.</param>
+    /// <param name="maxSize">Receives the maximum, or null.</param>
+    /// <returns>The dynamic table's size.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_table_size")]
+    internal static partial uint HpackTableSize(byte* table, uint* maxSize);
+
+    /// <summary>int httpasm_hpack_entry(table, index, field).</summary>
+    /// <param name="table">The table.</param>
+    /// <param name="index">An HPACK index.</param>
+    /// <param name="field">Receives the entry.</param>
+    /// <returns>0, or -HTTPASM_ERROR_HPACK_INDEX.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hpack_entry")]
+    internal static partial int HpackEntry(byte* table, uint index, HttpField* field);
+
     /// <summary>httpasm_server *httpasm_server_create(options, int *error).</summary>
     /// <param name="options">The options.</param>
     /// <param name="error">Receives -errno on failure.</param>

@@ -46,6 +46,12 @@ typedef struct httpasm_field {
 } httpasm_field;
 
 #define HTTPASM_FIELD_FLAG_TRAILER 0x0001   /* the field came in a trailer section */
+/* HPACK: decoder out, the field came as a literal never indexed; encoder in, encode it so. A
+ * credential keeps this form when forwarded, so it never enters a compression context
+ * (RFC 7541 6.2.3, 7.1.3). */
+#define HTTPASM_FIELD_FLAG_NEVER_INDEXED 0x0002
+/* HPACK encoder in: do not add this field to the dynamic table (a value that will not repeat). */
+#define HTTPASM_FIELD_FLAG_NO_INDEX 0x0004
 
 /* One request's head, as every HTTP version presents it (96 octets). */
 typedef struct httpasm_request {
@@ -126,6 +132,14 @@ typedef struct httpasm_request {
 #define HTTPASM_ERROR_STATUS                25  /* a status outside 100-599, or a bad status-line */
 #define HTTPASM_ERROR_CHUNK                 26  /* malformed chunked framing */
 #define HTTPASM_ERROR_AUTHORITY             27  /* an authority with octets Host may not hold */
+/* HPACK decoding errors: in HTTP/2 each is a COMPRESSION_ERROR for the whole connection, since
+ * the decoder's table can no longer be trusted to match the peer's encoder. */
+#define HTTPASM_ERROR_HPACK_INDEX           28  /* index 0, or past both tables */
+#define HTTPASM_ERROR_HPACK_INTEGER         29  /* past 2^32-1, or more than 5 continuation octets */
+#define HTTPASM_ERROR_HPACK_TRUNCATED       30  /* the block ends inside a representation */
+#define HTTPASM_ERROR_HPACK_HUFFMAN         31  /* EOS in a string, or bad padding */
+#define HTTPASM_ERROR_HPACK_SIZE_UPDATE     32  /* a size update after a field, or above the limit */
+#define HTTPASM_ERROR_HPACK_LIMIT           33  /* httpasm_hpack_init: limit too large, or memory too small */
 
 /* What a server answers (48 octets), for httpasm_h1_write_response. flags is in and out. */
 typedef struct httpasm_response {
@@ -200,6 +214,20 @@ typedef struct httpasm_h1_limits {
     uint32_t reserved;
 } httpasm_h1_limits;
 
+/* Where httpasm_hpack_decode puts a header block's fields (48 octets). Names and values from
+ * HPACK's static table point at the library's constant text; all others are copied into space,
+ * so the records stay valid however the dynamic table changes afterwards. */
+typedef struct httpasm_hpack_output {
+    httpasm_field *fields;      /* the caller's array */
+    uint8_t *space;             /* decoded names and values go here */
+    size_t space_size;
+    size_t space_used;          /* out */
+    uint64_t list_size;         /* out: RFC 9113 6.5.2's header list size (name + value + 32 per
+                                   field), over every field, those that did not fit included */
+    uint32_t max_fields;
+    uint32_t count;             /* out: records written */
+} httpasm_hpack_output;
+
 /* ------------------------------------------------------------------------------------------
  * The library
  * ------------------------------------------------------------------------------------------ */
@@ -211,7 +239,7 @@ uint32_t httpasm_abi_version(void);
 
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
- * 6 httpasm_h1_chunked, 7 httpasm_server_options; 0 for any other value. */
+ * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -304,6 +332,57 @@ int64_t httpasm_h1_write_chunk(uint8_t *out, size_t cap, const uint8_t *data, si
  * small, or -HTTPASM_ERROR_* for a trailer field that is invalid or not allowed in trailers. */
 int64_t httpasm_h1_write_last_chunk(uint8_t *out, size_t cap, const httpasm_field *trailers,
                                     uint32_t count);
+
+/* ------------------------------------------------------------------------------------------
+ * HPACK (RFC 7541): HTTP/2's field compression. A table is one block of caller memory; an
+ * HTTP/2 connection keeps two, the decoder's and the encoder's. Nothing here checks HTTP/2's
+ * own field rules (lower-case names, pseudo-fields): the HTTP/2 layer does.
+ * ------------------------------------------------------------------------------------------ */
+
+typedef struct httpasm_hpack httpasm_hpack;     /* opaque */
+
+#define HTTPASM_HPACK_HUFFMAN   0x0001          /* encoder: Huffman-code strings unless longer */
+/* encoder: also index the fields that rarely repeat (:path, content-length, location,
+ * set-cookie, ...), for traffic whose values do repeat, such as RPC calls to a few paths.
+ * Credentials and NO_INDEX fields stay out regardless. */
+#define HTTPASM_HPACK_INDEX_ALL 0x0002
+#define HTTPASM_HPACK_MAX_LIMIT 0x1000000       /* the largest limit httpasm_hpack_init takes */
+
+/* The octets a table with this limit needs; 0 past HTTPASM_HPACK_MAX_LIMIT. 9344 for 4096. */
+size_t httpasm_hpack_size(uint32_t limit);
+
+/* Makes memory an empty table. Decoder: limit is the SETTINGS_HEADER_TABLE_SIZE this side
+ * advertises (size updates above it are errors). Encoder: limit is the most this side uses;
+ * the peer's setting caps it (httpasm_hpack_encoder_limit). The table starts at 4096 octets, or
+ * at limit when smaller. 0, or -HTTPASM_ERROR_HPACK_LIMIT. */
+int httpasm_hpack_init(void *memory, size_t size, uint32_t limit, uint32_t flags);
+
+/* Decodes one complete header block into output. 0: every field was written. 1: the block was
+ * decoded (the table is in step) but fields or space ran out; the first records are written
+ * and list_size counts all: refuse the request, keep the connection. -HTTPASM_ERROR_HPACK_*:
+ * malformed; the table must not be used again (HTTP/2: COMPRESSION_ERROR). */
+int64_t httpasm_hpack_decode(httpasm_hpack *table, const uint8_t *block, size_t length,
+                             httpasm_hpack_output *output);
+
+/* The most octets httpasm_hpack_encode may write for these fields. */
+size_t httpasm_hpack_encode_bound(const httpasm_field *fields, uint32_t count);
+
+/* Encodes the fields as one header block. The length, or 0 when cap is below
+ * httpasm_hpack_encode_bound (nothing written, the table unchanged). Credentials and fields
+ * flagged NEVER_INDEXED use the never-indexed literal; NO_INDEX keeps a field out of the table. */
+int64_t httpasm_hpack_encode(httpasm_hpack *table, const httpasm_field *fields, uint32_t count,
+                             uint8_t *out, size_t cap);
+
+/* The peer's SETTINGS_HEADER_TABLE_SIZE, for an encoder's table: applied now, signalled at the
+ * start of the next block (the smallest maximum since the last block first). */
+void httpasm_hpack_encoder_limit(httpasm_hpack *table, uint32_t limit);
+
+/* The dynamic table's size (RFC 7541 4.1), and its maximum in *max_size (may be NULL). */
+uint32_t httpasm_hpack_table_size(const httpasm_hpack *table, uint32_t *max_size);
+
+/* The entry at an HPACK index (1-61 static, 62 on dynamic, newest first) into *field; valid
+ * until the table changes. 0, or -HTTPASM_ERROR_HPACK_INDEX. */
+int httpasm_hpack_entry(const httpasm_hpack *table, uint32_t index, httpasm_field *field);
 
 /* ------------------------------------------------------------------------------------------
  * The server (Linux): one worker thread per core, each with its own listening socket

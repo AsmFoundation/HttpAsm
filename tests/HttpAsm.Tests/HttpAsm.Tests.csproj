@@ -37,6 +37,8 @@
     <!-- The registry travels with the tests, so a container that only has the output folder
          (tests/run-linux.sh) can check every [Requirement] id against it. -->
     <None Include="../../specs/requirements.tsv" Link="specs/requirements.tsv" CopyToOutputDirectory="PreserveNewest" />
+    <!-- RFC 7541 itself: the HPACK tests read Appendix C's examples from the pinned file. -->
+    <None Include="../../specs/rfc/rfc7541.txt" Link="specs/rfc/rfc7541.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

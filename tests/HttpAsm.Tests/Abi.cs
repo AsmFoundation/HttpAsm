@@ -215,6 +215,32 @@ internal struct ChunkedState
     public uint Reserved;
 }
 
+/// <summary>httpasm_hpack_output (httpasm.h): 48 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct HpackOutput
+{
+    /// <summary>The records.</summary>
+    public HttpField* Fields;
+
+    /// <summary>Where decoded names and values go.</summary>
+    public byte* Space;
+
+    /// <summary>Its octets.</summary>
+    public nuint SpaceSize;
+
+    /// <summary>Out: octets of space written.</summary>
+    public nuint SpaceUsed;
+
+    /// <summary>Out: the header list's size (RFC 9113 6.5.2).</summary>
+    public ulong ListSize;
+
+    /// <summary>The records' room.</summary>
+    public uint MaxFields;
+
+    /// <summary>Out: records written.</summary>
+    public uint Count;
+}
+
 /// <summary>httpasm_server_options (httpasm.h): 64 octets; zero fields take their defaults.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct ServerOptions
@@ -291,6 +317,18 @@ internal static class Abi
 
     /// <summary>HTTPASM_FIELD_FLAG_TRAILER.</summary>
     public const int FieldTrailer = 0x0001;
+
+    /// <summary>HTTPASM_FIELD_FLAG_NEVER_INDEXED.</summary>
+    public const int FieldNeverIndexed = 0x0002;
+
+    /// <summary>HTTPASM_FIELD_FLAG_NO_INDEX.</summary>
+    public const int FieldNoIndex = 0x0004;
+
+    /// <summary>HTTPASM_HPACK_HUFFMAN.</summary>
+    public const uint HpackHuffman = 0x0001;
+
+    /// <summary>HTTPASM_HPACK_INDEX_ALL.</summary>
+    public const uint HpackIndexAll = 0x0002;
 
     /// <summary>HTTPASM_REQUEST_KEEP_ALIVE.</summary>
     public const uint RequestKeepAlive = 0x0001;
@@ -422,4 +460,22 @@ public enum ParseError
 
     /// <summary>An authority with octets Host may not hold.</summary>
     Authority = 27,
+
+    /// <summary>HPACK: index 0, or past both tables.</summary>
+    HpackIndex = 28,
+
+    /// <summary>HPACK: an integer past 2^32-1 or 5 continuation octets.</summary>
+    HpackInteger = 29,
+
+    /// <summary>HPACK: the block ends inside a representation.</summary>
+    HpackTruncated = 30,
+
+    /// <summary>HPACK: EOS in a string, or bad padding.</summary>
+    HpackHuffman = 31,
+
+    /// <summary>HPACK: a size update after a field, or above the limit.</summary>
+    HpackSizeUpdate = 32,
+
+    /// <summary>HPACK: a limit too large, or memory too small.</summary>
+    HpackLimit = 33,
 }

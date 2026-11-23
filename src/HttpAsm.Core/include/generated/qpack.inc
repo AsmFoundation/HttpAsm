@@ -307,6 +307,99 @@ ha_qpack_static:
     dw 15, 10
     db 71, 0, 0, 0    ; 98: x-frame-options: sameorigin
 
+; ha_qpack_by_id[field id] (dw): the offset of the id's indices in ha_qpack_by_id_list << 8
+; | how many there are (0: no entry has this name). Indices ascend.
+align 2
+ha_qpack_by_id:
+    dw 0x0000    ; 0
+    dw 0x0001    ; 1: :authority
+    dw 0x0107    ; 2: :method
+    dw 0x0801    ; 3: :path
+    dw 0x0902    ; 4: :scheme
+    dw 0x0B0E    ; 5: :status
+    dw 0x0000    ; 6: accept-charset
+    dw 0x1901    ; 7: accept-encoding
+    dw 0x1A01    ; 8: accept-language
+    dw 0x1B01    ; 9: accept-ranges
+    dw 0x1C02    ; 10: accept
+    dw 0x1E01    ; 11: access-control-allow-origin
+    dw 0x1F01    ; 12: age
+    dw 0x0000    ; 13: allow
+    dw 0x2001    ; 14: authorization
+    dw 0x2106    ; 15: cache-control
+    dw 0x2701    ; 16: content-disposition
+    dw 0x2802    ; 17: content-encoding
+    dw 0x0000    ; 18: content-language
+    dw 0x2A01    ; 19: content-length
+    dw 0x0000    ; 20: content-location
+    dw 0x0000    ; 21: content-range
+    dw 0x2B0B    ; 22: content-type
+    dw 0x3601    ; 23: cookie
+    dw 0x3701    ; 24: date
+    dw 0x3801    ; 25: etag
+    dw 0x0000    ; 26: expect
+    dw 0x0000    ; 27: expires
+    dw 0x0000    ; 28: from
+    dw 0x0000    ; 29: host
+    dw 0x0000    ; 30: if-match
+    dw 0x3901    ; 31: if-modified-since
+    dw 0x3A01    ; 32: if-none-match
+    dw 0x3B01    ; 33: if-range
+    dw 0x0000    ; 34: if-unmodified-since
+    dw 0x3C01    ; 35: last-modified
+    dw 0x3D01    ; 36: link
+    dw 0x3E01    ; 37: location
+    dw 0x0000    ; 38: max-forwards
+    dw 0x0000    ; 39: proxy-authenticate
+    dw 0x0000    ; 40: proxy-authorization
+    dw 0x3F01    ; 41: range
+    dw 0x4001    ; 42: referer
+    dw 0x0000    ; 43: refresh
+    dw 0x0000    ; 44: retry-after
+    dw 0x4101    ; 45: server
+    dw 0x4201    ; 46: set-cookie
+    dw 0x4303    ; 47: strict-transport-security
+    dw 0x0000    ; 48: transfer-encoding
+    dw 0x4601    ; 49: user-agent
+    dw 0x4702    ; 50: vary
+    dw 0x0000    ; 51: via
+    dw 0x0000    ; 52: www-authenticate
+    dw 0x4903    ; 53: access-control-allow-headers
+    dw 0x4C01    ; 54: x-content-type-options
+    dw 0x4D01    ; 55: x-xss-protection
+    dw 0x4E02    ; 56: access-control-allow-credentials
+    dw 0x5003    ; 57: access-control-allow-methods
+    dw 0x5301    ; 58: access-control-expose-headers
+    dw 0x5401    ; 59: access-control-request-headers
+    dw 0x5502    ; 60: access-control-request-method
+    dw 0x5701    ; 61: alt-svc
+    dw 0x5801    ; 62: content-security-policy
+    dw 0x5901    ; 63: early-data
+    dw 0x5A01    ; 64: expect-ct
+    dw 0x5B01    ; 65: forwarded
+    dw 0x5C01    ; 66: origin
+    dw 0x5D01    ; 67: purpose
+    dw 0x5E01    ; 68: timing-allow-origin
+    dw 0x5F01    ; 69: upgrade-insecure-requests
+    dw 0x6001    ; 70: x-forwarded-for
+    dw 0x6102    ; 71: x-frame-options
+    dw 0x0000    ; 72: connection
+    dw 0x0000    ; 73: keep-alive
+    dw 0x0000    ; 74: proxy-connection
+    dw 0x0000    ; 75: te
+    dw 0x0000    ; 76: trailer
+    dw 0x0000    ; 77: upgrade
+
+; ha_qpack_by_id_list: static indices, grouped by field id.
+ha_qpack_by_id_list:
+    db 0, 15, 16, 17, 18, 19, 20, 21, 1, 22, 23, 24, 25, 26, 27, 28
+    db 63, 64, 65, 66, 67, 68, 69, 70, 71, 31, 72, 32, 29, 30, 35, 2
+    db 84, 36, 37, 38, 39, 40, 41, 3, 42, 43, 4, 44, 45, 46, 47, 48
+    db 49, 50, 51, 52, 53, 54, 5, 6, 7, 8, 9, 89, 10, 11, 12, 55
+    db 13, 92, 14, 56, 57, 58, 95, 59, 60, 33, 34, 75, 61, 62, 73, 74
+    db 76, 77, 78, 79, 80, 81, 82, 83, 85, 86, 87, 88, 90, 91, 93, 94
+    db 96, 97, 98
+
 ha_qpack_text:
     db ":authority"
     db ":path/"

@@ -23,6 +23,13 @@ struc httpasm_field
 endstruc
 
 HTTPASM_FIELD_FLAG_TRAILER      equ 0x0001  ; the field came in a trailer section
+; HPACK (and QPACK): decoder out, the field came as a literal never indexed; encoder in, encode it
+; so. A sensitive field (a credential) must keep this representation when it is forwarded
+; (RFC 7541 6.2.3, 7.1.3), so it never reaches any compression context.
+HTTPASM_FIELD_FLAG_NEVER_INDEXED equ 0x0002
+; HPACK (and QPACK) encoder in: do not add the field to the dynamic table (a value unlikely to
+; repeat, which would only push useful entries out).
+HTTPASM_FIELD_FLAG_NO_INDEX     equ 0x0004
 
 ; -----------------------------------------------------------------------------
 ; httpasm_request: one request's head, as every HTTP version presents it (96 octets).
@@ -105,6 +112,14 @@ HTTPASM_ERROR_FRAMING_FIELD         equ 24  ; a writer was given a field it owns
 HTTPASM_ERROR_STATUS                equ 25  ; a status code outside 100-599, or a malformed status-line
 HTTPASM_ERROR_CHUNK                 equ 26  ; malformed chunked framing
 HTTPASM_ERROR_AUTHORITY             equ 27  ; a writer was given an authority with octets a Host may not hold
+; HPACK decoding errors (RFC 7541): each is a COMPRESSION_ERROR for the whole HTTP/2 connection,
+; because the decoder's dynamic table can no longer be trusted to match the peer's encoder.
+HTTPASM_ERROR_HPACK_INDEX           equ 28  ; index 0, or past the static and dynamic tables
+HTTPASM_ERROR_HPACK_INTEGER         equ 29  ; an integer past 2^32-1, or with more than 5 continuation octets
+HTTPASM_ERROR_HPACK_TRUNCATED       equ 30  ; the block ends inside a representation
+HTTPASM_ERROR_HPACK_HUFFMAN         equ 31  ; EOS in a string, or padding longer than 7 bits or not all ones
+HTTPASM_ERROR_HPACK_SIZE_UPDATE     equ 32  ; a table size update after a field, or above the limit
+HTTPASM_ERROR_HPACK_LIMIT           equ 33  ; httpasm_hpack_init: a limit past HTTPASM_HPACK_MAX_LIMIT, or memory too small
 
 ; -----------------------------------------------------------------------------
 ; httpasm_response: what a server answers (48 octets), for httpasm_h1_write_response. flags is
@@ -193,5 +208,32 @@ endstruc
 HA_H1_DEFAULT_MAX_HEAD          equ 65536
 HA_H1_DEFAULT_MAX_TARGET        equ 8192
 HA_H1_DEFAULT_MAX_FIELDS        equ 128
+
+; -----------------------------------------------------------------------------
+; httpasm_hpack_output: where httpasm_hpack_decode puts one header block's fields (48 octets).
+; Strings from the static table point at the library's constant text; every other name and
+; value is copied into space, so the fields stay valid however the dynamic table changes
+; afterwards (a later field of the same block may evict the entry an earlier one came from).
+; -----------------------------------------------------------------------------
+struc httpasm_hpack_output
+    .fields:        resq 1      ; httpasm_field *: the caller's array
+    .space:         resq 1      ; uint8_t *: the decoded names and values go here
+    .space_size:    resq 1      ; its octets
+    .space_used:    resq 1      ; out: octets of space written
+    .list_size:     resq 1      ; out: the header list's size, RFC 9113 6.5.2 (sum of name +
+                                ; value + 32 over every field, those that did not fit included)
+    .max_fields:    resd 1      ; the fields array's records
+    .count:         resd 1      ; out: records written
+endstruc
+
+; httpasm_hpack_init's flags
+HTTPASM_HPACK_HUFFMAN           equ 0x0001  ; encoder: Huffman-code a string unless that is longer
+; encoder: index every literal that fits 3/4 of the table, the fields that rarely repeat too
+; (:path, content-length, location, set-cookie, ...): for traffic whose values do repeat, such
+; as RPC calls to the same few paths. Credentials and NO_INDEX fields stay out regardless.
+HTTPASM_HPACK_INDEX_ALL         equ 0x0002
+
+HTTPASM_HPACK_MAX_LIMIT         equ 0x1000000   ; the largest table limit (16 MiB) httpasm_hpack_init takes
+HA_HPACK_INITIAL_SIZE           equ 4096        ; SETTINGS_HEADER_TABLE_SIZE's initial value (RFC 9113 6.5.2)
 
 %endif
