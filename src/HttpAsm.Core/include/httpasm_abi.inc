@@ -1,0 +1,119 @@
+; =============================================================================
+; httpasm_abi.inc - the C ABI's structures and constants, for NASM: the same layouts as
+; src/HttpAsm/include/httpasm.h, offset for offset. A change here is a change there, and in the
+; tests' copies (tests/HttpAsm.Tests/Native.cs), which check every size.
+; =============================================================================
+%ifndef HTTPASM_ABI_INC
+%define HTTPASM_ABI_INC
+
+%include "generated/field_ids.inc"
+
+; -----------------------------------------------------------------------------
+; httpasm_field: one field line (32 octets). name and value point into memory the caller owns
+; (the received head, or a decoder's buffer); neither is NUL-terminated.
+; -----------------------------------------------------------------------------
+struc httpasm_field
+    .name:          resq 1      ; const uint8_t *
+    .value:         resq 1      ; const uint8_t *
+    .name_length:   resd 1      ; uint32_t
+    .value_length:  resd 1      ; uint32_t
+    .id:            resw 1      ; uint16_t: HTTPASM_FIELD_*, 0 when not a known field
+    .flags:         resw 1      ; uint16_t: HTTPASM_FIELD_FLAG_*
+    .reserved:      resd 1
+endstruc
+
+HTTPASM_FIELD_FLAG_TRAILER      equ 0x0001  ; the field came in a trailer section
+
+; -----------------------------------------------------------------------------
+; httpasm_request: one request's head, as every HTTP version presents it (96 octets).
+; -----------------------------------------------------------------------------
+struc httpasm_request
+    .method:            resq 1  ; const uint8_t *: the method token
+    .target:            resq 1  ; const uint8_t *: the request-target (HTTP/1.1) or :path (HTTP/2)
+    .authority:         resq 1  ; const uint8_t *: the authority, or NULL (see httpasm.h)
+    .scheme:            resq 1  ; const uint8_t *: the scheme, or NULL
+    .fields:            resq 1  ; httpasm_field *: the caller's array, filled from index 0
+    .content_length:    resq 1  ; uint64_t: with HTTPASM_REQUEST_CONTENT_LENGTH
+    .method_length:     resd 1
+    .target_length:     resd 1
+    .authority_length:  resd 1
+    .scheme_length:     resd 1
+    .field_count:       resd 1
+    .flags:             resd 1  ; HTTPASM_REQUEST_*
+    .head_length:       resd 1  ; HTTP/1.x: the head's octets, leading empty lines included
+    .method_id:         resw 1  ; HTTPASM_METHOD_*, 0 for any other method
+    .version:           resb 1  ; 10 = HTTP/1.0, 11 = HTTP/1.1, 20 = HTTP/2
+    .target_form:       resb 1  ; HTTPASM_TARGET_*
+    .error:             resw 1  ; HTTPASM_ERROR_* when parsing failed, else 0
+    .reserved0:         resw 1
+    .reserved1:         resd 1
+    .reserved2:         resq 1
+endstruc
+
+; httpasm_request.flags
+HTTPASM_REQUEST_KEEP_ALIVE      equ 0x0001  ; the connection persists after the response (RFC 9112 9.3)
+HTTPASM_REQUEST_CONTENT_LENGTH  equ 0x0002  ; content_length holds the body's length
+HTTPASM_REQUEST_CHUNKED         equ 0x0004  ; the body is chunked (RFC 9112 7.1)
+HTTPASM_REQUEST_EXPECT_CONTINUE equ 0x0008  ; Expect: 100-continue (RFC 9110 10.1.1)
+HTTPASM_REQUEST_HOST            equ 0x0010  ; a Host field was present
+HTTPASM_REQUEST_TE_TRAILERS     equ 0x0020  ; TE lists "trailers": the client accepts trailer fields
+HTTPASM_REQUEST_UPGRADE         equ 0x0040  ; an Upgrade field was present (HttpAsm does not switch)
+HTTPASM_REQUEST_CLOSE           equ 0x0080  ; Connection: close was present
+
+; httpasm_request.method_id: the methods of RFC 9110 section 9.3, and PATCH (RFC 5789)
+HTTPASM_METHOD_GET              equ 1
+HTTPASM_METHOD_HEAD             equ 2
+HTTPASM_METHOD_POST             equ 3
+HTTPASM_METHOD_PUT              equ 4
+HTTPASM_METHOD_DELETE           equ 5
+HTTPASM_METHOD_CONNECT          equ 6
+HTTPASM_METHOD_OPTIONS          equ 7
+HTTPASM_METHOD_TRACE            equ 8
+HTTPASM_METHOD_PATCH            equ 9
+
+; httpasm_request.target_form (RFC 9112 section 3.2)
+HTTPASM_TARGET_ORIGIN           equ 1       ; "/path?query"
+HTTPASM_TARGET_ABSOLUTE         equ 2       ; "http://host/path"
+HTTPASM_TARGET_AUTHORITY        equ 3       ; "host:port", CONNECT only
+HTTPASM_TARGET_ASTERISK         equ 4       ; "*", OPTIONS only
+
+; httpasm_request.error: why a head was refused (the tests name each one)
+HTTPASM_ERROR_BARE_LF               equ 1   ; a line ended in LF without CR
+HTTPASM_ERROR_METHOD                equ 2   ; the method is not a token
+HTTPASM_ERROR_REQUEST_LINE          equ 3   ; the request-line's elements are not separated by single SPs
+HTTPASM_ERROR_TARGET                equ 4   ; the request-target holds an octet or escape a URI may not
+HTTPASM_ERROR_TARGET_TOO_LONG       equ 5   ; longer than the limit: 414
+HTTPASM_ERROR_TARGET_FORM           equ 6   ; the target's form does not suit the method
+HTTPASM_ERROR_VERSION               equ 7   ; not HTTP-version's grammar
+HTTPASM_ERROR_VERSION_UNSUPPORTED   equ 8   ; a major version other than 1: 505
+HTTPASM_ERROR_OBS_FOLD              equ 9   ; a line starts with whitespace (obsolete line folding)
+HTTPASM_ERROR_FIELD_NAME            equ 10  ; a field name is empty or not a token
+HTTPASM_ERROR_WHITESPACE_BEFORE_COLON equ 11 ; whitespace between a field name and its colon
+HTTPASM_ERROR_FIELD_VALUE           equ 12  ; a field value holds a control character
+HTTPASM_ERROR_HEAD_TOO_LARGE        equ 13  ; the head exceeds the limit: 431
+HTTPASM_ERROR_TOO_MANY_FIELDS       equ 14  ; more field lines than the fields array holds: 431
+HTTPASM_ERROR_HOST_MISSING          equ 15  ; an HTTP/1.1 request without Host
+HTTPASM_ERROR_HOST_DUPLICATE        equ 16  ; more than one Host line
+HTTPASM_ERROR_HOST_INVALID          equ 17  ; Host is not uri-host [ ":" port ]
+HTTPASM_ERROR_CONTENT_LENGTH        equ 18  ; Content-Length is not 1*DIGIT, or its values differ
+HTTPASM_ERROR_TE_AND_CL             equ 19  ; both Transfer-Encoding and Content-Length
+HTTPASM_ERROR_TE_HTTP10             equ 20  ; Transfer-Encoding in an HTTP/1.0 message
+HTTPASM_ERROR_TE_NOT_CHUNKED        equ 21  ; chunked is missing or not the final coding
+HTTPASM_ERROR_TE_UNKNOWN            equ 22  ; a transfer coding HttpAsm does not implement: 501
+HTTPASM_ERROR_EXPECT                equ 23  ; an expectation other than 100-continue: 417
+
+; -----------------------------------------------------------------------------
+; httpasm_h1_limits: what one head may take (16 octets). Zero fields take the defaults.
+; -----------------------------------------------------------------------------
+struc httpasm_h1_limits
+    .max_head:      resd 1      ; octets of the whole head; default 65536 (431 beyond)
+    .max_target:    resd 1      ; octets of the request-target; default 8192 (414 beyond)
+    .max_fields:    resd 1      ; field lines; the fields array must hold this many; default 128
+    .reserved:      resd 1
+endstruc
+
+HA_H1_DEFAULT_MAX_HEAD          equ 65536
+HA_H1_DEFAULT_MAX_TARGET        equ 8192
+HA_H1_DEFAULT_MAX_FIELDS        equ 128
+
+%endif

@@ -44,7 +44,38 @@ ha_char_class:
     %if (bits & (HA_CC_DIGIT | HA_CC_ALPHA)) || c == 0x21 || (c >= 0x23 && c <= 0x27) || c == 0x2A || c == 0x2B || c == 0x2D || c == 0x2E || c == 0x5E || c == 0x5F || c == 0x60 || c == 0x7C || c == 0x7E
         %assign bits bits | HA_CC_TCHAR
     %endif
+    ; RFC 3986: unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"; sub-delims = "!" / "$" /
+    ; "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="; pchar adds ":" "@"; path and query
+    ; add "/" "?"; pct-encoded starts with "%"; IP-literal uses "[" "]". In hex:
+    ; -=2D .=2E _=5F ~=7E !=21 $=24 &=26 '=27 (=28 )=29 *=2A +=2B ,=2C ;=3B ==3D :=3A @=40
+    ; /=2F ?=3F %=25 [=5B ]=5D
+    %if (bits & (HA_CC_DIGIT | HA_CC_ALPHA)) || c == 0x2D || c == 0x2E || c == 0x5F || c == 0x7E || c == 0x21 || c == 0x24 || (c >= 0x26 && c <= 0x2C) || c == 0x3B || c == 0x3D || c == 0x3A || c == 0x40 || c == 0x2F || c == 0x3F || c == 0x25 || c == 0x5B || c == 0x5D
+        %assign bits bits | HA_CC_TARGET
+    %endif
     db      bits
+    %assign c c + 1
+%endrep
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_hex_value: 256 bytes; an octet's value as HEXDIG (RFC 5234 B.1: DIGIT / "A"-"F", and the
+; lower-case letters, since ABNF strings are case-insensitive), 0xFF otherwise. Chunk sizes
+; (RFC 9112 7.1) and percent-encodings (RFC 3986 2.1) are read through it.
+; -----------------------------------------------------------------------------
+align 64
+global ha_hex_value:data hidden (ha_hex_value.end - ha_hex_value)
+ha_hex_value:
+%assign c 0
+%rep 256
+    %if c >= 0x30 && c <= 0x39
+        db  c - 0x30
+    %elif c >= 0x41 && c <= 0x46
+        db  c - 0x41 + 10
+    %elif c >= 0x61 && c <= 0x66
+        db  c - 0x61 + 10
+    %else
+        db  0xFF
+    %endif
     %assign c c + 1
 %endrep
 .end:
@@ -62,4 +93,7 @@ ha_x16_09:  times 16 db 0x09        ; HTAB
 .end:
 global ha_x16_7f:data hidden (ha_x16_7f.end - ha_x16_7f)
 ha_x16_7f:  times 16 db 0x7F        ; DEL
+.end:
+global ha_x16_0a:data hidden (ha_x16_0a.end - ha_x16_0a)
+ha_x16_0a:  times 16 db 0x0A        ; LF
 .end:

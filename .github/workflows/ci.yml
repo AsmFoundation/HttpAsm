@@ -4,7 +4,9 @@
 # What runs, in one job on Linux x64 (the only platform for now):
 #   1. The registry: specs/specs.cs extract --check. The pinned RFC files must match their
 #      SHA-256, and specs/requirements.tsv must be exactly what they produce, so the registry
-#      the tests name can never drift from the official documents.
+#      the tests name can never drift from the official documents. Then specs/generate.cs
+#      --check: the tables generated from those files (HPACK, QPACK, Huffman, the known
+#      fields' perfect hash) must match the committed ones.
 #   2. dotnet build HttpAsm.slnx -c Release: the core, libhttpasm.so and the tests.
 #      AsmFoundation.Sdk's bundled toolchain (NASM, lld, from nuget.org) assembles and links on
 #      this runner, as it does on Windows and macOS.
@@ -54,6 +56,9 @@ jobs:
 
       - name: Registry matches the pinned official documents
         run: dotnet run specs/specs.cs -- extract --check
+
+      - name: Generated tables match the pinned official documents
+        run: dotnet run specs/generate.cs -- --check
 
       - name: Build (core, libhttpasm.so, tests)
         run: dotnet build HttpAsm.slnx -c Release

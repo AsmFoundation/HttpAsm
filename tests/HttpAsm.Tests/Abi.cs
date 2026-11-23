@@ -1,0 +1,234 @@
+using System.Runtime.InteropServices;
+
+namespace HttpAsm.Tests;
+
+/// <summary>httpasm_field (httpasm.h): one field line, 32 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct HttpField
+{
+    /// <summary>The name, in the caller's buffer.</summary>
+    public byte* Name;
+
+    /// <summary>The value, in the caller's buffer.</summary>
+    public byte* Value;
+
+    /// <summary>The name's length.</summary>
+    public uint NameLength;
+
+    /// <summary>The value's length.</summary>
+    public uint ValueLength;
+
+    /// <summary>HTTPASM_FIELD_* id, 0 when not a known field.</summary>
+    public ushort Id;
+
+    /// <summary>HTTPASM_FIELD_FLAG_*.</summary>
+    public ushort Flags;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
+/// <summary>httpasm_request (httpasm.h): one request's head, 96 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct HttpRequest
+{
+    /// <summary>The method token.</summary>
+    public byte* Method;
+
+    /// <summary>The request-target.</summary>
+    public byte* Target;
+
+    /// <summary>The authority, or null.</summary>
+    public byte* Authority;
+
+    /// <summary>The scheme, or null.</summary>
+    public byte* Scheme;
+
+    /// <summary>The caller's field array.</summary>
+    public HttpField* Fields;
+
+    /// <summary>The body's length, with <see cref="Abi.RequestContentLength"/>.</summary>
+    public ulong ContentLength;
+
+    /// <summary>The method's length.</summary>
+    public uint MethodLength;
+
+    /// <summary>The target's length.</summary>
+    public uint TargetLength;
+
+    /// <summary>The authority's length.</summary>
+    public uint AuthorityLength;
+
+    /// <summary>The scheme's length.</summary>
+    public uint SchemeLength;
+
+    /// <summary>Field records written.</summary>
+    public uint FieldCount;
+
+    /// <summary>HTTPASM_REQUEST_*.</summary>
+    public uint Flags;
+
+    /// <summary>The head's octets (HTTP/1.x).</summary>
+    public uint HeadLength;
+
+    /// <summary>HTTPASM_METHOD_*.</summary>
+    public ushort MethodId;
+
+    /// <summary>10, 11 or 20.</summary>
+    public byte Version;
+
+    /// <summary>HTTPASM_TARGET_*.</summary>
+    public byte TargetForm;
+
+    /// <summary>HTTPASM_ERROR_* after a refusal.</summary>
+    public ushort Error;
+
+    /// <summary>Unused.</summary>
+    public ushort Reserved0;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved1;
+
+    /// <summary>Unused.</summary>
+    public ulong Reserved2;
+}
+
+/// <summary>httpasm_h1_limits (httpasm.h): 16 octets; zero fields take the defaults.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct H1Limits
+{
+    /// <summary>The head's octets.</summary>
+    public uint MaxHead;
+
+    /// <summary>The request-target's octets.</summary>
+    public uint MaxTarget;
+
+    /// <summary>Field lines.</summary>
+    public uint MaxFields;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
+/// <summary>The constants of httpasm.h that the tests use.</summary>
+internal static class Abi
+{
+    /// <summary>HTTPASM_REQUEST_KEEP_ALIVE.</summary>
+    public const uint RequestKeepAlive = 0x0001;
+
+    /// <summary>HTTPASM_REQUEST_CONTENT_LENGTH.</summary>
+    public const uint RequestContentLength = 0x0002;
+
+    /// <summary>HTTPASM_REQUEST_CHUNKED.</summary>
+    public const uint RequestChunked = 0x0004;
+
+    /// <summary>HTTPASM_REQUEST_EXPECT_CONTINUE.</summary>
+    public const uint RequestExpectContinue = 0x0008;
+
+    /// <summary>HTTPASM_REQUEST_HOST.</summary>
+    public const uint RequestHost = 0x0010;
+
+    /// <summary>HTTPASM_REQUEST_TE_TRAILERS.</summary>
+    public const uint RequestTeTrailers = 0x0020;
+
+    /// <summary>HTTPASM_REQUEST_UPGRADE.</summary>
+    public const uint RequestUpgrade = 0x0040;
+
+    /// <summary>HTTPASM_REQUEST_CLOSE.</summary>
+    public const uint RequestClose = 0x0080;
+
+    /// <summary>The HTTPASM_METHOD_* ids, by method.</summary>
+    public static readonly IReadOnlyDictionary<string, int> Methods = new Dictionary<string, int>
+    {
+        ["GET"] = 1, ["HEAD"] = 2, ["POST"] = 3, ["PUT"] = 4, ["DELETE"] = 5, ["CONNECT"] = 6,
+        ["OPTIONS"] = 7, ["TRACE"] = 8, ["PATCH"] = 9,
+    };
+
+    /// <summary>HTTPASM_TARGET_ORIGIN.</summary>
+    public const int TargetOrigin = 1;
+
+    /// <summary>HTTPASM_TARGET_ABSOLUTE.</summary>
+    public const int TargetAbsolute = 2;
+
+    /// <summary>HTTPASM_TARGET_AUTHORITY.</summary>
+    public const int TargetAuthority = 3;
+
+    /// <summary>HTTPASM_TARGET_ASTERISK.</summary>
+    public const int TargetAsterisk = 4;
+}
+
+/// <summary>httpasm.h's HTTPASM_ERROR_* values (public: theory tests take them as parameters).</summary>
+public enum ParseError
+{
+    /// <summary>No error.</summary>
+    None = 0,
+
+    /// <summary>A line ended in LF without CR.</summary>
+    BareLf = 1,
+
+    /// <summary>The method is not a token.</summary>
+    Method = 2,
+
+    /// <summary>Not single-SP-separated elements.</summary>
+    RequestLine = 3,
+
+    /// <summary>An octet or escape a URI may not hold.</summary>
+    Target = 4,
+
+    /// <summary>414.</summary>
+    TargetTooLong = 5,
+
+    /// <summary>The target's form does not suit the method.</summary>
+    TargetForm = 6,
+
+    /// <summary>Not HTTP-version's grammar.</summary>
+    Version = 7,
+
+    /// <summary>505.</summary>
+    VersionUnsupported = 8,
+
+    /// <summary>A line starts with whitespace.</summary>
+    ObsFold = 9,
+
+    /// <summary>A field name is empty or not a token.</summary>
+    FieldName = 10,
+
+    /// <summary>Whitespace between a field name and its colon.</summary>
+    WhitespaceBeforeColon = 11,
+
+    /// <summary>A control character in a field value.</summary>
+    FieldValue = 12,
+
+    /// <summary>431.</summary>
+    HeadTooLarge = 13,
+
+    /// <summary>431.</summary>
+    TooManyFields = 14,
+
+    /// <summary>An HTTP/1.1 request without Host.</summary>
+    HostMissing = 15,
+
+    /// <summary>Two Host lines.</summary>
+    HostDuplicate = 16,
+
+    /// <summary>Host is not uri-host [ ":" port ].</summary>
+    HostInvalid = 17,
+
+    /// <summary>Content-Length is not 1*DIGIT, or values differ.</summary>
+    ContentLength = 18,
+
+    /// <summary>Both Transfer-Encoding and Content-Length.</summary>
+    TeAndCl = 19,
+
+    /// <summary>Transfer-Encoding in HTTP/1.0.</summary>
+    TeHttp10 = 20,
+
+    /// <summary>chunked missing, repeated, or not final.</summary>
+    TeNotChunked = 21,
+
+    /// <summary>A coding not implemented: 501.</summary>
+    TeUnknown = 22,
+
+    /// <summary>An expectation other than 100-continue: 417.</summary>
+    Expect = 23,
+}

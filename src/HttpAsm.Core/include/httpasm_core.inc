@@ -27,6 +27,10 @@ HA_CC_WS        equ 0x08    ; SP or HTAB, the whitespace of OWS, RWS and BWS (RF
 HA_CC_DIGIT     equ 0x10    ; RFC 5234 B.1 DIGIT: 0-9
 HA_CC_ALPHA     equ 0x20    ; RFC 5234 B.1 ALPHA: A-Z and a-z
 HA_CC_UPPER     equ 0x40    ; A-Z: forbidden in HTTP/2 and HTTP/3 field names (RFC9113-8.2.1-3.1)
+HA_CC_TARGET    equ 0x80    ; an octet a request-target may hold as is (RFC 3986): unreserved,
+                            ; sub-delims, ":", "@", "/", "?", "%" (checked as pct-encoded by the
+                            ; parser), and "[" "]" for IP literals. Everything else must be
+                            ; percent-encoded: SP, CTLs, DQUOTE, "#<>\^`{|}", DEL, 0x80-0xFF.
 
 ; The octets a field value may hold, as HttpAsm reads RFC 9110 section 5.5: field-vchar
 ; (VCHAR / obs-text), SP and HTAB. Every other octet is a CTL (0x00-0x08, 0x0A-0x1F, 0x7F).
@@ -40,11 +44,21 @@ HA_CC_VALUE     equ HA_CC_VCHAR | HA_CC_OBS | HA_CC_WS
 ; -----------------------------------------------------------------------------
 %ifndef HA_DEFINING_TABLES
 extern ha_char_class        ; 256 bytes of HA_CC_* bits, indexed by octet value
+extern ha_hex_value         ; 256 bytes: an octet's HEXDIG value (0-15), 0xFF when not a HEXDIG
 extern ha_x16_1f            ; 16 bytes of 0x1F: the highest CTL below SP, for pminub
 extern ha_x16_09            ; 16 bytes of 0x09: HTAB, the one CTL a field value may hold
 extern ha_x16_7f            ; 16 bytes of 0x7F: DEL, the CTL above the visible range
+extern ha_x16_0a            ; 16 bytes of 0x0A: LF, the end of every HTTP/1.1 line
 %endif
 
+; -----------------------------------------------------------------------------
+; Internal functions shared by the protocol codecs (System V; each documents its clobbers)
+; -----------------------------------------------------------------------------
+extern ha_field_lookup      ; eax = known-field id of name rdi[0..rsi), 0 if not known
+extern ha_method_lookup     ; eax = HTTPASM_METHOD_* of method rdi[0..rsi), 0 if another
+extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi if none
+
+%include "httpasm_abi.inc"
 %include "semantics/fields.inc"
 
 %endif

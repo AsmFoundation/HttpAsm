@@ -48,6 +48,37 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_field_value_scan")]
     internal static partial nuint FieldValueScan(byte* p, nuint n);
 
+    /// <summary>uint32_t httpasm_struct_size(uint32_t which).</summary>
+    /// <param name="which">1 httpasm_field, 2 httpasm_request, 3 httpasm_h1_limits.</param>
+    /// <returns>The library's size of that structure, 0 for another value.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_struct_size")]
+    internal static partial uint StructSize(uint which);
+
+    /// <summary>uint32_t httpasm_field_id(const uint8_t *name, size_t n).</summary>
+    /// <param name="name">The name.</param>
+    /// <param name="n">Its length.</param>
+    /// <returns>The known-field id, 0 when not known or not a token.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_field_id")]
+    internal static partial uint FieldId(byte* name, nuint n);
+
+    /// <summary>const uint8_t *httpasm_field_name(uint32_t id, size_t *length).</summary>
+    /// <param name="id">A known-field id.</param>
+    /// <param name="length">Receives the name's length; may be null.</param>
+    /// <returns>The lower-case name, or null.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_field_name")]
+    internal static partial byte* FieldName(uint id, nuint* length);
+
+    /// <summary>int64_t httpasm_h1_parse_request(buf, len, scan_from, limits, request, fields).</summary>
+    /// <param name="buffer">The received octets.</param>
+    /// <param name="length">How many.</param>
+    /// <param name="scanFrom">The resume point of the search for the head's end.</param>
+    /// <param name="limits">The limits, or null for the defaults.</param>
+    /// <param name="request">Receives the head.</param>
+    /// <param name="fields">Receives the field lines.</param>
+    /// <returns>The head's length, 0 when incomplete, or -status.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_parse_request")]
+    internal static partial long H1ParseRequest(byte* buffer, nuint length, nuint* scanFrom, H1Limits* limits, HttpRequest* request, HttpField* fields);
+
     /// <summary>void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset).</summary>
     /// <param name="addr">A placement hint; zero lets the kernel choose.</param>
     /// <param name="length">The mapping's size in bytes.</param>
