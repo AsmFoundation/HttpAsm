@@ -1,0 +1,30 @@
+<Project Sdk="AsmFoundation.Sdk">
+
+  <!--
+    HttpAsm.Core: the protocol core (docs/DESIGN.md, "Architecture"). It does no I/O, makes no
+    system call and allocates nothing: bytes go in, and bytes and events come out, in memory the
+    caller provides. Everything that touches the OS lives in src/HttpAsm.
+
+    Why these settings:
+      TargetFramework freestanding  the core links no C library. The build enforces the "no OS"
+                                    rule: a freestanding project cannot reference libc code
+                                    (NuGet's NU1201), and an OS call would fail the final link
+                                    of libhttpasm.so, which runs with -z defs.
+      OutputType Objects            libhttpasm.so links every object of the core. A static
+                                    library would only lend the archive members that libhttpasm.so's
+                                    own objects call, and the core's exported functions
+                                    (httpasm_token_length, ...) are called by nobody inside it.
+
+    Layout (shared source, separate code; docs/DESIGN.md, "Sharing between the versions"):
+      include/httpasm_core.inc      constants and the core's internal symbols
+      include/semantics/*.inc       RFC 9110 rules as macros, written once and assembled into
+                                    each HTTP version's own code
+      semantics/*.asm               tables, and the rules as callable functions of the C ABI
+  -->
+  <PropertyGroup>
+    <OutputType>Objects</OutputType>
+    <TargetFramework>freestanding</TargetFramework>
+    <AssemblyName>httpasm_core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

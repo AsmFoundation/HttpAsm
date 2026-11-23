@@ -1,0 +1,50 @@
+; =============================================================================
+; httpasm_core.inc - the core's constants and internal symbols, for every source of the core
+; and of libhttpasm.so.
+;
+; Conventions of all HttpAsm code (Linux x64 only, the owner's choice of 2026-11-23):
+;   - System V AMD64: arguments in rdi, rsi, rdx, rcx, r8, r9; rbx, rbp and r12-r15 are kept
+;     across calls; xmm0-xmm15 are not.
+;   - Internal symbols start with ha_ and are hidden: they link between the core's objects but
+;     are exported from no image. The C ABI's symbols start with httpasm_ and are exported
+;     through src/HttpAsm/httpasm.map.
+;   - SSE2 is the floor of this first code. Faster paths (SSSE3, AVX2, AVX-512) come with
+;     run-time CPU dispatch, each kept only when a paired measurement shows it pays.
+;   - Comments name the requirement rows they implement (specs/requirements.tsv): a row id such
+;     as RFC9110-5.5-5#1 leads to the RFC Editor's paragraph of the same anchor.
+; =============================================================================
+%ifndef HTTPASM_CORE_INC
+%define HTTPASM_CORE_INC
+
+; -----------------------------------------------------------------------------
+; Character classes: bits of the 256-byte table ha_char_class (semantics/tables.asm), one byte
+; per octet value. A byte is in a class when its bit is set.
+; -----------------------------------------------------------------------------
+HA_CC_TCHAR     equ 0x01    ; RFC 9110 5.6.2 tchar: a token's characters (RFC9110-5.6.2-2)
+HA_CC_VCHAR     equ 0x02    ; RFC 5234 B.1 VCHAR, visible US-ASCII: 0x21-0x7E
+HA_CC_OBS       equ 0x04    ; RFC 9110 5.5 obs-text: 0x80-0xFF (RFC9110-5.5-2)
+HA_CC_WS        equ 0x08    ; SP or HTAB, the whitespace of OWS, RWS and BWS (RFC 9110 5.6.3)
+HA_CC_DIGIT     equ 0x10    ; RFC 5234 B.1 DIGIT: 0-9
+HA_CC_ALPHA     equ 0x20    ; RFC 5234 B.1 ALPHA: A-Z and a-z
+HA_CC_UPPER     equ 0x40    ; A-Z: forbidden in HTTP/2 and HTTP/3 field names (RFC9113-8.2.1-3.1)
+
+; The octets a field value may hold, as HttpAsm reads RFC 9110 section 5.5: field-vchar
+; (VCHAR / obs-text), SP and HTAB. Every other octet is a CTL (0x00-0x08, 0x0A-0x1F, 0x7F).
+; CR, LF and NUL must be rejected or replaced (RFC9110-5.5-5#1); the other CTLs are invalid too,
+; and HttpAsm rejects them rather than retain them, which RFC9110-5.5-5#2 permits.
+HA_CC_VALUE     equ HA_CC_VCHAR | HA_CC_OBS | HA_CC_WS
+
+; -----------------------------------------------------------------------------
+; Internal data (semantics/tables.asm). The file that defines them sets HA_DEFINING_TABLES
+; first: NASM refuses a symbol declared extern and then defined in the same object.
+; -----------------------------------------------------------------------------
+%ifndef HA_DEFINING_TABLES
+extern ha_char_class        ; 256 bytes of HA_CC_* bits, indexed by octet value
+extern ha_x16_1f            ; 16 bytes of 0x1F: the highest CTL below SP, for pminub
+extern ha_x16_09            ; 16 bytes of 0x09: HTAB, the one CTL a field value may hold
+extern ha_x16_7f            ; 16 bytes of 0x7F: DEL, the CTL above the visible range
+%endif
+
+%include "semantics/fields.inc"
+
+%endif

@@ -1,0 +1,33 @@
+<Project Sdk="AsmFoundation.Sdk">
+
+  <!--
+    HttpAsm: libhttpasm.so, the C ABI every consumer binds to (docs/DESIGN.md, "Consumers"):
+    the .NET adapters first, then C, Python and native NASM programs. It links every object of
+    the core (src/HttpAsm.Core). The per-core loops, which need the OS, will live here too.
+
+    Why these settings:
+      TargetFramework libc   the loops will create threads with pthreads and must coexist with
+                             the C library of the process that loads the library (.NET, Python).
+                             The core stays freestanding; a libc project may link freestanding
+                             code, never the reverse.
+      ExportsFile            httpasm.map exports the C ABI (httpasm_*) and nothing else. The
+                             core's internal ha_* symbols are hidden anyway.
+      LinkerArg -z defs      an undefined symbol fails the link instead of the first load.
+  -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>libc</TargetFramework>
+    <AssemblyName>httpasm</AssemblyName>
+    <ExportsFile>httpasm.map</ExportsFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Its objects are linked in, so nothing that packs this project should depend on it. -->
+    <ProjectReference Include="../HttpAsm.Core/HttpAsm.Core.asmproj" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <LinkerArg Include="-z defs" />
+  </ItemGroup>
+
+</Project>

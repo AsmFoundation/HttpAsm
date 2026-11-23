@@ -1,0 +1,30 @@
+<Project>
+  <!--
+    Shared settings for every project in HttpAsm: the assembly projects (.asmproj, built with
+    AsmFoundation.Sdk, pinned in global.json), the .NET test projects, and the specs/ tool.
+    Nothing is released yet (no tags, NuGet pushes or GitHub releases until the owner decides),
+    so the version below is a placeholder that no package carries.
+  -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>Eli Belash</Authors>
+    <Company>AsmFoundation</Company>
+    <Copyright>Copyright 2026 Eli Belash</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/AsmFoundation/HttpAsm</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/AsmFoundation/HttpAsm</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- Every NASM warning and every C# warning is an error. The SDK still exempts the two
+         relocation warnings that position-independent ELF code always raises. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)artifacts/packages/</PackageOutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true'">
+    <!-- Linux x64 only until the protocols are complete (the owner's choice, 2026-11-23): System V
+         registers and Linux system calls everywhere. -->
+    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+    <!-- NASM reports file(line): error, which MSBuild counts and IDEs link to the line. -->
+    <AsmFlags>-Xvc</AsmFlags>
+  </PropertyGroup>
+</Project>

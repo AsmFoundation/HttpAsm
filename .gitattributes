@@ -1,0 +1,12 @@
+# The pinned official documents must stay byte-exact on every checkout: specs/specs.cs checks
+# each file against the SHA-256 pinned in specs/documents.json, and a line-ending conversion
+# (core.autocrlf on Windows) would break that check. They never change, so no diffs are needed.
+specs/rfc/** binary
+
+# Generated or rewritten by specs/specs.cs with LF line endings; keep them so everywhere, so
+# "extract --check" compares like with like.
+specs/requirements.tsv text eol=lf
+specs/documents.json text eol=lf
+
+# Shell scripts run in Linux containers and on Linux CI runners.
+*.sh text eol=lf

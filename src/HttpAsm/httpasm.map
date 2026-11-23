@@ -1,0 +1,11 @@
+/*
+ * httpasm.map - the symbols libhttpasm.so exports: the C ABI of include/httpasm.h, nothing
+ * else. Nothing is released, so nothing is promised yet; HTTPASM_0 is the node of this
+ * pre-release ABI (httpasm_abi_version() returns 0).
+ */
+HTTPASM_0 {
+  global:
+    httpasm_*;
+  local:
+    *;
+};

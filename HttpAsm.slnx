@@ -1,0 +1,10 @@
+<Solution>
+  <!-- .asmproj projects use the generic MSBuild project type (AsmFoundation.Sdk docs). -->
+  <Folder Name="/src/">
+    <Project Path="src/HttpAsm.Core/HttpAsm.Core.asmproj" Type="13B669BE-BB05-4DDF-9536-439F39A36129" />
+    <Project Path="src/HttpAsm/HttpAsm.asmproj" Type="13B669BE-BB05-4DDF-9536-439F39A36129" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HttpAsm.Tests/HttpAsm.Tests.csproj" />
+  </Folder>
+</Solution>

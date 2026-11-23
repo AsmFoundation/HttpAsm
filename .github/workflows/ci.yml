@@ -1,0 +1,62 @@
+# =============================================================================
+# CI - every gate HttpAsm has, on every push to main and every pull request.
+#
+# What runs, in one job on Linux x64 (the only platform for now):
+#   1. The registry: specs/specs.cs extract --check. The pinned RFC files must match their
+#      SHA-256, and specs/requirements.tsv must be exactly what they produce, so the registry
+#      the tests name can never drift from the official documents.
+#   2. dotnet build HttpAsm.slnx -c Release: the core, libhttpasm.so and the tests.
+#      AsmFoundation.Sdk's bundled toolchain (NASM, lld, from nuget.org) assembles and links on
+#      this runner, as it does on Windows and macOS.
+#   3. The tests, natively, with HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails
+#      instead, so nothing passes by not running.
+#
+# Supply chain: every action is pinned to a full commit SHA (the tag in the comment is for
+# humans), the same pins as GrpcAsm's and AsmSdk's workflows. The token is read-only, and the
+# checkout keeps no credentials.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per ref; a newer push to the same pull request cancels the older run, but pushes
+  # to main always finish.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Registry, build and tests (linux-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HTTPASM_REQUIRE_LINUX: "1"
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    steps:
+      - name: Check out HttpAsm
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Registry matches the pinned official documents
+        run: dotnet run specs/specs.cs -- extract --check
+
+      - name: Build (core, libhttpasm.so, tests)
+        run: dotnet build HttpAsm.slnx -c Release
+
+      - name: Tests (Linux required)
+        run: dotnet test --project tests/HttpAsm.Tests/HttpAsm.Tests.csproj -c Release --no-build

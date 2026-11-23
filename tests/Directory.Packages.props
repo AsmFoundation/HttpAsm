@@ -1,0 +1,14 @@
+<Project>
+  <!--
+    Central package management for HttpAsm's .NET test projects: one version per dependency,
+    the same as GrpcAsm's tests use.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Runs on Microsoft.Testing.Platform (opted in via global.json), so the VSTest bridge
+         packages (Microsoft.NET.Test.Sdk, xunit.runner.visualstudio) are deliberately absent. -->
+    <PackageVersion Include="xunit.v3" Version="4.0.3" />
+  </ItemGroup>
+</Project>

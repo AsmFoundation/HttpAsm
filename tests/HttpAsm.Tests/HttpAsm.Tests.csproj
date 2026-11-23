@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    HttpAsm's tests: libhttpasm.so's C ABI called from .NET, each test naming the requirement
+    rows of specs/requirements.tsv that it proves ([Requirement]).
+
+    Linux x64 only (libhttpasm.so is an ELF file): elsewhere the native tests are skipped with
+    the reason, unless HTTPASM_REQUIRE_LINUX=1 (CI, tests/run-linux.sh) turns that into a
+    failure. The registry tests are plain .NET and run everywhere. On Windows, run them all in a
+    Linux container: tests/run-linux.sh.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- xunit.v3 test projects are self-hosting executables. -->
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The tests pass pointers into pinned and guarded buffers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>HttpAsm.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <!-- xunit.v3 4.x adds no implicit using for its namespace; one global using serves every file. -->
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- libhttpasm.so, delivered by AsmFoundation.Sdk to runtimes/linux-x64/native/. -->
+    <ProjectReference Include="../../src/HttpAsm/HttpAsm.asmproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The registry travels with the tests, so a container that only has the output folder
+         (tests/run-linux.sh) can check every [Requirement] id against it. -->
+    <None Include="../../specs/requirements.tsv" Link="specs/requirements.tsv" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
