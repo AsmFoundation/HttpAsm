@@ -264,6 +264,25 @@ internal unsafe struct HpackOutput
     public uint Count;
 }
 
+/// <summary>
+/// What a server's workers wait and do their I/O with (httpasm.h): the option that rules
+/// io_uring out, and httpasm_server_io's answers.
+/// </summary>
+internal static class ServerIo
+{
+    /// <summary>HTTPASM_SERVER_EPOLL: epoll even where io_uring is available.</summary>
+    public const ushort ForceEpoll = 0x0001;
+
+    /// <summary>HTTPASM_SERVER_IO_NONE: not running.</summary>
+    public const uint None = 0;
+
+    /// <summary>HTTPASM_SERVER_IO_EPOLL.</summary>
+    public const uint Epoll = 1;
+
+    /// <summary>HTTPASM_SERVER_IO_URING.</summary>
+    public const uint Uring = 2;
+}
+
 /// <summary>httpasm_server_options (httpasm.h): 64 octets; zero fields take their defaults.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct ServerOptions
@@ -289,7 +308,7 @@ internal struct ServerOptions
     /// <summary>0 for any free port.</summary>
     public ushort Port;
 
-    /// <summary>Reserved.</summary>
+    /// <summary>HTTPASM_SERVER_* (<see cref="ServerIo.ForceEpoll"/>).</summary>
     public ushort Flags;
 
     /// <summary>The heads' limits.</summary>

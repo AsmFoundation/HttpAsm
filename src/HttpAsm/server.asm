@@ -6,8 +6,16 @@
 ; One worker per core (the CPUs this process may run on, unless told otherwise). Each worker
 ; binds its own listening socket to the same port with SO_REUSEPORT, so the kernel spreads new
 ; connections across workers: no accept lock, no hand-off, and a connection never changes
-; thread. A worker sleeps in epoll_wait until an event arrives or the earliest idle deadline is
-; due; with no connection it waits without a timeout at all. Nothing ticks.
+; thread. A worker sleeps until an event arrives or the earliest idle deadline is due; with no
+; connection it waits without a timeout at all. Nothing ticks.
+;
+; Waiting and I/O, per worker: through its own io_uring where the kernel offers it (uring.asm:
+; one io_uring_enter per loop turn submits the turn's receives, sends and polls, and waits for
+; the next completions), through epoll otherwise (epoll_wait, then recv and send per ready
+; connection). HTTPASM_SERVER_EPOLL asks for epoll; a kernel or a seccomp profile that refuses
+; io_uring_setup gets epoll without asking, worker by worker (httpasm_server_io tells which one
+; the first worker uses). Both drive the same connection code (connection.asm): only the
+; waiting, and who issues the receives and sends, differ.
 ;
 ; Stopping: httpasm_server_stop sets the server's stop flag and wakes every worker through its
 ; eventfd. A worker then closes its listener and the connections that are between requests,
@@ -128,6 +136,8 @@ httpasm_server_create:
     mov     [rbx + server.bind_address], eax
     movzx   eax, word [r12 + httpasm_server_options.port]
     mov     [rbx + server.port], eax
+    movzx   eax, word [r12 + httpasm_server_options.flags]
+    mov     [rbx + server.flags], eax
     mov     rax, [r12 + httpasm_server_options.limits]
     mov     [rbx + server.limits], rax
     mov     rax, [r12 + httpasm_server_options.limits + 8]
@@ -197,8 +207,10 @@ httpasm_server_create:
 .end:
 
 ; -----------------------------------------------------------------------------
-; worker_open: a worker's epoll instance and listening socket, bound and listening, with the
-; worker's eventfd (made by httpasm_server_create) joined to the epoll instance.
+; worker_open: a worker's io_uring ring (uring.asm) or, failing that or when the options ask
+; for it (HTTPASM_SERVER_EPOLL), its epoll instance; and its listening socket, bound and
+; listening. Under epoll the listener and the worker's eventfd (made by httpasm_server_create)
+; join the epoll instance here; under io_uring worker_main arms a poll for each instead.
 ;   In: rdi = worker. Out: eax = 0, or -errno (what is already open stays for close_worker).
 ;   The first worker of a server with port 0 learns the port the kernel chose, and the others
 ;   bind that one. The worker's run state starts over (a server may be started again).
@@ -212,12 +224,24 @@ worker_open:
     mov     r12, [rbx + worker.server]
     mov     dword [rbx + worker.stopping], 0
     mov     qword [rbx + worker.stop_deadline], 0
+    ; io_uring first, unless the options ask for epoll; a kernel without it (or a seccomp
+    ; profile refusing it) leaves the worker on epoll, which needs no setting at all.
+    test    dword [r12 + server.flags], HTTPASM_SERVER_EPOLL
+    jnz     .epoll
+    mov     rdi, rbx
+    call    ha_uring_open
+    test    eax, eax
+    jnz     .epoll                          ; -errno: epoll serves instead
+    mov     dword [rbx + worker.epfd], -1   ; no epoll instance (close_worker skips it)
+    jmp     .socket
+.epoll:
     mov     edi, EPOLL_CLOEXEC
     mov     eax, SYS_epoll_create1
     syscall
     test    eax, eax
     js      .out
     mov     [rbx + worker.epfd], eax
+.socket:
     mov     edi, AF_INET
     mov     esi, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
     xor     edx, edx
@@ -280,7 +304,11 @@ worker_open:
     xchg    al, ah
     mov     [r12 + server.port], eax
 .port_known:
-    ; The listener and the eventfd join epoll under their tags.
+    ; The listener and the eventfd join epoll under their tags (io_uring: their polls are
+    ; armed when the worker's loop starts, under the same tags).
+    xor     eax, eax
+    cmp     dword [rbx + worker.uring], 0
+    jne     .out
     mov     dword [rsp], EPOLLIN
     mov     qword [rsp + 4], HA_TAG_LISTENER
     mov     edi, [rbx + worker.epfd]
@@ -306,14 +334,15 @@ worker_open:
     ret
 
 ; -----------------------------------------------------------------------------
-; close_worker: closes the descriptors a worker opened to run (its listener and epoll
-; instance). The eventfd stays: it is the server's, until free_server.
-;   In: rdi = worker. Clobbers rax, rcx, rdi, r11.
+; close_worker: closes the descriptors a worker opened to run (its listener, and its epoll
+; instance or its ring). The eventfd stays: it is the server's, until free_server.
+;   In: rdi = worker. Clobbers rax, rcx, rdx, rsi, rdi, r11.
 ; -----------------------------------------------------------------------------
 align 16
 close_worker:
     push    rbx
     mov     rbx, rdi
+    call    ha_uring_close                  ; nothing when the worker ran on epoll (rsp aligned)
 %macro CLOSE_FD 1
     mov     edi, [rbx + %1]
     test    edi, edi
@@ -558,6 +587,28 @@ httpasm_server_port:
 .end:
 
 ; -----------------------------------------------------------------------------
+; uint32_t httpasm_server_io(const httpasm_server *server)
+;   What the running server's workers wait and do their I/O with: HTTPASM_SERVER_IO_URING or
+;   _EPOLL, read from the first worker (each worker makes its ring on its own when it opens,
+;   so they agree unless the kernel refused some rings and not others), or _NONE when the
+;   server is not running. For tests and measurements that must know which one ran.
+; -----------------------------------------------------------------------------
+global httpasm_server_io:function (httpasm_server_io.end - httpasm_server_io)
+align 16
+httpasm_server_io:
+    mov     eax, HTTPASM_SERVER_IO_NONE
+    cmp     dword [rdi + server.started], 0
+    je      .out
+    mov     rcx, [rdi + server.workers]
+    mov     eax, HTTPASM_SERVER_IO_EPOLL
+    cmp     dword [rcx + worker.uring], 0
+    je      .out
+    mov     eax, HTTPASM_SERVER_IO_URING
+.out:
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
 ; void httpasm_server_stop(httpasm_server *server)
 ;   Stops accepting, lets in-flight exchanges finish for up to HA_STOP_GRACE_MS, closes every
 ;   connection, and returns when every worker thread has exited. A deferred exchange still
@@ -701,6 +752,10 @@ accept_all:
     mov     r8d, 4
     mov     eax, SYS_setsockopt
     syscall
+    ; The worker's wait: epoll registers it now; io_uring arms its poll at the next
+    ; submission (it is pending; its counts belong to this ring).
+    cmp     dword [rbx + worker.uring], 0
+    jne     .ring
     mov     dword [rsp], EPOLLIN | EPOLLRDHUP
     mov     [rsp + 4], r14
     mov     edi, [rbx + worker.epfd]
@@ -712,6 +767,13 @@ accept_all:
     test    eax, eax
     js      .free_conn
     mov     dword [r14 + conn.pad], EPOLLIN | EPOLLRDHUP
+    jmp     .joined
+.ring:
+    mov     eax, [rbx + worker.ring_gen]
+    mov     [r14 + conn.ring_gen], eax
+    mov     rdi, r14
+    call    ha_uring_pending                ; conn.pad stays 0: nothing armed yet
+.joined:
     inc     qword [rbx + worker.conn_count]
     mov     rdi, r14
     call    ha_lru_touch
@@ -941,6 +1003,17 @@ begin_stop:
     mov     rax, [rbx + worker.now_ms]
     add     rax, HA_STOP_GRACE_MS
     mov     [rbx + worker.stop_deadline], rax
+    cmp     dword [rbx + worker.uring], 0
+    je      .close_listener
+    ; io_uring: the listener's poll holds its file, so the socket would outlive its descriptor
+    ; (and keep taking connections into its queue through SO_REUSEPORT). The poll goes first,
+    ; submitted at once; its removal completes inside that call.
+    mov     rdi, rbx
+    mov     esi, HA_TAG_LISTENER
+    call    ha_uring_unpoll
+    mov     rdi, rbx
+    call    ha_uring_submit
+.close_listener:
     mov     edi, [rbx + worker.listen_fd]
     mov     eax, SYS_close
     syscall
@@ -969,8 +1042,8 @@ close_idle:
     jne     .skip
     cmp     qword [r13 + conn.rlen], 0
     jne     .skip
-    test    dword [r13 + conn.flags], C_DEFERRED | C_WANT_WRITE
-    jnz     .skip
+    test    dword [r13 + conn.flags], C_DEFERRED | C_WANT_WRITE | C_SEND_QUEUED
+    jnz     .skip                           ; output waits: the socket's (epoll) or the ring's
     cmp     dword [r13 + conn.deferred], 0
     jne     .skip                           ; HTTP/2: a stream's answer is still to come
     mov     rax, [r13 + conn.h2]
@@ -1012,6 +1085,18 @@ worker_main:
     mov     rbx, rdi
     mov     r12, [rbx + worker.server]
     call    refresh_clock
+    cmp     dword [rbx + worker.uring], 0
+    je      .wait
+    ; io_uring: the listener's and the eventfd's polls, armed once here and again after each
+    ; completion (one-shot, as every poll of the ring; level-checked when armed).
+    mov     rdi, rbx
+    mov     esi, [rbx + worker.listen_fd]
+    mov     edx, HA_TAG_LISTENER
+    call    ha_uring_poll
+    mov     rdi, rbx
+    mov     esi, [rbx + worker.wake_fd]
+    mov     edx, HA_TAG_WAKE
+    call    ha_uring_poll
 
 .wait:
     ; The timeout: the earliest deadline, or none at all; while stopping, the grace's end too.
@@ -1044,6 +1129,8 @@ worker_main:
     je      .timeout_ok
     mov     edx, 0x7FFFFFFF
 .timeout_ok:
+    cmp     dword [rbx + worker.uring], 0
+    jne     .uring_wait
     mov     edi, [rbx + worker.epfd]
     lea     rsi, [rbx + worker.events]
     mov     r10d, edx
@@ -1111,6 +1198,68 @@ worker_main:
     call    begin_stop
     jmp     .event
 
+.uring_wait:
+    ; io_uring (uring.asm): the pending connections' work is submitted and the worker waits, in
+    ; one io_uring_enter; then every completion is handled in order. The eventfd's only notes
+    ; that the deferred answers are due: they are taken after all of the batch's completions,
+    ; so no buffer moves between an operation and the handling of its completion.
+    mov     rdi, rbx
+    mov     rsi, rdx                        ; the timeout: ms, or -1 for none
+    call    ha_uring_enter
+    call    refresh_clock
+.completion:
+    mov     rdi, rbx
+    call    ha_uring_cqe                    ; rax = user_data (0: none left), edx = res
+    test    rax, rax
+    jz      .completions_done
+    cmp     rax, 16
+    jb      .own                            ; below 16: never a connection's (driver.inc)
+    mov     esi, eax
+    and     esi, UT_MASK                    ; the operation
+    and     rax, ~UT_MASK                   ; the connection
+    mov     rdi, rax
+    call    ha_uring_conn
+    jmp     .completion
+.own:
+    cmp     rax, HA_TAG_LISTENER
+    je      .uring_listener
+    cmp     rax, HA_TAG_WAKE
+    jne     .completion                     ; UD_IGNORE: a poll update's or removal's
+    mov     dword [rbx + worker.wake_due], 1
+    jmp     .completion
+.uring_listener:
+    test    edx, edx
+    js      .completion                     ; removed by the stop (or failed): not armed again
+    call    accept_all
+    cmp     dword [rbx + worker.listen_fd], 0
+    jl      .completion                     ; closed meanwhile: nothing to arm
+    mov     rdi, rbx
+    mov     esi, [rbx + worker.listen_fd]
+    mov     edx, HA_TAG_LISTENER
+    call    ha_uring_poll
+    jmp     .completion
+.completions_done:
+    cmp     dword [rbx + worker.wake_due], 0
+    je      .events_done
+    mov     dword [rbx + worker.wake_due], 0
+    mov     rdi, rbx                        ; armed again before the drain: a write after the
+    mov     esi, [rbx + worker.wake_fd]     ; drain still finds it armed (level-checked when the
+    mov     edx, HA_TAG_WAKE                ; next submission arms it)
+    call    ha_uring_poll
+    sub     rsp, 8                          ; drain the eventfd's counter
+    mov     edi, [rbx + worker.wake_fd]
+    mov     rsi, rsp
+    mov     edx, 8
+    mov     eax, SYS_read
+    syscall
+    add     rsp, 8
+    call    handle_completions
+    cmp     dword [r12 + server.stop], 0
+    je      .events_done
+    cmp     dword [rbx + worker.stopping], 0
+    jne     .events_done
+    call    begin_stop
+
 .events_done:
     ; Deadlines: close what timed out. A deferred exchange is the handler's to finish; its
     ; connection waits another timeout.
@@ -1156,8 +1305,12 @@ worker_main:
 .exit:
     ; Answers that came meanwhile release their zombies; then everything closed is freed.
     ; Zombies still unanswered stay: their answers find the queue later (the next start, or
-    ; httpasm_server_destroy, frees them).
+    ; httpasm_server_destroy, frees them). The ring goes before the reap: closing it cancels
+    ; the polls still armed, no completion can name a connection after that, and the reap
+    ; frees every closed connection whatever its counts (worker.uring is 0 then).
     call    handle_completions
+    mov     rdi, rbx
+    call    ha_uring_close                  ; nothing under epoll
     mov     rdi, rbx
     call    ha_conn_reap
     xor     eax, eax

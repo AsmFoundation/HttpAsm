@@ -118,14 +118,22 @@ internal sealed unsafe class TestServer : IDisposable
     /// <summary>The managed handler.</summary>
     private readonly Action<Exchange> handler;
 
+    /// <summary>
+    /// Whether this test run asks every server for epoll: HTTPASM_TEST_IO=epoll. A run is made
+    /// once with each backend (tests/run-linux.sh, CI), so every test proves both.
+    /// </summary>
+    public static bool EpollRun => Environment.GetEnvironmentVariable("HTTPASM_TEST_IO") == "epoll";
+
     /// <summary>Creates and starts a server.</summary>
     /// <param name="handler">Called for each request, on a worker thread.</param>
     /// <param name="workers">Worker threads.</param>
     /// <param name="idleMs">The idle timeout (0: the default).</param>
     /// <param name="maxBody">The body limit (0: the default).</param>
     /// <param name="limits">The heads' limits.</param>
+    /// <param name="flags">HTTPASM_SERVER_* (<see cref="ServerIo.ForceEpoll"/> is added in an
+    /// epoll run: <see cref="EpollRun"/>).</param>
     /// <exception cref="InvalidOperationException">The server could not be created or started.</exception>
-    public TestServer(Action<Exchange> handler, uint workers = 2, uint idleMs = 0, ulong maxBody = 0, H1Limits limits = default)
+    public TestServer(Action<Exchange> handler, uint workers = 2, uint idleMs = 0, ulong maxBody = 0, H1Limits limits = default, ushort flags = 0)
     {
         this.handler = handler;
         self = GCHandle.Alloc(this);
@@ -138,6 +146,7 @@ internal sealed unsafe class TestServer : IDisposable
             MaxBody = maxBody,
             BindAddress = Loopback,
             Limits = limits,
+            Flags = (ushort)(flags | (EpollRun ? ServerIo.ForceEpoll : 0)),
         };
         int error = 0;
         server = Native.ServerCreate(&options, &error);
@@ -160,6 +169,10 @@ internal sealed unsafe class TestServer : IDisposable
 
     /// <summary>The port the server listens on.</summary>
     public int Port { get; }
+
+    /// <summary>What its workers use now: <see cref="ServerIo.Uring"/>, <see cref="ServerIo.Epoll"/>,
+    /// or <see cref="ServerIo.None"/> while stopped.</summary>
+    public uint Io => Native.ServerIoUsed(server);
 
     /// <summary>The base address for HttpClient.</summary>
     public Uri Address => new($"http://127.0.0.1:{Port}/");

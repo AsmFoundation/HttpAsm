@@ -12,7 +12,8 @@ it.
 **Status (2026-11-23):** in development; M1 nearly complete (section 7 lists what is left).
 Working on Linux x64:
 - the server: HTTP/1.1 and HTTP/2 (h2c with prior knowledge, h2spec 146/146) on one port,
-  epoll workers, handlers that answer at once or later from any thread;
+  per-core workers on io_uring (epoll as the fallback), handlers that answer at once or later
+  from any thread;
 - the client: one blocking HTTP/1.1 connection;
 - the codecs: HTTP/1.1 both ways, chunked bodies, HPACK, HTTP/2's request rules;
 - `specs/` with the requirement registry and the tables generated from the RFC files;
@@ -188,9 +189,22 @@ stays only if the difference is within noise.
    - body length with Content-Length and chunked, and the smuggling defenses of section 6.3;
    - persistence and pipelining (section 9);
    - SIMD parsing (SSE2: line ends, field values).
-4. *The Linux driver:* per-core epoll loops (done): accept with SO_REUSEPORT, timers as
-   deadline lists, idle without polling, back-pressure, graceful stop, the server's and the
-   client's calls in the C ABI. **Left:** the io_uring loop, with epoll as its fallback.
+4. *The Linux driver (done):* per-core loops: accept with SO_REUSEPORT, timers as deadline
+   lists, idle without polling, back-pressure, graceful stop, the server's and the client's
+   calls in the C ABI. Each worker waits on its own io_uring (`src/HttpAsm/uring.asm`), with
+   epoll as the fallback (a kernel before 5.13, a seccomp profile that refuses
+   `io_uring_setup`) and on request (`HTTPASM_SERVER_EPOLL`); both drive the same connection
+   code, and the tests run in full on each:
+   - readiness stays level-triggered: one one-shot POLL_ADD per connection, armed with the
+     events the connection wants; a change while it is armed removes it and arms it anew
+     (updating an armed poll in place, IORING_POLL_UPDATE_EVENTS, left connections stalled
+     under back-pressure in the tests on 5.15, so it is not used);
+   - the I/O is batched: the turn's RECVs, SENDs and polls reach the kernel in the one
+     `io_uring_enter` that then waits; every RECV and SEND carries MSG_DONTWAIT, so it
+     completes inside that call and no buffer is lent to the kernel past it;
+   - SQEs are written only right before `io_uring_enter`, from each connection's state then,
+     so none names a descriptor number reused since; a closed connection is freed only when
+     its last operation has completed (`conn.uops`).
 5. *The isolation measurement (done, `benchmarks/`):* the same sources built without HTTP/2
    (the `H1Only` configuration) against the full build, with an A/A control (the full build
    twice) as the noise floor. On 2026-11-23 (f75c380): 4.11 and 4.13 µs of CPU per HTTP/1.1
@@ -213,7 +227,7 @@ stays only if the difference is within noise.
    HTTP/2 client, intermediaries, options); RFC 9112 112 of 160; RFC 9110 97 of 509 (most of
    the rest is the application's, the client's or an intermediary's).
 
-**Left for M1's exit:** the io_uring loop (step 4).
+**Left for M1's exit:** measuring the io_uring loop against epoll (step 4) in `benchmarks/`.
 
 *Exit:* every RFC 9112, RFC 9113 and RFC 7541 row proven, or deferred with a reason. The RFC
 9110 rows M1 needs are proven; the others are deferred with reasons. h2spec 146/146,

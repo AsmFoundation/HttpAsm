@@ -266,6 +266,11 @@ ha_h2_goodbye:
     call    h2_goaway_frame
     test    eax, eax
     jnz     .out                            ; no memory for it: the close goes ahead without
+    ; io_uring: a SEND submitted in this batch, whose completion is not handled yet, has sent
+    ; octets this side still counts as unsent; sending from wsent would repeat them, so the
+    ; GOAWAY is given up instead (a SEND only queued is fine: closing drops it unsubmitted).
+    test    dword [rbx + conn.uflags], U_SEND
+    jnz     .out
     mov     edi, [rbx + conn.fd]
     mov     rsi, [rbx + conn.wbuf]
     add     rsi, [rbx + conn.wsent]         ; the unsent output, the GOAWAY at its end

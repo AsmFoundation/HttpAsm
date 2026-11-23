@@ -551,6 +551,52 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// The workers wait and do their I/O through io_uring where the kernel allows it, and
+    /// through epoll when the options ask for it (or the kernel refuses io_uring, as Docker's
+    /// seccomp does); both serve, and a server stopped and started again comes back on the same
+    /// one. Runs that know io_uring is there (WSL, CI) set HTTPASM_REQUIRE_URING=1, so a silent
+    /// fall back to epoll fails them; an epoll run (HTTPASM_TEST_IO=epoll) expects epoll.
+    /// </summary>
+    [Fact]
+    public void WaitsWithIoUringWhereTheKernelAllows()
+    {
+        Platform.RequireLinuxX64();
+        bool required = Environment.GetEnvironmentVariable("HTTPASM_REQUIRE_URING") == "1" && !TestServer.EpollRun;
+        using var server = new TestServer(x => x.Respond(200, "served"));
+        using var epoll = new TestServer(x => x.Respond(200, "served"), flags: ServerIo.ForceEpoll);
+
+        uint io = server.Io;
+        if (TestServer.EpollRun)
+        {
+            Assert.Equal(ServerIo.Epoll, io);
+        }
+        else if (required)
+        {
+            Assert.Equal(ServerIo.Uring, io);
+        }
+        else
+        {
+            Assert.Contains(io, new[] { ServerIo.Uring, ServerIo.Epoll });
+        }
+
+        Assert.Equal(ServerIo.Epoll, epoll.Io);
+        foreach (TestServer s in new[] { server, epoll })
+        {
+            using var c = new RawConnection(s.Port);
+            c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+            Assert.Equal("served", c.ReadResponse().Text);
+        }
+
+        server.Stop();
+        Assert.Equal(ServerIo.None, server.Io);
+        Assert.Equal(0, server.Start());
+        Assert.Equal(io, server.Io);
+        using var again = new RawConnection(server.Port);
+        again.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("served", again.ReadResponse().Text);
+    }
+
+    /// <summary>
     /// A deferred exchange answered from another thread while its handler is still running (so
     /// the answer is posted before the worker even learns of the deferral) is delivered, and
     /// the connection carries on.

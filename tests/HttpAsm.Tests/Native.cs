@@ -250,6 +250,13 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_server_port")]
     internal static partial ushort ServerPort(nint server);
 
+    /// <summary>uint32_t httpasm_server_io(server).</summary>
+    /// <param name="server">The server.</param>
+    /// <returns>What its workers use: <see cref="ServerIo.Uring"/>, <see cref="ServerIo.Epoll"/>,
+    /// or <see cref="ServerIo.None"/> when it is not running.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_io")]
+    internal static partial uint ServerIoUsed(nint server);
+
     /// <summary>void httpasm_server_stop(server).</summary>
     /// <param name="server">The server.</param>
     [LibraryImport(Library, EntryPoint = "httpasm_server_stop")]

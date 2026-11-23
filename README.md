@@ -10,8 +10,9 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 > **Status: in development; nothing is released.** Milestone 1 (the shared semantics, HTTP/1.1
 > and HTTP/2) is being completed. What works today, on Linux x64:
 > - **a server** (`httpasm_server_*`): HTTP/1.1 and HTTP/2 (h2c with prior knowledge) on one
->   port, one epoll worker per core, handlers that answer at once or later from any thread;
->   HTTP/2 passes all 146 cases of h2spec;
+>   port, one worker per core waiting on its own io_uring (epoll where the kernel refuses it),
+>   handlers that answer at once or later from any thread; HTTP/2 passes all 146 cases of
+>   h2spec;
 > - **a client** (`httpasm_client_*`): one blocking HTTP/1.1 connection, tested against this
 >   server and against Kestrel;
 > - **the codecs** behind them, callable on their own: HTTP/1.1 parsing and writing in both

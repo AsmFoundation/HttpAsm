@@ -4,11 +4,12 @@
 ; hold only opaque pointers (httpasm_server *, httpasm_exchange *).
 ;
 ; The driver (docs/DESIGN.md, "Architecture") runs one worker thread per core. Each worker owns
-; an epoll instance, its own listening socket (SO_REUSEPORT: the kernel spreads connections, so
-; no accept lock and no hand-off), an eventfd that wakes it, and every connection it accepted.
-; Nothing is shared between workers but the server's read-only settings, so no request takes a
-; lock. Workers sleep in epoll_wait until an event arrives or the nearest idle deadline is due:
-; no tick, no spin.
+; an io_uring ring (uring.asm; an epoll instance where the kernel refuses io_uring or the
+; options ask for epoll), its own listening socket (SO_REUSEPORT: the kernel spreads
+; connections, so no accept lock and no hand-off), an eventfd that wakes it, and every
+; connection it accepted. Nothing is shared between workers but the server's read-only
+; settings, so no request takes a lock. Workers sleep in io_uring_enter (or epoll_wait) until an
+; event arrives or the nearest idle deadline is due: no tick, no spin.
 ; =============================================================================
 %ifndef HTTPASM_DRIVER_INC
 %define HTTPASM_DRIVER_INC
@@ -53,6 +54,7 @@ EPOLL_CLOEXEC       equ 0x80000
 EFD_NONBLOCK        equ 0x800
 EFD_CLOEXEC         equ 0x80000
 MSG_NOSIGNAL        equ 0x4000
+MSG_DONTWAIT        equ 0x40    ; this one call never blocks (io_uring: fails with EAGAIN, never waits)
 SHUT_WR             equ 1
 EAGAIN              equ 11
 EINTR               equ 4
@@ -74,9 +76,16 @@ HA_LISTEN_BACKLOG   equ 4096
 ; epoll_event is packed on x86-64: a u32 of events and a u64 of data, 12 octets.
 EPOLL_EVENT_SIZE    equ 12
 
-; The epoll data of the two descriptors that are not connections.
+; The epoll data of the two descriptors that are not connections. Under io_uring they are the
+; user_data of their polls; a connection's operations are its address (16-aligned by malloc)
+; plus a UT_* tag, so values below 16 are never a connection.
 HA_TAG_LISTENER     equ 1
 HA_TAG_WAKE         equ 2
+UD_IGNORE           equ 3       ; a poll update or removal: its completion means nothing here
+UT_POLL             equ 1       ; the connection's POLL_ADD
+UT_RECV             equ 2       ; its RECV
+UT_SEND             equ 3       ; its SEND
+UT_MASK             equ 15
 
 ; -----------------------------------------------------------------------------
 ; The server: the options it was created with, and its workers.
@@ -92,7 +101,7 @@ struc server
     .port:              resd 1  ; the bound port, host order
     .started:           resd 1
     .stop:              resd 1  ; set by httpasm_server_stop; workers read it when woken
-    .pad:               resd 1
+    .flags:             resd 1  ; HTTPASM_SERVER_* from the options
     .limits:            resb httpasm_h1_limits_size
 endstruc
 
@@ -147,6 +156,14 @@ struc conn
     .deferred:          resd 1  ; exchanges deferred and not answered yet (HTTP/1.1: 0 or 1;
                                 ; HTTP/2: any number of streams): while above 0, a closed
                                 ; connection stays allocated as a zombie
+    ; io_uring (uring.asm; unused under epoll). conn.pad holds the mask of the armed poll.
+    .u_next:            resq 1  ; the worker's pending list: work to submit before the next wait
+    .uops:              resd 1  ; references io_uring holds: queued or submitted operations whose
+                                ; completions are not handled yet, and the pending list; the
+                                ; memory outlives a close until it is 0 (ha_conn_reap)
+    .uflags:            resd 1  ; U_*
+    .ring_gen:          resd 1  ; the ring the counts above belong to (worker.ring_gen at accept)
+    .upad:              resd 1
     .chunked:           resb httpasm_h1_chunked_size
     .request:           resb httpasm_request_size
     .exchange:          resb exchange_size
@@ -159,7 +176,7 @@ HA_PROTO_H2         equ 2       ; h2c with prior knowledge (RFC 9113 3.3)
 ; conn.flags
 C_CLOSE_AFTER       equ 0x0001  ; close once the output is flushed (a closing response was written)
 C_DRAINING          equ 0x0002  ; half-closed: reading and discarding until EOF or the linger ends
-C_WANT_WRITE        equ 0x0004  ; output is waiting for EPOLLOUT
+C_WANT_WRITE        equ 0x0004  ; output is waiting for EPOLLOUT (POLLOUT, the same bit, under io_uring)
 C_DEFERRED          equ 0x0008  ; an exchange is deferred: the connection waits for its response
 C_ZOMBIE            equ 0x0010  ; closed while deferred: freed when the response arrives
 C_CONTINUE_SENT     equ 0x0020  ; 100 Continue went out for the current request
@@ -170,13 +187,25 @@ C_READ_PAUSED       equ 0x0040  ; EPOLLIN is off (deferred, or output past HA_OU
 ; answers what it holds and closes; nothing more can arrive, so it closes without lingering.
 C_PEER_DONE         equ 0x0080
 ; Closed and on its worker's closed list: the memory stays until the end of the event batch,
-; because a later event of the same epoll_wait may still name the connection. Events for a
-; closed (or zombie) connection are skipped.
+; because a later event of the same batch (epoll_wait's events, or io_uring's completions) may
+; still name the connection; under io_uring also until its last operation's completion is
+; handled (conn.uops, ha_conn_reap). Events for a closed (or zombie) connection are skipped.
 C_CLOSED            equ 0x0100
 ; A request head parsed on this connection: its peer speaks HTTP/1.x. Until then, a refused head
 ; whose request-line carries no HTTP-version is not HTTP at all (an HTTP/2 client's broken
 ; preface, another protocol), and the connection closes without an answer.
 C_SPOKE             equ 0x0200
+; io_uring: the output is with the ring (a SEND is queued for the next submission, or submitted
+; and its completion not handled yet). Its completion continues what ha_conn_flush does under
+; epoll; meanwhile ha_conn_drive stops, as it does for C_WANT_WRITE. Never set under epoll.
+C_SEND_QUEUED       equ 0x0400
+
+; conn.uflags (io_uring only)
+U_PENDING           equ 0x01    ; on the worker's pending list
+U_POLL              equ 0x02    ; a POLL_ADD is armed (submitted, its completion not handled)
+U_WANT_RECV         equ 0x04    ; a RECV is to be queued at the next submission
+U_RECV              equ 0x08    ; a RECV is submitted, its completion not handled
+U_SEND              equ 0x10    ; a SEND is submitted, its completion not handled
 
 ; conn.state
 CS_HEAD             equ 0       ; waiting for a request head
@@ -212,6 +241,25 @@ struc worker
     .listen_fd:         resd 1
     .wake_fd:           resd 1
     .stopping:          resd 1
+    ; io_uring (uring.asm): the worker's ring when .uring is 1; epoll (.epfd) otherwise.
+    .uring:             resd 1  ; 1: this worker waits and does its I/O through its ring
+    .ring_fd:           resd 1
+    .ring_gen:          resd 1  ; counts the rings this worker made (a start each)
+    .sq_mask:           resd 1
+    .sq_entries:        resd 1
+    .sq_tail:           resd 1  ; the local tail: SQEs written, published at submission
+    .cq_mask:           resd 1
+    .wake_due:          resd 1  ; the eventfd's poll fired in the batch being handled
+    .sq_khead:          resq 1  ; -> the kernel's SQ head (u32)
+    .sq_ktail:          resq 1  ; -> the SQ tail the kernel reads (u32)
+    .sqes:              resq 1  ; io_uring_sqe[sq_entries]
+    .cq_khead:          resq 1  ; -> the CQ head this side advances (u32)
+    .cq_ktail:          resq 1  ; -> the CQ tail the kernel advances (u32)
+    .cqes:              resq 1  ; io_uring_cqe[cq_entries]
+    .ring_map:          resq 1  ; the SQ and CQ rings' one mapping (IORING_FEAT_SINGLE_MMAP)
+    .ring_map_size:     resq 1
+    .sqes_size:         resq 1
+    .pending:           resq 1  ; connections with work for the next submission (conn.u_next)
     .date:              resb 32 ; IMF-fixdate, 29 octets
     .events:            resb HA_EVENTS * EPOLL_EVENT_SIZE
     .pad:               resd 1
@@ -344,7 +392,18 @@ extern ha_conn_reap         ; (rdi = worker): frees the connections closed since
 extern ha_conn_release      ; (rdi = conn): a zombie whose answer came: onto the closed list
 extern ha_conn_respond      ; (rdi = conn, esi = status, rdx = fields, ecx = count, r8 = body, r9 = len, [rsp+8] = flags)
 extern ha_lru_touch         ; (rdi = conn): the deadline moves to now + idle, to the list's tail
-extern ha_set_interest      ; (rdi = conn): epoll's events follow the connection's flags
+extern ha_set_interest      ; (rdi = conn): the events waited for follow the connection's flags
+extern ha_interest_mask     ; (rdi = conn) -> esi: those events (EPOLL* = POLL*); clobbers ecx
+extern ha_uring_open        ; (rdi = worker) -> eax 0 or -errno: the worker's ring (uring.asm)
+extern ha_uring_close       ; (rdi = worker): unmaps and closes the ring; .uring becomes 0
+extern ha_uring_sqe         ; (rdi = worker) -> rax: a zeroed SQE in the ring, submitted next
+extern ha_uring_pending     ; (rdi = conn): onto the pending list (work for the next submission)
+extern ha_uring_enter       ; (rdi = worker, rsi = timeout ms or -1): submit, then wait for a CQE
+extern ha_uring_conn        ; (rdi = conn, esi = UT_*, edx = res): one completion of a connection
+extern ha_uring_submit      ; (rdi = worker): the SQEs written go to the kernel now, no wait
+extern ha_uring_poll        ; (rdi = worker, esi = fd, edx = tag): POLL_ADD for the listener or eventfd
+extern ha_uring_unpoll      ; (rdi = worker, esi = tag): removes the poll armed under the tag
+extern ha_uring_cqe         ; (rdi = worker) -> rax = user_data (0: none left), edx = res
 extern ha_conn_append       ; (rdi = conn, rsi = octets, rdx = count) -> eax 0 or -ENOMEM
 extern ha_conn_finish       ; (rdi = conn): the answered message leaves the input
 extern ha_conn_free         ; (rdi = conn): frees a closed connection's memory

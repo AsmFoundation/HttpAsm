@@ -413,7 +413,8 @@ int httpasm_h2_trailers(httpasm_field *fields, uint32_t count);
 
 /* ------------------------------------------------------------------------------------------
  * The server (Linux): one worker thread per core, each with its own listening socket
- * (SO_REUSEPORT), epoll, and connections. Handlers run on the worker that read the request.
+ * (SO_REUSEPORT), io_uring ring (or epoll, where io_uring is refused or not wanted), and
+ * connections. Handlers run on the worker that read the request.
  * ------------------------------------------------------------------------------------------ */
 
 typedef struct httpasm_server httpasm_server;       /* opaque */
@@ -436,10 +437,18 @@ typedef struct httpasm_server_options {
                                    is closed; default 60000 */
     uint32_t bind_address;      /* IPv4, network byte order; 0 is 0.0.0.0 */
     uint16_t port;              /* 0: any free port (httpasm_server_port tells which) */
-    uint16_t flags;             /* reserved: 0 */
+    uint16_t flags;             /* HTTPASM_SERVER_* */
     httpasm_h1_limits limits;   /* the heads' limits */
     uint64_t reserved;
 } httpasm_server_options;
+
+/* The workers wait and do their I/O through io_uring where the kernel offers it (Linux 5.13 or
+ * later; seccomp profiles such as Docker's default refuse it), and through epoll otherwise.
+ * HTTPASM_SERVER_EPOLL asks for epoll everywhere: to compare the two, or to rule io_uring out. */
+#define HTTPASM_SERVER_EPOLL        0x0001
+#define HTTPASM_SERVER_IO_NONE      0   /* httpasm_server_io: not running */
+#define HTTPASM_SERVER_IO_EPOLL     1
+#define HTTPASM_SERVER_IO_URING     2
 
 /* A server with these options, not started. NULL on failure, with *error = -EINVAL (no handler),
  * -ENOMEM, or -EMFILE/-ENFILE (no descriptor left for a worker's eventfd); error may be NULL. */
@@ -451,6 +460,10 @@ int httpasm_server_start(httpasm_server *server);
 
 /* The port the server listens on (the kernel's choice for port 0, once started). */
 uint16_t httpasm_server_port(const httpasm_server *server);
+
+/* What the running server's workers use: HTTPASM_SERVER_IO_URING or _EPOLL (each worker tries
+ * io_uring on its own; this is the first worker's), or HTTPASM_SERVER_IO_NONE when not running. */
+uint32_t httpasm_server_io(const httpasm_server *server);
 
 /* Stops accepting, lets exchanges in flight finish for up to 5 seconds (deferred ones too, even
  * when their client is gone), closes every connection, and returns when every worker has

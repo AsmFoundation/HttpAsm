@@ -23,10 +23,17 @@ struc httpasm_server_options
     .idle_timeout_ms:   resd 1  ; idle and request-head timeout; default 60000
     .bind_address:      resd 1  ; IPv4 in network order; 0 = 0.0.0.0
     .port:              resw 1  ; 0: any free port (httpasm_server_port tells which)
-    .flags:             resw 1  ; reserved, 0
+    .flags:             resw 1  ; HTTPASM_SERVER_*
     .limits:            resb httpasm_h1_limits_size
     .reserved:          resq 1
 endstruc
+
+; httpasm_server_options.flags
+HTTPASM_SERVER_EPOLL        equ 0x0001  ; epoll even where io_uring is available (comparisons; the fallback)
+; httpasm_server_io's answers: what the server's workers wait and do their I/O with
+HTTPASM_SERVER_IO_NONE      equ 0       ; not running
+HTTPASM_SERVER_IO_EPOLL     equ 1
+HTTPASM_SERVER_IO_URING     equ 2
 
 ; -----------------------------------------------------------------------------
 ; httpasm_client_response (httpasm.h): what httpasm_client_send reads (96 octets). Every
@@ -68,6 +75,7 @@ extern httpasm_h2_trailers          ; int (fields, count)
 extern httpasm_server_create        ; httpasm_server * (options, int *error)
 extern httpasm_server_start         ; int (server)
 extern httpasm_server_port          ; uint16_t (server)
+extern httpasm_server_io            ; uint32_t (server): HTTPASM_SERVER_IO_*
 extern httpasm_server_stop          ; void (server)
 extern httpasm_server_destroy       ; void (server)
 extern httpasm_exchange_request     ; const httpasm_request * (exchange)

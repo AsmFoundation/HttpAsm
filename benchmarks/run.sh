@@ -25,6 +25,10 @@
 # rounds, and the lowest and highest CPU time per request any round measured. The machine's
 # details go into the report with the numbers.
 #
+# io_uring against epoll: "httpasm" (and its control and H1-only twin) runs on io_uring where
+# the kernel has it, "httpasm-epoll" is the same full build asked for epoll (HELLO_IO=epoll),
+# in every scenario; the report says which backend each one really ran on.
+#
 # The noise floor: "httpasm-control" is a second process of the very same full build (an A/A
 # control) in the HTTP/1.1 scenarios. Whatever separates it from "httpasm" is noise, so the
 # isolation result (full build vs HTTP/1.1-only build) only counts where it exceeds that gap.
@@ -71,6 +75,9 @@ pids+=($!); pid_h1only=$!
 # The A/A control: the full build again, in a process of its own (see "The noise floor").
 LD_LIBRARY_PATH="$full_lib" HELLO_PORT=18086 HELLO_WORKERS="$workers" taskset -c "$server_cpus" "$hello" >"$work/control.log" 2>&1 &
 pids+=($!); pid_control=$!
+# The full build on epoll, for the io_uring comparison.
+LD_LIBRARY_PATH="$full_lib" HELLO_PORT=18087 HELLO_WORKERS="$workers" HELLO_IO=epoll taskset -c "$server_cpus" "$hello" >"$work/epoll.log" 2>&1 &
+pids+=($!); pid_epoll=$!
 
 mkdir -p "$work/nginx/logs"
 cat >"$work/nginx/nginx.conf" <<EOF
@@ -107,7 +114,7 @@ EOF
 taskset -c "$server_cpus" h2o -c "$work/h2o.conf" >"$work/h2o.log" 2>&1 &
 pids+=($!); pid_h2o=$!
 
-for port in 18081 18082 18083 18084 18085 18086; do
+for port in 18081 18082 18083 18084 18085 18086 18087; do
   for _ in $(seq 100); do
     if [ "$port" = 18084 ]; then curl -s --http2-prior-knowledge -o /dev/null "http://127.0.0.1:$port/" && break
     else curl -s -o /dev/null "http://127.0.0.1:$port/" && break; fi
@@ -153,7 +160,7 @@ run() {
 }
 
 declare -A results
-servers=("httpasm:18081:$pid_full" "httpasm-control:18086:$pid_control" "httpasm-h1only:18082:$pid_h1only" "nginx:18083:$pid_nginx" "h2o:18085:$pid_h2o")
+servers=("httpasm:18081:$pid_full" "httpasm-control:18086:$pid_control" "httpasm-h1only:18082:$pid_h1only" "httpasm-epoll:18087:$pid_epoll" "nginx:18083:$pid_nginx" "h2o:18085:$pid_h2o")
 for round in $(seq "$rounds"); do
   for scenario in h1 h1-pipelined h2; do
     for entry in "${servers[@]}"; do
@@ -188,6 +195,13 @@ range() {
   echo "- Versions: HttpAsm $measured, $(nginx -v 2>&1 | sed 's/.*: //'), $(h2o --version | head -1), $(wrk -v 2>&1 | head -1 | awk '{print "wrk " $2}'), h2load $(h2load --version | awk '{print $2}')"
   echo "- $rounds rounds of ${seconds} s per server and scenario, interleaved; medians, and the CPU range over the rounds"
   echo "- httpasm-control is a second process of the same full build: the A/A noise floor"
+  # Which backend each HttpAsm server really used: a ring is a descriptor the kernel names
+  # anon_inode:[io_uring] (each worker holds one); a server without one waited on epoll.
+  for entry in "httpasm:$pid_full" "httpasm-epoll:$pid_epoll"; do
+    IFS=: read -r name pid <<<"$entry"
+    if ls -l "/proc/$pid/fd" 2>/dev/null | grep -q 'io_uring'; then io=io_uring; else io=epoll; fi
+    echo "- $name ran on $io"
+  done
   echo
   echo "| scenario | server | requests/s | CPU µs/request | CPU range | vs nginx (req/s) |"
   echo "|---|---|---:|---:|---:|---:|"

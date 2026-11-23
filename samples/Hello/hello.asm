@@ -3,9 +3,10 @@
 ; over HTTP/1.1 and HTTP/2 alike (see Hello.asmproj for its settings).
 ;
 ; Startup, in this order:
-;   1. settings from the environment, parsed strictly (decimal digits only, no sign, no
-;      whitespace, no overflow, range-checked): an invalid value is reported with its name and
-;      the process exits 2, because a typo must never fall back to a default;
+;   1. settings from the environment, parsed strictly (numbers: decimal digits only, no sign,
+;      no whitespace, no overflow, range-checked; HELLO_IO: "uring" or "epoll" exactly): an
+;      invalid value is reported with its name and the process exits 2, because a typo must
+;      never fall back to a default;
 ;   2. SIGINT and SIGTERM blocked, before any worker exists: the workers inherit the mask, so
 ;      the signals reach only this thread's rt_sigtimedwait, never a worker mid-request;
 ;   3. httpasm_server_create and _start (exit 1 with the -errno if either fails), then
@@ -28,6 +29,10 @@ EINTR               equ 4
 section .rodata
 s_port:         db "HELLO_PORT", 0
 s_workers:      db "HELLO_WORKERS", 0
+s_io:           db "HELLO_IO", 0
+s_io_len        equ $ - s_io - 1
+s_uring:        db "uring", 0
+s_epoll:        db "epoll", 0
 s_body:         db "Hello, World!"
 s_body_len      equ $ - s_body
 s_type_name:    db "Content-Type"
@@ -62,6 +67,73 @@ handler:
     mov     r9d, s_body_len
     call    httpasm_exchange_respond wrt ..plt
     add     rsp, 8
+    ret
+
+; -----------------------------------------------------------------------------
+; io_setting: HELLO_IO, what the server's workers wait and do their I/O with: "uring" (the
+; default: io_uring where the kernel has it, epoll where it does not) or "epoll"
+; (HTTPASM_SERVER_EPOLL: the measurements compare the two). Anything else is reported and
+; exits 2, as every invalid setting does: a typo must not silently pick a backend.
+;   Out: eax = the options' flags. Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+align 16
+io_setting:
+    push    rbx                             ; one push: aligned for the calls below
+    lea     rdi, [rel s_io]
+    call    getenv wrt ..plt
+    test    rax, rax
+    jz      .uring                          ; unset: the default
+    mov     rbx, rax
+    mov     rdi, rbx
+    lea     rsi, [rel s_epoll]
+    call    same_string
+    test    eax, eax
+    jnz     .epoll
+    mov     rdi, rbx
+    lea     rsi, [rel s_uring]
+    call    same_string
+    test    eax, eax
+    jz      .invalid
+.uring:
+    xor     eax, eax
+    pop     rbx
+    ret
+.epoll:
+    mov     eax, HTTPASM_SERVER_EPOLL
+    pop     rbx
+    ret
+.invalid:
+    mov     edi, 2
+    lea     rsi, [rel s_invalid]
+    mov     edx, s_invalid_len
+    mov     eax, SYS_write
+    syscall
+    mov     edi, 2
+    lea     rsi, [rel s_io]
+    mov     edx, s_io_len
+    mov     eax, SYS_write
+    syscall
+    call    newline_stderr
+    mov     edi, 2
+    jmp     exit_process
+
+; same_string: whether two NUL-terminated strings are equal, octet for octet.
+;   In: rdi, rsi. Out: eax = 1 when equal, 0 otherwise. Clobbers rdi, rsi.
+align 16
+same_string:
+    movzx   eax, byte [rdi]
+    cmp     al, [rsi]
+    jne     .differ
+    test    al, al
+    jz      .same                           ; both ended together
+    inc     rdi
+    inc     rsi
+    jmp     same_string
+.same:
+    mov     eax, 1
+    ret
+.differ:
+    xor     eax, eax
     ret
 
 ; -----------------------------------------------------------------------------
@@ -204,6 +276,8 @@ main:
     mov     ecx, 1024
     call    setting
     mov     r12d, eax                       ; the workers
+    call    io_setting                      ; eax = the options' flags (keeps rbx, r12)
+    mov     [options + httpasm_server_options.flags], ax
 
     ; The answer's field, with addresses only known now (no relocations in data).
     lea     rax, [rel s_type_name]

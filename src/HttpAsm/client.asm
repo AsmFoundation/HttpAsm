@@ -31,8 +31,7 @@ SYS_connect         equ 42
 SYS_sendmsg         equ 46
 SO_RCVTIMEO         equ 20
 SO_SNDTIMEO         equ 21
-MSG_PEEK            equ 0x02        ; look without taking
-MSG_DONTWAIT        equ 0x40        ; this one call does not block (the socket itself does)
+MSG_PEEK            equ 0x02        ; look without taking (MSG_DONTWAIT: driver.inc)
 ENOTCONN            equ 107
 ECONNRESET          equ 104
 ETIMEDOUT           equ 110

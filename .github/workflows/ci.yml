@@ -13,7 +13,9 @@
 #   3. The tests, natively, with HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails
 #      instead, so nothing passes by not running. h2spec (HTTP/2 conformance, 146 cases) comes
 #      from tests/tools.sh, pinned by version and SHA-256, and HTTPASM_REQUIRE_H2SPEC=1 makes
-#      Http2Tests.PassesH2spec fail rather than skip if it were missing.
+#      Http2Tests.PassesH2spec fail rather than skip if it were missing. The tests run twice:
+#      on io_uring (HTTPASM_REQUIRE_URING=1: the runner's kernel has it, so a silent fall back
+#      to epoll fails), then with every server asking for epoll (HTTPASM_TEST_IO=epoll).
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag in the comment is for
 # humans), the same pins as GrpcAsm's and AsmSdk's workflows. The token is read-only, and the
@@ -68,7 +70,14 @@ jobs:
       - name: Test tools (h2spec 2.6.0, pinned by SHA-256)
         run: echo "HTTPASM_H2SPEC=$(bash tests/tools.sh)/h2spec" >> "$GITHUB_ENV"
 
-      - name: Tests (Linux required, h2spec required)
+      - name: Tests on io_uring (Linux, h2spec and io_uring required)
         env:
           HTTPASM_REQUIRE_H2SPEC: "1"
+          HTTPASM_REQUIRE_URING: "1"
+        run: dotnet test --project tests/HttpAsm.Tests/HttpAsm.Tests.csproj -c Release --no-build
+
+      - name: Tests on epoll (every server asks for it)
+        env:
+          HTTPASM_REQUIRE_H2SPEC: "1"
+          HTTPASM_TEST_IO: epoll
         run: dotnet test --project tests/HttpAsm.Tests/HttpAsm.Tests.csproj -c Release --no-build

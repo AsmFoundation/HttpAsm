@@ -33,24 +33,23 @@ s_505_body_len  equ $ - s_505_body
 section .text
 
 ; -----------------------------------------------------------------------------
-; ha_set_interest: the epoll events a connection should wait for, from its flags.
-;   In: rdi = conn. Closed connections and zombies wait for nothing (their descriptor is gone).
-;   Otherwise: EPOLLRDHUP until the peer's end was seen (a peer's close is noticed even while
-;   deferred; once seen, asking again would wake the worker in a loop, since it stays raised),
-;   EPOLLOUT while output waits, EPOLLIN unless output waits, an exchange is deferred, or
-;   reading is paused. A deferred connection whose peer is done waits for nothing at all
-;   (events 0: only EPOLLERR/EPOLLHUP, which epoll always reports). One epoll_ctl, only when the
-;   set changes.
-;   Clobbers rax, rcx, rdx, rsi, rdi, r8-r11. Keeps the rest.
+; ha_interest_mask: the events a connection should wait for, from its flags; the one rule set
+; for both backends (epoll's ha_set_interest, io_uring's poll in uring.asm; EPOLL* and POLL*
+; share their values). Closed connections and zombies wait for nothing (their descriptor is
+; gone). Otherwise: RDHUP until the peer's end was seen (a peer's close is noticed even while
+; deferred; once seen, asking again would wake the worker in a loop, since it stays raised),
+; OUT while output waits for the socket, IN unless output waits, an exchange is deferred, or
+; reading is paused. A deferred connection whose peer is done waits for nothing at all (0:
+; only errors and hang-ups, which are always reported).
+;   In: rdi = conn. Out: esi = the events. Clobbers ecx and the flags; keeps the rest.
 ; -----------------------------------------------------------------------------
-global ha_set_interest:function hidden (ha_set_interest.end - ha_set_interest)
+global ha_interest_mask:function hidden (ha_interest_mask.end - ha_interest_mask)
 align 16
-ha_set_interest:
-    sub     rsp, 24                         ; struct epoll_event (12) + alignment
+ha_interest_mask:
+    xor     esi, esi
     mov     ecx, [rdi + conn.flags]
     test    ecx, C_ZOMBIE | C_CLOSED
-    jnz     .done
-    xor     esi, esi
+    jnz     .out
     test    ecx, C_PEER_DONE
     jnz     .rdhup_set
     mov     esi, EPOLLRDHUP
@@ -58,11 +57,33 @@ ha_set_interest:
     test    ecx, C_WANT_WRITE
     jz      .no_write
     or      esi, EPOLLOUT
-    jmp     .events_set
+    jmp     .out
 .no_write:
     test    ecx, C_DEFERRED | C_READ_PAUSED
-    jnz     .events_set
+    jnz     .out
     or      esi, EPOLLIN
+.out:
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_set_interest: the events a connection waits for follow its flags (ha_interest_mask).
+;   epoll: one epoll_ctl, only when the set changes. io_uring: the connection goes on the
+;   pending list, and the next submission arms, updates or removes its poll (uring.asm) from
+;   its state then; closed connections and zombies included, whose poll must go.
+;   In: rdi = conn. Clobbers rax, rcx, rdx, rsi, rdi, r8-r11. Keeps the rest.
+; -----------------------------------------------------------------------------
+global ha_set_interest:function hidden (ha_set_interest.end - ha_set_interest)
+align 16
+ha_set_interest:
+    mov     rax, [rdi + conn.worker]
+    cmp     dword [rax + worker.uring], 0
+    jne     ha_uring_pending                ; a tail call: it keeps to this contract
+    sub     rsp, 24                         ; struct epoll_event (12) + alignment
+    mov     ecx, [rdi + conn.flags]
+    test    ecx, C_ZOMBIE | C_CLOSED
+    jnz     .done
+    call    ha_interest_mask                ; esi = the events (rsp is aligned: 8 + 24)
 .events_set:
     cmp     esi, [rdi + conn.pad]           ; conn.pad holds the events epoll has now
     je      .done
@@ -147,10 +168,10 @@ lru_unlink:
 ;     state is freed here in either case (ha_h2_free); its deferred streams are detached, each
 ;     freed when its answer arrives.
 ;   - Otherwise it goes on the worker's closed list, freed by ha_conn_reap once the current
-;     event batch is done: an event later in the same epoll_wait may still carry this
-;     connection's pointer (handle_completions or close_idle can close a connection whose own
-;     event comes after theirs), and that event must find valid memory marked closed, not a
-;     freed block.
+;     event batch is done: an event later in the same batch (epoll_wait's events, io_uring's
+;     completions) may still carry this connection's pointer (handle_completions or close_idle
+;     can close a connection whose own event comes after theirs), and that event must find
+;     valid memory marked closed, not a freed block.
 ;   Closing twice is harmless (the second call sees C_CLOSED or C_ZOMBIE and returns).
 ;   In: rdi = conn. Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
@@ -172,9 +193,18 @@ ha_conn_close:
     mov     rdi, rbx
     call    ha_h2_goodbye                   ; nothing for HTTP/1.1 (conn.h2 = 0)
     mov     edi, [rbx + conn.fd]
-    mov     eax, SYS_close                  ; closing the descriptor removes it from epoll
+    mov     eax, SYS_close                  ; under epoll, the close removes it from the interest list
     syscall
     mov     dword [rbx + conn.fd], -1
+    ; io_uring: the connection's poll, armed in the kernel, holds the socket and is not ended by
+    ; the close: the next submission removes it (uring.asm sees C_CLOSED or C_ZOMBIE by then),
+    ; and the memory waits for its last operation's completion (conn.uops, ha_conn_reap).
+    mov     rax, [rbx + conn.worker]
+    cmp     dword [rax + worker.uring], 0
+    je      .no_ring
+    mov     rdi, rbx
+    call    ha_uring_pending
+.no_ring:
     cmp     qword [rbx + conn.h2], 0
     je      .state_freed
     mov     rdi, rbx                        ; HTTP/2: its streams go; deferred ones are detached
@@ -213,7 +243,11 @@ ha_conn_release:
 
 ; -----------------------------------------------------------------------------
 ; ha_conn_reap: frees every connection on the worker's closed list. Called by the worker
-; between event batches only, when no event can name them any more.
+; between event batches only, when no event can name them any more. Under io_uring a
+; connection that an operation still names (conn.uops: its poll's removal not completed yet,
+; or the pending list) stays on the list for a later reap: that completion arrives in a later
+; batch and reads the memory. Counts kept for an earlier ring (the worker stopped and started
+; again, or now runs on epoll) mean nothing any more: such a connection is freed.
 ;   In: rdi = worker. Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 global ha_conn_reap:function hidden (ha_conn_reap.end - ha_conn_reap)
@@ -221,19 +255,32 @@ align 16
 ha_conn_reap:
     push    rbx
     push    r12
-    sub     rsp, 8                          ; two pushes + 8: aligned for the calls below
+    push    r13                             ; three pushes: aligned for the calls below
     mov     r12, rdi
+    xor     r13d, r13d                      ; the connections kept for a later reap
 .next:
     mov     rbx, [r12 + worker.closed]
     test    rbx, rbx
-    jz      .out
+    jz      .done
     mov     rax, [rbx + conn.lru_next]
     mov     [r12 + worker.closed], rax
+    cmp     dword [r12 + worker.uring], 0
+    je      .free
+    mov     eax, [rbx + conn.ring_gen]
+    cmp     eax, [r12 + worker.ring_gen]
+    jne     .free                           ; counted for a ring that is gone
+    cmp     dword [rbx + conn.uops], 0
+    je      .free
+    mov     [rbx + conn.lru_next], r13      ; still named by the ring: kept
+    mov     r13, rbx
+    jmp     .next
+.free:
     mov     rdi, rbx
     call    ha_conn_free
     jmp     .next
-.out:
-    add     rsp, 8
+.done:
+    mov     [r12 + worker.closed], r13
+    pop     r13
     pop     r12
     pop     rbx
     ret
@@ -259,6 +306,8 @@ ha_conn_free:
 
 ; -----------------------------------------------------------------------------
 ; ha_conn_flush: sends what the output buffer holds, until done or the socket is full.
+;   Under io_uring it only hands the output to the next submission (C_SEND_QUEUED; see .queue)
+;   and returns 0; with nothing left to send it does the same work under both backends.
 ;   In: rdi = conn. Out: eax = 0 (still open), 1 (closed: a send failed, or the last answer
 ;   went out after the peer's end).
 ;   When everything is sent after a closing response, the connection half-closes (FIN) and
@@ -278,6 +327,9 @@ ha_conn_flush:
     mov     rsi, [rbx + conn.wsent]
     sub     rdx, rsi
     jz      .sent
+    mov     rax, [rbx + conn.worker]
+    cmp     dword [rax + worker.uring], 0
+    jne     .queue
     add     rsi, [rbx + conn.wbuf]
     mov     edi, [rbx + conn.fd]
     mov     r10d, MSG_NOSIGNAL              ; a closed peer is an error code, not a SIGPIPE
@@ -323,6 +375,15 @@ ha_conn_flush:
 .interest:
     mov     rdi, rbx
     call    ha_set_interest
+    xor     eax, eax
+    jmp     .out
+.queue:
+    ; io_uring: the output goes with the next submission, one SEND for all of it then; its
+    ; completion (uring.asm, ha_uring_conn) does the rest of this function's work, calling it
+    ; again once nothing is left. Until then the connection counts as writing (C_SEND_QUEUED).
+    or      dword [rbx + conn.flags], C_SEND_QUEUED
+    mov     rdi, rbx
+    call    ha_uring_pending
     xor     eax, eax
     jmp     .out
 .failed:
@@ -734,8 +795,9 @@ ha_conn_drive:
     jnz     .out                            ; closed
     test    r12d, r12d
     jz      .out                            ; it needs input, waits for an answer, or closes
-    test    dword [rbx + conn.flags], C_WANT_WRITE
-    jnz     .out                            ; the socket is full: EPOLLOUT resumes it
+    test    dword [rbx + conn.flags], C_WANT_WRITE | C_SEND_QUEUED
+    jnz     .out                            ; the socket is full (EPOLLOUT resumes it), or the
+                                            ; output is with io_uring (its SEND's completion does)
     jmp     .again
 .out:
     add     rsp, 8
