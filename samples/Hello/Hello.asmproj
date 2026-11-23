@@ -7,8 +7,9 @@
 
     Settings come from the environment, parsed strictly (an invalid value exits 2, never falls
     back to a default): HELLO_PORT (1-65535, default 8080), HELLO_WORKERS (1-1024, default: the
-    CPUs this process may run on), HELLO_IO (uring, the default: io_uring where the kernel has
-    it; or epoll). It serves until SIGINT or SIGTERM, then stops gracefully.
+    CPUs this process may run on), HELLO_IO (epoll, the library's default; or uring: io_uring
+    where the kernel gives each worker a ring). It serves until SIGINT or SIGTERM, then stops
+    gracefully.
 
     TargetFramework libc: glibc for getenv; the server itself comes from libhttpasm.so. AsmSdk
     0.3.0 does not copy a referenced library next to a program, and the program carries no

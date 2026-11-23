@@ -12,8 +12,8 @@
 #   native  on a Linux x64 host: the folder itself
 #   docker  mcr.microsoft.com/dotnet/aspnet:10.0 (ASP.NET Core: ClientTests runs Kestrel), the
 #           folder mounted read-only (Docker Desktop
-#           on Windows; its default seccomp profile refuses io_uring, so the driver's tests cover
-#           the epoll fallback there)
+#           on Windows; its default seccomp profile refuses io_uring, so the io_uring run's
+#           servers fall back to epoll there)
 #   wsl     the WSL distribution $HTTPASM_WSL_DISTRO (default Ubuntu), with the .NET 10 runtime
 #           in ~/.dotnet. WSL needs no Docker Desktop, and its kernel allows io_uring.
 #
@@ -25,8 +25,8 @@
 # runner sees h2spec at HTTPASM_H2SPEC (docker: mounted at /tools), with HTTPASM_REQUIRE_H2SPEC=1:
 # Http2Tests.PassesH2spec must run its 146 cases, never skip them.
 #
-# Exit status: 0 when both runs pass (io_uring, then epoll: run_once below), else the first
-# failing run's.
+# Exit status: 0 when both runs pass (epoll, the default, then io_uring: run_once below), else
+# the first failing run's.
 # =============================================================================
 set -euo pipefail
 
@@ -49,15 +49,17 @@ if [ -z "$runner" ]; then
   fi
 fi
 
-# run_once IO: the test app, once, with the server's I/O as IO asks: "uring" (the default:
-# io_uring where the kernel has it; WSL's and a Linux host's kernels do, so a silent fall back
-# to epoll fails the run there: HTTPASM_REQUIRE_URING=1; Docker's seccomp refuses io_uring, so
-# its run falls back by design) or "epoll" (every server asks for epoll: HTTPASM_TEST_IO=epoll).
-# Every test thus proves both backends.
+# run_once IO: the test app, once, with the servers' I/O as IO asks: "epoll" (the library's
+# default) or "uring" (every server asks for io_uring: HTTPASM_TEST_IO=uring). Every test thus
+# proves both backends. WSL's and a Linux host's kernels allow io_uring, so a server asking for
+# it and silently falling back to epoll fails either run there (HTTPASM_REQUIRE_URING=1: the
+# epoll run has servers that ask too); Docker's seccomp refuses io_uring, so there the asking
+# servers fall back by design.
 run_once() {
   local io="$1" require_uring=0 test_io=""
   shift
-  if [ "$io" = epoll ]; then test_io=epoll; elif [ "$runner" != docker ]; then require_uring=1; fi
+  if [ "$io" = uring ]; then test_io=uring; fi
+  if [ "$runner" != docker ]; then require_uring=1; fi
   echo "run-linux.sh: the tests with the server on $io" >&2
   case "$runner" in
     native)
@@ -97,6 +99,7 @@ run_once() {
 
 # Both backends; the exit status is the first failing run's (0 when both pass).
 status=0
-run_once uring "$@" || status=$?
-run_once epoll "$@" || { [ "$status" -ne 0 ] || status=$?; }
+run_once epoll "$@" || status=$?
+# The second run's own code is kept before the test: inside the braces $? would be the test's.
+run_once uring "$@" || { second=$?; [ "$status" -ne 0 ] || status=$second; }
 exit "$status"

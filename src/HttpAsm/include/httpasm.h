@@ -442,13 +442,22 @@ typedef struct httpasm_server_options {
     uint64_t reserved;
 } httpasm_server_options;
 
-/* The workers wait and do their I/O through io_uring where the kernel offers it (Linux 5.13 or
- * later; seccomp profiles such as Docker's default refuse it), and through epoll otherwise.
- * HTTPASM_SERVER_EPOLL asks for epoll everywhere: to compare the two, or to rule io_uring out. */
-#define HTTPASM_SERVER_EPOLL        0x0001
+/* The workers wait and do their I/O through epoll, unless HTTPASM_SERVER_URING asks each worker
+ * for its own io_uring (Linux 5.13 or later) instead; a worker whose ring the kernel refuses
+ * runs on epoll all the same (seccomp profiles such as Docker's default refuse every ring).
+ * epoll is the default because it measured as cheap or cheaper (Linux 5.15, benchmarks/README.md):
+ * 4.99 us of server CPU per HTTP/1.1 keep-alive request against 5.10-5.46 on io_uring, the same
+ * pipelined and over HTTP/2.
+ * Footgun: Linux 6.14 and later charge each worker's ring to the user's RLIMIT_MEMLOCK (84 KiB,
+ * up to 144 KiB while the kernel rounds its allocation up), which all of that user's processes
+ * share (8 MiB by default on Ubuntu 24.04: at least 57 rings); a worker past it silently runs
+ * on epoll. Raise the limit (ulimit -l, systemd's LimitMEMLOCK=) for large or many servers,
+ * and check httpasm_server_io. */
+#define HTTPASM_SERVER_URING        0x0001
 #define HTTPASM_SERVER_IO_NONE      0   /* httpasm_server_io: not running */
-#define HTTPASM_SERVER_IO_EPOLL     1
-#define HTTPASM_SERVER_IO_URING     2
+#define HTTPASM_SERVER_IO_EPOLL     1   /* every worker on epoll */
+#define HTTPASM_SERVER_IO_URING     2   /* every worker on its own io_uring */
+#define HTTPASM_SERVER_IO_MIXED     3   /* some workers on io_uring, the others on epoll */
 
 /* A server with these options, not started. NULL on failure, with *error = -EINVAL (no handler),
  * -ENOMEM, or -EMFILE/-ENFILE (no descriptor left for a worker's eventfd); error may be NULL. */
@@ -461,8 +470,10 @@ int httpasm_server_start(httpasm_server *server);
 /* The port the server listens on (the kernel's choice for port 0, once started). */
 uint16_t httpasm_server_port(const httpasm_server *server);
 
-/* What the running server's workers use: HTTPASM_SERVER_IO_URING or _EPOLL (each worker tries
- * io_uring on its own; this is the first worker's), or HTTPASM_SERVER_IO_NONE when not running. */
+/* What the running server's workers use: HTTPASM_SERVER_IO_URING (all of them), _EPOLL (all),
+ * _MIXED (asked for io_uring, each worker makes its ring on its own, and the kernel refused
+ * some: see HTTPASM_SERVER_URING's footgun), or HTTPASM_SERVER_IO_NONE when not running. A call
+ * racing httpasm_server_stop may see _MIXED as the workers exit. */
 uint32_t httpasm_server_io(const httpasm_server *server);
 
 /* Stops accepting, lets exchanges in flight finish for up to 5 seconds (deferred ones too, even

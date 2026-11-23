@@ -4,12 +4,12 @@
 ; hold only opaque pointers (httpasm_server *, httpasm_exchange *).
 ;
 ; The driver (docs/DESIGN.md, "Architecture") runs one worker thread per core. Each worker owns
-; an io_uring ring (uring.asm; an epoll instance where the kernel refuses io_uring or the
-; options ask for epoll), its own listening socket (SO_REUSEPORT: the kernel spreads
-; connections, so no accept lock and no hand-off), an eventfd that wakes it, and every
-; connection it accepted. Nothing is shared between workers but the server's read-only
-; settings, so no request takes a lock. Workers sleep in io_uring_enter (or epoll_wait) until an
-; event arrives or the nearest idle deadline is due: no tick, no spin.
+; an epoll instance (or, when the options ask for it and the kernel gives one, an io_uring ring:
+; uring.asm), its own listening socket (SO_REUSEPORT: the kernel spreads connections, so no
+; accept lock and no hand-off), an eventfd that wakes it, and every connection it accepted.
+; Nothing is shared between workers but the server's read-only settings, so no request takes a
+; lock. Workers sleep in epoll_wait (or io_uring_enter) until an event arrives or the nearest
+; idle deadline is due: no tick, no spin.
 ; =============================================================================
 %ifndef HTTPASM_DRIVER_INC
 %define HTTPASM_DRIVER_INC

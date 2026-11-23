@@ -1,9 +1,16 @@
 ; =============================================================================
 ; uring.asm - the driver's io_uring backend: each worker's ring, used in place of epoll when the
-; kernel offers it (Linux 5.13 or later; built and tested on 5.15: a wait with a timeout, SEND
-; and RECV that honor MSG_DONTWAIT) and the server's options do not ask for epoll
-; (HTTPASM_SERVER_EPOLL). Where io_uring is refused (seccomp in Docker's default profile, an
-; older kernel), the worker falls back to epoll by itself.
+; server's options ask for it (HTTPASM_SERVER_URING) and the kernel offers it (Linux 5.13 or
+; later; built and tested on 5.15: a wait with a timeout, SEND and RECV that honor
+; MSG_DONTWAIT). Where io_uring is refused (seccomp in Docker's default profile, an older
+; kernel, a user past RLIMIT_MEMLOCK on 6.14+), the worker falls back to epoll by itself.
+;
+; Not the default: on Linux 5.15 this design measured 5.10-5.46 us of server CPU per HTTP/1.1
+; keep-alive request against epoll's 4.99, and never cheaper than epoll in any of five
+; interleaved rounds; the same as epoll pipelined and over HTTP/2 (benchmarks/README.md). The likely cost is the
+; one-shot poll armed again for every request, which epoll's lasting registration does not
+; pay; multishot polls, registered descriptors, and on newer kernels DEFER_TASKRUN, multishot
+; RECV into provided buffers and zero-copy SEND are the levers to measure next.
 ;
 ; How it works. Readiness stays level-triggered, as under epoll: one POLL_ADD per connection,
 ; one-shot, armed with the events ha_interest_mask gives; when they change while it is armed,
@@ -53,8 +60,22 @@ IORING_OP_POLL_REMOVE   equ 7
 IORING_OP_SEND          equ 26
 IORING_OP_RECV          equ 27
 ENOSYS                  equ 38
-HA_RING_ENTRIES         equ 4096        ; SQEs: more in one walk are submitted in parts
-HA_RING_CQ_ENTRIES      equ 16384       ; a connection has 3 operations at most in flight
+; The ring's size is a budget. Linux 6.14 and later charge every page of a ring (the SQ and CQ
+; rings, the SQE array) to the user's RLIMIT_MEMLOCK, shared by all of that user's processes
+; (8 MiB by default on Ubuntu 24.04): 4096 SQEs and 16384 CQEs took 132 pages a worker, so ten
+; to fifteen workers exhausted it and the rest fell back to epoll (the CI runner's kernel 7.0
+; showed it). These sizes take 21 pages (84 KiB), or 36 while the kernel can also charge the
+; rounding of its allocation to a power of two: 57 to 97 workers per 8 MiB. Neither size limits
+; correctness:
+;   - SQEs: a walk that queues more submits them in parts (ha_uring_sqe), 256 per system call,
+;     already ~1/256 of a call per operation;
+;   - CQEs: a worker has one poll per connection and the RECVs and SENDs of the turn in flight;
+;     past 4096 at once (more than ~1300 connections active in one turn), the kernel keeps the
+;     rest in its overflow list (IORING_FEAT_NODROP) and hands them over, in order, as the ring
+;     is drained: slower, never lost (unless that list's own allocation fails, under memory
+;     pressure, when a connection may wait for its idle timeout instead).
+HA_RING_ENTRIES         equ 256         ; SQEs (16 KiB)
+HA_RING_CQ_ENTRIES      equ 4096        ; CQEs (64 KiB, with the SQ ring's index array beside them)
 
 ; struct io_uring_params (120 octets) and its two offset records.
 P_SQ_ENTRIES    equ 0

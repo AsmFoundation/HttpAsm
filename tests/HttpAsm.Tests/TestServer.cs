@@ -119,10 +119,18 @@ internal sealed unsafe class TestServer : IDisposable
     private readonly Action<Exchange> handler;
 
     /// <summary>
-    /// Whether this test run asks every server for epoll: HTTPASM_TEST_IO=epoll. A run is made
-    /// once with each backend (tests/run-linux.sh, CI), so every test proves both.
+    /// Whether this test run asks every server for io_uring: HTTPASM_TEST_IO=uring. A run is
+    /// made once with each backend (tests/run-linux.sh, CI): epoll, the default, then io_uring,
+    /// so every test proves both.
     /// </summary>
-    public static bool EpollRun => Environment.GetEnvironmentVariable("HTTPASM_TEST_IO") == "epoll";
+    public static bool UringRun => Environment.GetEnvironmentVariable("HTTPASM_TEST_IO") == "uring";
+
+    /// <summary>
+    /// Whether this machine is known to allow io_uring (HTTPASM_REQUIRE_URING=1: WSL, a Linux
+    /// host, CI; not Docker, whose seccomp refuses it), so a server that asks for it and comes
+    /// up on epoll is a failure, not a fallback.
+    /// </summary>
+    public static bool RequireUring => Environment.GetEnvironmentVariable("HTTPASM_REQUIRE_URING") == "1";
 
     /// <summary>Creates and starts a server.</summary>
     /// <param name="handler">Called for each request, on a worker thread.</param>
@@ -130,9 +138,10 @@ internal sealed unsafe class TestServer : IDisposable
     /// <param name="idleMs">The idle timeout (0: the default).</param>
     /// <param name="maxBody">The body limit (0: the default).</param>
     /// <param name="limits">The heads' limits.</param>
-    /// <param name="flags">HTTPASM_SERVER_* (<see cref="ServerIo.ForceEpoll"/> is added in an
-    /// epoll run: <see cref="EpollRun"/>).</param>
-    /// <exception cref="InvalidOperationException">The server could not be created or started.</exception>
+    /// <param name="flags">HTTPASM_SERVER_* (<see cref="ServerIo.AskUring"/> is added in an
+    /// io_uring run: <see cref="UringRun"/>).</param>
+    /// <exception cref="InvalidOperationException">The server could not be created or started, or an io_uring run
+    /// (<see cref="UringRun"/>) that requires io_uring (<see cref="RequireUring"/>) did not get it for every worker.</exception>
     public TestServer(Action<Exchange> handler, uint workers = 2, uint idleMs = 0, ulong maxBody = 0, H1Limits limits = default, ushort flags = 0)
     {
         this.handler = handler;
@@ -146,7 +155,7 @@ internal sealed unsafe class TestServer : IDisposable
             MaxBody = maxBody,
             BindAddress = Loopback,
             Limits = limits,
-            Flags = (ushort)(flags | (EpollRun ? ServerIo.ForceEpoll : 0)),
+            Flags = (ushort)(flags | (UringRun ? ServerIo.AskUring : 0)),
         };
         int error = 0;
         server = Native.ServerCreate(&options, &error);
@@ -164,6 +173,17 @@ internal sealed unsafe class TestServer : IDisposable
             throw new InvalidOperationException($"httpasm_server_start: {started}");
         }
 
+        // An io_uring run must run on io_uring wherever it is known to be allowed: a server that
+        // fell back silently would make the run prove epoll twice and io_uring never.
+        uint io = Native.ServerIoUsed(server);
+        if (UringRun && RequireUring && io != ServerIo.Uring)
+        {
+            Native.ServerDestroy(server);
+            self.Free();
+            throw new InvalidOperationException(
+                $"HTTPASM_TEST_IO=uring and HTTPASM_REQUIRE_URING=1, but httpasm_server_io says {io} ({Platform.IoUringBudget()})");
+        }
+
         Port = Native.ServerPort(server);
     }
 
@@ -171,7 +191,8 @@ internal sealed unsafe class TestServer : IDisposable
     public int Port { get; }
 
     /// <summary>What its workers use now: <see cref="ServerIo.Uring"/>, <see cref="ServerIo.Epoll"/>,
-    /// or <see cref="ServerIo.None"/> while stopped.</summary>
+    /// <see cref="ServerIo.Mixed"/> (the kernel refused some workers' rings), or
+    /// <see cref="ServerIo.None"/> while stopped.</summary>
     public uint Io => Native.ServerIoUsed(server);
 
     /// <summary>The base address for HttpClient.</summary>

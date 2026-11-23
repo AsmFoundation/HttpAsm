@@ -9,11 +9,11 @@ This file is the single plan: the decisions, the architecture and the milestones
 decisions are made. Evidence (measurements, test reports) lives next to the code that produced
 it.
 
-**Status (2026-11-23):** in development; M1 nearly complete (section 7 lists what is left).
-Working on Linux x64:
+**Status (2026-11-23):** in development; M1 is complete (section 7), M2 is next. Working on
+Linux x64:
 - the server: HTTP/1.1 and HTTP/2 (h2c with prior knowledge, h2spec 146/146) on one port,
-  per-core workers on io_uring (epoll as the fallback), handlers that answer at once or later
-  from any thread;
+  per-core workers on epoll (io_uring on request; epoll measured as cheap or cheaper),
+  handlers that answer at once or later from any thread;
 - the client: one blocking HTTP/1.1 connection;
 - the codecs: HTTP/1.1 both ways, chunked bodies, HPACK, HTTP/2's request rules;
 - `specs/` with the requirement registry and the tables generated from the RFC files;
@@ -72,7 +72,7 @@ Open, not decided yet:
  Surfaces    .NET (ASP.NET Core IServer, HttpClient handler: first) · C ABI (httpasm.h) ·
              NASM macros (httpasm.inc) · Python (later)
                  all bind to the one C ABI of libhttpasm.so
- Drivers     our per-core loops (io_uring; epoll as the fallback)
+ Drivers     our per-core loops (epoll; io_uring on request: section 7, step 4)
              or the host's loop (one waitable fd + process() + next_timeout())
              or none (the core called directly: tests, hosts that own their sockets)
  Core        no I/O, no system calls, no allocation; bytes in, bytes and events out,
@@ -102,9 +102,11 @@ Open, not decided yet:
   - **Async answers:** a handler may park a request and complete it from any thread, which wakes
     the owning worker with an event. In .NET, an `await` resumes on the same worker.
 - **Kernel baseline:**
-  - Linux 5.15, the WSL2 kernel tests run on here. Newer io_uring features (buffer rings,
-    zero-copy send, `MSG_RING`) are probed at startup and used when present.
-  - CI's newer kernels run those paths.
+  - Linux 5.15, the WSL2 kernel tests run on here; the io_uring backend needs 5.13.
+  - Newer io_uring features (buffer rings, zero-copy send, `MSG_RING`, DEFER_TASKRUN) are to be
+    probed at startup and used when present: they are the levers that may make io_uring the
+    default (section 7, step 4).
+  - CI runs a newer kernel (7.0 on 2026-11-23), so the paths that need one run there.
 - **CPU baseline:**
   - SSE2 in the first code.
   - Faster paths (SSSE3, AVX2, AVX-512) come with run-time dispatch, each kept only when a
@@ -191,20 +193,35 @@ stays only if the difference is within noise.
    - SIMD parsing (SSE2: line ends, field values).
 4. *The Linux driver (done):* per-core loops: accept with SO_REUSEPORT, timers as deadline
    lists, idle without polling, back-pressure, graceful stop, the server's and the client's
-   calls in the C ABI. Each worker waits on its own io_uring (`src/HttpAsm/uring.asm`), with
-   epoll as the fallback (a kernel before 5.13, a seccomp profile that refuses
-   `io_uring_setup`) and on request (`HTTPASM_SERVER_EPOLL`); both drive the same connection
-   code, and the tests run in full on each:
-   - readiness stays level-triggered: one one-shot POLL_ADD per connection, armed with the
-     events the connection wants; a change while it is armed removes it and arms it anew
-     (updating an armed poll in place, IORING_POLL_UPDATE_EVENTS, left connections stalled
-     under back-pressure in the tests on 5.15, so it is not used);
-   - the I/O is batched: the turn's RECVs, SENDs and polls reach the kernel in the one
-     `io_uring_enter` that then waits; every RECV and SEND carries MSG_DONTWAIT, so it
-     completes inside that call and no buffer is lent to the kernel past it;
-   - SQEs are written only right before `io_uring_enter`, from each connection's state then,
-     so none names a descriptor number reused since; a closed connection is freed only when
-     its last operation has completed (`conn.uops`).
+   calls in the C ABI. Two backends drive the same connection code, and the tests run in full
+   on each (CI and `tests/run-linux.sh` run the suite twice):
+   - **epoll, the default** (measured below);
+   - **io_uring on request** (`HTTPASM_SERVER_URING`, `src/HttpAsm/uring.asm`): each worker
+     on its own ring, or on epoll where the kernel refuses one (before 5.13, a seccomp
+     profile such as Docker's, the memory budget below). Its design:
+     - readiness stays level-triggered: one one-shot POLL_ADD per connection, armed with the
+       events the connection wants; a change while it is armed removes it and arms it anew
+       (updating an armed poll in place, IORING_POLL_UPDATE_EVENTS, left connections stalled
+       under back-pressure in the tests on 5.15, so it is not used);
+     - the I/O is batched: the turn's RECVs, SENDs and polls reach the kernel in the one
+       `io_uring_enter` that then waits; every RECV and SEND carries MSG_DONTWAIT, so it
+       completes inside that call and no buffer is lent to the kernel past it;
+     - SQEs are written only right before `io_uring_enter`, from each connection's state
+       then, so none names a descriptor number reused since; a closed connection is freed
+       only when its last operation has completed (`conn.uops`);
+     - the ring's memory budget: Linux 6.14 and later charge every page of a ring to the
+       user's RLIMIT_MEMLOCK (8 MiB by default on Ubuntu 24.04, shared by all of the user's
+       processes). Rings of 4096 SQEs and 16384 CQEs (132 pages) let 10 to 15 workers have
+       one, and CI's kernel 7.0 put the rest on epoll; 256 and 4096 (21 pages) allow 57 to
+       97. `httpasm_server_io` says MIXED when only some workers got a ring.
+   - **Why epoll is the default** (`benchmarks/README.md`, 2026-11-23, Linux 5.15): io_uring
+     as built cost 5.10 to 5.46 µs of server CPU per HTTP/1.1 keep-alive request against
+     epoll's 4.99, and was never cheaper than epoll in five interleaved rounds; pipelined and
+     over HTTP/2 the two are within the noise. The likely cost is the one-shot poll armed
+     again for every request, which epoll's lasting registration does not pay. io_uring
+     becomes the default only when a design of it measures faster; the levers to measure are
+     multishot polls, registered descriptors, and on newer kernels DEFER_TASKRUN, multishot
+     receives into provided buffers and zero-copy sends.
 5. *The isolation measurement (done, `benchmarks/`):* the same sources built without HTTP/2
    (the `H1Only` configuration) against the full build, with an A/A control (the full build
    twice) as the noise floor. On 2026-11-23 (f75c380): 4.11 and 4.13 µs of CPU per HTTP/1.1
@@ -227,11 +244,17 @@ stays only if the difference is within noise.
    HTTP/2 client, intermediaries, options); RFC 9112 112 of 160; RFC 9110 97 of 509 (most of
    the rest is the application's, the client's or an intermediary's).
 
-**Left for M1's exit:** measuring the io_uring loop against epoll (step 4) in `benchmarks/`.
-
 *Exit:* every RFC 9112, RFC 9113 and RFC 7541 row proven, or deferred with a reason. The RFC
 9110 rows M1 needs are proven; the others are deferred with reasons. h2spec 146/146,
 request-smuggling cases, and recorded measurements.
+
+**M1 is complete (2026-11-23):** the exit criteria hold. The registry gate passes (step 7),
+h2spec runs its 146 cases in CI, the request-smuggling defenses of RFC 9112 section 6 are
+tested end to end on both backends (`ServerTests.RefusesBadRequestsAndCloses`: Content-Length
+with Transfer-Encoding in either order with a request hidden behind the body, two lengths,
+chunked not last, Transfer-Encoding in HTTP/1.0, bare LF, obs-fold, two Hosts; and the
+parser's own cases in `H1RequestTests`), and the measurements are recorded in
+`benchmarks/results/` (the isolation question, step 5; io_uring against epoll, step 4).
 
 **Then, in order:**
 - **M2:** crypto in assembly + TLS 1.3 (RFC 8446).

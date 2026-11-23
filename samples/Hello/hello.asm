@@ -4,7 +4,7 @@
 ;
 ; Startup, in this order:
 ;   1. settings from the environment, parsed strictly (numbers: decimal digits only, no sign,
-;      no whitespace, no overflow, range-checked; HELLO_IO: "uring" or "epoll" exactly): an
+;      no whitespace, no overflow, range-checked; HELLO_IO: "epoll" or "uring" exactly): an
 ;      invalid value is reported with its name and the process exits 2, because a typo must
 ;      never fall back to a default;
 ;   2. SIGINT and SIGTERM blocked, before any worker exists: the workers inherit the mask, so
@@ -70,10 +70,11 @@ handler:
     ret
 
 ; -----------------------------------------------------------------------------
-; io_setting: HELLO_IO, what the server's workers wait and do their I/O with: "uring" (the
-; default: io_uring where the kernel has it, epoll where it does not) or "epoll"
-; (HTTPASM_SERVER_EPOLL: the measurements compare the two). Anything else is reported and
-; exits 2, as every invalid setting does: a typo must not silently pick a backend.
+; io_setting: HELLO_IO, what the server's workers wait and do their I/O with: "epoll" (the
+; library's default, measured as cheap or cheaper) or "uring" (HTTPASM_SERVER_URING: io_uring
+; where the kernel gives each worker a ring, epoll for any it refuses; the measurements compare
+; the two). Anything else is reported and exits 2, as every invalid setting does: a typo must
+; not silently pick a backend.
 ;   Out: eax = the options' flags. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 align 16
@@ -82,24 +83,24 @@ io_setting:
     lea     rdi, [rel s_io]
     call    getenv wrt ..plt
     test    rax, rax
-    jz      .uring                          ; unset: the default
+    jz      .epoll                          ; unset: the default
     mov     rbx, rax
-    mov     rdi, rbx
-    lea     rsi, [rel s_epoll]
-    call    same_string
-    test    eax, eax
-    jnz     .epoll
     mov     rdi, rbx
     lea     rsi, [rel s_uring]
     call    same_string
     test    eax, eax
+    jnz     .uring
+    mov     rdi, rbx
+    lea     rsi, [rel s_epoll]
+    call    same_string
+    test    eax, eax
     jz      .invalid
-.uring:
+.epoll:
     xor     eax, eax
     pop     rbx
     ret
-.epoll:
-    mov     eax, HTTPASM_SERVER_EPOLL
+.uring:
+    mov     eax, HTTPASM_SERVER_URING
     pop     rbx
     ret
 .invalid:

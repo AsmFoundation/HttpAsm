@@ -1,8 +1,11 @@
 # HttpAsm benchmarks
 
-`run.sh` measures HttpAsm against nginx and h2o, and against its own HTTP/1.1-only build. The
-second comparison is the isolation measurement of [docs/DESIGN.md](../docs/DESIGN.md) section 4:
-it checks whether building HTTP/1.1 from shared source, next to HTTP/2, costs it anything.
+`run.sh` measures HttpAsm against nginx and h2o, against its own HTTP/1.1-only build, and its
+two backends against each other. The second comparison is the isolation measurement of
+[docs/DESIGN.md](../docs/DESIGN.md) section 4: it checks whether building HTTP/1.1 from shared
+source, next to HTTP/2, costs it anything. The third decides which backend is the default:
+`httpasm` runs on epoll, the default, and `httpasm-uring` is the same build asking for
+io_uring.
 
 Every report it writes is kept in [results/](results/), named by date and time, with the machine,
 the versions and the settings it ran with.
@@ -56,10 +59,59 @@ ROUNDS=5 benchmarks/run.sh 10                        # 5 rounds of 10 s per serv
 `SERVER_CPUS`, `CLIENT_CPUS` and `WORKERS` move the pinning. Nothing else may run on the machine
 meanwhile: not even a build, which here once replaced `libhttpasm.so` under the running servers.
 
+`ab.sh` answers a narrower question, whether a change made HttpAsm cheaper or dearer: two
+builds of the Hello sample, interleaved, and the second one twice (its A/A control), in `h1`
+and `h1-pipelined`:
+
+```bash
+git worktree add --detach ../before <commit>                    # the build to compare against
+(cd ../before && dotnet build samples/Hello/Hello.asmproj -c Release)
+dotnet build samples/Hello/Hello.asmproj -c Release             # the change
+benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10 s
+```
+
+`HELLO_IO_A` and `HELLO_IO_B` choose each build's backend (`epoll`, the default, or `uring`).
+
 ## Results
 
 Every run's report is in [results/](results/), named by date and time; a report names the
 commit it measured (`-dirty` when the tree had uncommitted changes when the run began).
+
+**2026-11-23, b932500: io_uring against epoll** ([report](results/2026-11-23-2008.md)). The same
+machine and settings as the run below, 5 rounds of 10 s; at b932500 io_uring was the default,
+so `httpasm`, its A/A control and the HTTP/1.1-only build ran on io_uring, and `httpasm-epoll`
+was the full build asked for epoll. The server's CPU µs per request, medians (range over the
+rounds):
+
+| Scenario | io_uring | io_uring, A/A | io_uring, HTTP/1.1-only | epoll |
+|---|---:|---:|---:|---:|
+| `h1` | 5.37 (5.11-6.01) | 5.46 (5.21-6.24) | 5.10 (4.84-5.74) | **4.99** (4.51-5.43) |
+| `h1-pipelined` | 0.71 (0.60-0.77) | 0.74 (0.61-0.80) | 0.72 (0.65-0.77) | 0.69 (0.62-0.80) |
+| `h2` | 1.25 (1.01-1.34) | | | 1.17 (0.89-1.24) |
+
+What it shows:
+- **io_uring, as built, is not cheaper than epoll on Linux 5.15.** In `h1` epoll was the
+  cheapest of the four HttpAsm processes in every round (tied once), which chance alone would
+  give about once in a thousand runs; pipelined and over HTTP/2 the two are within the noise
+  (epoll was lower in 4 of the 5 `h2` rounds). The backend arms a one-shot poll again for
+  every request, which epoll's lasting registration does not pay; batching the receives and
+  sends into one `io_uring_enter` per turn does not win that back.
+- **So epoll became the default** (`HTTPASM_SERVER_URING` asks for io_uring), and every test
+  runs on both backends. io_uring becomes the default only when a design of it measures
+  faster: multishot polls, registered descriptors, and on newer kernels DEFER_TASKRUN,
+  multishot receives into provided buffers and zero-copy sends.
+- **This run's absolute numbers are higher than the f75c380 run's** (`h1`: nginx 8.44 against
+  8.05, HttpAsm's epoll 4.99 against 4.13): the host was busier. Only comparisons within one
+  run count. Whether the epoll path itself got dearer when io_uring was added was measured
+  directly, with `ab.sh` ([report](results/2026-11-23-2037-ab-epoll.md)): f75c380 against the
+  change that made epoll the default, interleaved, with that change twice (its A/A control).
+  `h1`: 4.45 µs against 4.52 and 4.40, so the A/A pair brackets f75c380; `h1-pipelined`: 0.58
+  against 0.60 and 0.60, a gap that an earlier run of the same comparison (a scratch copy of
+  the script) gave the other way round, 0.64 against 0.61 and 0.62. No change is measurable.
+- The ring sizes changed after this run (4096 SQEs and 16384 CQEs, then 256 and 4096, for
+  Linux 6.14's memory charge; docs/DESIGN.md section 7, step 4). At 64 connections per worker
+  a turn queues at most 192 SQEs and no CQE overflows, so the sizes do not touch these
+  numbers.
 
 **2026-11-23, f75c380** ([report](results/2026-11-23-1932.md)): an i9-13900K under WSL2 (Linux
 5.15), 4 workers per server, 5 rounds of 10 s. The medians, with the CPU time per request's

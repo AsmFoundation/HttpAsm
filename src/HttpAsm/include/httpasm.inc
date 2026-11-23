@@ -29,11 +29,13 @@ struc httpasm_server_options
 endstruc
 
 ; httpasm_server_options.flags
-HTTPASM_SERVER_EPOLL        equ 0x0001  ; epoll even where io_uring is available (comparisons; the fallback)
-; httpasm_server_io's answers: what the server's workers wait and do their I/O with
+HTTPASM_SERVER_URING        equ 0x0001  ; io_uring per worker, epoll where refused (default: epoll, measured; httpasm.h)
+; httpasm_server_io's answers: what the server's workers wait and do their I/O with (MIXED:
+; the kernel refused some workers' rings, e.g. past RLIMIT_MEMLOCK on Linux 6.14+; httpasm.h)
 HTTPASM_SERVER_IO_NONE      equ 0       ; not running
-HTTPASM_SERVER_IO_EPOLL     equ 1
-HTTPASM_SERVER_IO_URING     equ 2
+HTTPASM_SERVER_IO_EPOLL     equ 1       ; every worker
+HTTPASM_SERVER_IO_URING     equ 2       ; every worker
+HTTPASM_SERVER_IO_MIXED     equ 3       ; some workers on io_uring, the others on epoll
 
 ; -----------------------------------------------------------------------------
 ; httpasm_client_response (httpasm.h): what httpasm_client_send reads (96 octets). Every

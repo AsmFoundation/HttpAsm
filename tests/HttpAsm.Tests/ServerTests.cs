@@ -551,47 +551,52 @@ public sealed class ServerTests
     }
 
     /// <summary>
-    /// The workers wait and do their I/O through io_uring where the kernel allows it, and
-    /// through epoll when the options ask for it (or the kernel refuses io_uring, as Docker's
-    /// seccomp does); both serve, and a server stopped and started again comes back on the same
-    /// one. Runs that know io_uring is there (WSL, CI) set HTTPASM_REQUIRE_URING=1, so a silent
-    /// fall back to epoll fails them; an epoll run (HTTPASM_TEST_IO=epoll) expects epoll.
+    /// The workers wait and do their I/O through epoll by default, and through io_uring when
+    /// the options ask for it (HTTPASM_SERVER_URING) and the kernel allows it; both serve, and a
+    /// server stopped and started again comes back on the same backend. Runs that know io_uring
+    /// is there (WSL, CI) set HTTPASM_REQUIRE_URING=1, so a silent fall back to epoll fails
+    /// them, saying why it may have happened (the kernel and RLIMIT_MEMLOCK, which Linux 6.14
+    /// and later charge rings to). In an io_uring run (HTTPASM_TEST_IO=uring) every server asks,
+    /// the plain one too.
     /// </summary>
+    /// <remarks>
+    /// Where io_uring is not required, the asking server may also come up on
+    /// <see cref="ServerIo.Epoll"/> (Docker's seccomp refuses every ring) or
+    /// <see cref="ServerIo.Mixed"/> (the kernel refused some); RingBudgetTests covers the refusal
+    /// itself.
+    /// </remarks>
     [Fact]
-    public void WaitsWithIoUringWhereTheKernelAllows()
+    public void WaitsWithEpollUnlessAskedForIoUring()
     {
         Platform.RequireLinuxX64();
-        bool required = Environment.GetEnvironmentVariable("HTTPASM_REQUIRE_URING") == "1" && !TestServer.EpollRun;
-        using var server = new TestServer(x => x.Respond(200, "served"));
-        using var epoll = new TestServer(x => x.Respond(200, "served"), flags: ServerIo.ForceEpoll);
+        bool required = TestServer.RequireUring;
+        using var plain = new TestServer(x => x.Respond(200, "served"));
+        using var asking = new TestServer(x => x.Respond(200, "served"), flags: ServerIo.AskUring);
 
-        uint io = server.Io;
-        if (TestServer.EpollRun)
+        uint io = asking.Io;
+        if (required)
         {
-            Assert.Equal(ServerIo.Epoll, io);
-        }
-        else if (required)
-        {
-            Assert.Equal(ServerIo.Uring, io);
+            Assert.True(io == ServerIo.Uring, $"HTTPASM_REQUIRE_URING=1, but httpasm_server_io says {io} ({Platform.IoUringBudget()})");
         }
         else
         {
-            Assert.Contains(io, new[] { ServerIo.Uring, ServerIo.Epoll });
+            Assert.Contains(io, new[] { ServerIo.Uring, ServerIo.Epoll, ServerIo.Mixed });
         }
 
-        Assert.Equal(ServerIo.Epoll, epoll.Io);
-        foreach (TestServer s in new[] { server, epoll })
+        // epoll unless asked; in an io_uring run the plain server asks too, and gets the same.
+        Assert.Equal(TestServer.UringRun ? io : ServerIo.Epoll, plain.Io);
+        foreach (TestServer s in new[] { plain, asking })
         {
             using var c = new RawConnection(s.Port);
             c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
             Assert.Equal("served", c.ReadResponse().Text);
         }
 
-        server.Stop();
-        Assert.Equal(ServerIo.None, server.Io);
-        Assert.Equal(0, server.Start());
-        Assert.Equal(io, server.Io);
-        using var again = new RawConnection(server.Port);
+        asking.Stop();
+        Assert.Equal(ServerIo.None, asking.Io);
+        Assert.Equal(0, asking.Start());
+        Assert.Equal(io, asking.Io);
+        using var again = new RawConnection(asking.Port);
         again.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         Assert.Equal("served", again.ReadResponse().Text);
     }

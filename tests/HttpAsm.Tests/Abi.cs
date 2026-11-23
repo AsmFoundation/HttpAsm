@@ -265,22 +265,31 @@ internal unsafe struct HpackOutput
 }
 
 /// <summary>
-/// What a server's workers wait and do their I/O with (httpasm.h): the option that rules
-/// io_uring out, and httpasm_server_io's answers.
+/// What a server's workers wait and do their I/O with (httpasm.h): the option that asks for
+/// io_uring (epoll is the default), and httpasm_server_io's answers.
 /// </summary>
 internal static class ServerIo
 {
-    /// <summary>HTTPASM_SERVER_EPOLL: epoll even where io_uring is available.</summary>
-    public const ushort ForceEpoll = 0x0001;
+    /// <summary>
+    /// HTTPASM_SERVER_URING: each worker asks the kernel for its own io_uring, and runs on epoll
+    /// if refused (so asking never fails a start; <see cref="TestServer.Io"/> tells what came).
+    /// </summary>
+    public const ushort AskUring = 0x0001;
 
     /// <summary>HTTPASM_SERVER_IO_NONE: not running.</summary>
     public const uint None = 0;
 
-    /// <summary>HTTPASM_SERVER_IO_EPOLL.</summary>
+    /// <summary>HTTPASM_SERVER_IO_EPOLL: every worker on epoll.</summary>
     public const uint Epoll = 1;
 
-    /// <summary>HTTPASM_SERVER_IO_URING.</summary>
+    /// <summary>HTTPASM_SERVER_IO_URING: every worker on its own io_uring.</summary>
     public const uint Uring = 2;
+
+    /// <summary>
+    /// HTTPASM_SERVER_IO_MIXED: the kernel gave rings to some workers only (on Linux 6.14 and
+    /// later, typically the user's RLIMIT_MEMLOCK running out; see httpasm.h).
+    /// </summary>
+    public const uint Mixed = 3;
 }
 
 /// <summary>httpasm_server_options (httpasm.h): 64 octets; zero fields take their defaults.</summary>
@@ -308,7 +317,7 @@ internal struct ServerOptions
     /// <summary>0 for any free port.</summary>
     public ushort Port;
 
-    /// <summary>HTTPASM_SERVER_* (<see cref="ServerIo.ForceEpoll"/>).</summary>
+    /// <summary>HTTPASM_SERVER_* (<see cref="ServerIo.AskUring"/>).</summary>
     public ushort Flags;
 
     /// <summary>The heads' limits.</summary>

@@ -9,13 +9,15 @@
 ; thread. A worker sleeps until an event arrives or the earliest idle deadline is due; with no
 ; connection it waits without a timeout at all. Nothing ticks.
 ;
-; Waiting and I/O, per worker: through its own io_uring where the kernel offers it (uring.asm:
-; one io_uring_enter per loop turn submits the turn's receives, sends and polls, and waits for
-; the next completions), through epoll otherwise (epoll_wait, then recv and send per ready
-; connection). HTTPASM_SERVER_EPOLL asks for epoll; a kernel or a seccomp profile that refuses
-; io_uring_setup gets epoll without asking, worker by worker (httpasm_server_io tells which one
-; the first worker uses). Both drive the same connection code (connection.asm): only the
-; waiting, and who issues the receives and sends, differ.
+; Waiting and I/O, per worker: through epoll by default (epoll_wait, then recv and send per
+; ready connection), or through the worker's own io_uring when the options ask for it with
+; HTTPASM_SERVER_URING (uring.asm: one io_uring_enter per loop turn submits the turn's receives,
+; sends and polls, and waits for the next completions). epoll is the default because it
+; measured as cheap or cheaper on Linux 5.15 (benchmarks/README.md). A kernel or a seccomp
+; profile that refuses io_uring_setup leaves the asking worker on epoll, worker by worker
+; (httpasm_server_io tells whether all, none or some have rings). Both drive the same
+; connection code (connection.asm): only the waiting, and who issues the receives and sends,
+; differ.
 ;
 ; Stopping: httpasm_server_stop sets the server's stop flag and wakes every worker through its
 ; eventfd. A worker then closes its listener and the connections that are between requests,
@@ -207,8 +209,8 @@ httpasm_server_create:
 .end:
 
 ; -----------------------------------------------------------------------------
-; worker_open: a worker's io_uring ring (uring.asm) or, failing that or when the options ask
-; for it (HTTPASM_SERVER_EPOLL), its epoll instance; and its listening socket, bound and
+; worker_open: a worker's epoll instance or, when the options ask for it (HTTPASM_SERVER_URING)
+; and the kernel gives one, its io_uring ring (uring.asm); and its listening socket, bound and
 ; listening. Under epoll the listener and the worker's eventfd (made by httpasm_server_create)
 ; join the epoll instance here; under io_uring worker_main arms a poll for each instead.
 ;   In: rdi = worker. Out: eax = 0, or -errno (what is already open stays for close_worker).
@@ -224,10 +226,11 @@ worker_open:
     mov     r12, [rbx + worker.server]
     mov     dword [rbx + worker.stopping], 0
     mov     qword [rbx + worker.stop_deadline], 0
-    ; io_uring first, unless the options ask for epoll; a kernel without it (or a seccomp
-    ; profile refusing it) leaves the worker on epoll, which needs no setting at all.
-    test    dword [r12 + server.flags], HTTPASM_SERVER_EPOLL
-    jnz     .epoll
+    ; io_uring only when the options ask for it; a kernel without it (or a seccomp profile
+    ; refusing it, or a user past RLIMIT_MEMLOCK on Linux 6.14+) leaves the worker on epoll,
+    ; which needs no setting at all.
+    test    dword [r12 + server.flags], HTTPASM_SERVER_URING
+    jz      .epoll
     mov     rdi, rbx
     call    ha_uring_open
     test    eax, eax
@@ -588,10 +591,15 @@ httpasm_server_port:
 
 ; -----------------------------------------------------------------------------
 ; uint32_t httpasm_server_io(const httpasm_server *server)
-;   What the running server's workers wait and do their I/O with: HTTPASM_SERVER_IO_URING or
-;   _EPOLL, read from the first worker (each worker makes its ring on its own when it opens,
-;   so they agree unless the kernel refused some rings and not others), or _NONE when the
-;   server is not running. For tests and measurements that must know which one ran.
+;   What the running server's workers wait and do their I/O with: HTTPASM_SERVER_IO_URING when
+;   every worker has its ring, _EPOLL when none has, _MIXED when some have and some do not, or
+;   _NONE when the server is not running. Each worker makes its ring on its own when it opens,
+;   so the kernel can refuse some and not others: Linux 6.14 and later charge rings to the
+;   user's RLIMIT_MEMLOCK, and a user past it gets epoll for the remaining workers (uring.asm,
+;   HA_RING_ENTRIES). For tests, measurements and operators that must know what really runs.
+;   Every worker's flag is set before httpasm_server_start returns; a stop clears them as the
+;   workers exit, so a call racing a stop may see a mix.
+;   In: rdi = server. Out: eax. Clobbers rcx, rdx, rsi.
 ; -----------------------------------------------------------------------------
 global httpasm_server_io:function (httpasm_server_io.end - httpasm_server_io)
 align 16
@@ -600,10 +608,23 @@ httpasm_server_io:
     cmp     dword [rdi + server.started], 0
     je      .out
     mov     rcx, [rdi + server.workers]
-    mov     eax, HTTPASM_SERVER_IO_EPOLL
+    mov     edx, [rdi + server.worker_count] ; at least 1: create gives every server a worker
+    xor     esi, esi                        ; the workers with a ring
+.count:
     cmp     dword [rcx + worker.uring], 0
-    je      .out
+    je      .next
+    inc     esi
+.next:
+    add     rcx, worker_size
+    dec     edx
+    jnz     .count
+    mov     eax, HTTPASM_SERVER_IO_EPOLL
+    test    esi, esi
+    jz      .out                            ; none
     mov     eax, HTTPASM_SERVER_IO_URING
+    cmp     esi, [rdi + server.worker_count]
+    je      .out                            ; all
+    mov     eax, HTTPASM_SERVER_IO_MIXED
 .out:
     ret
 .end:

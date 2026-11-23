@@ -329,4 +329,37 @@ internal static unsafe partial class Native
     /// <returns>0, or -1 with errno set.</returns>
     [LibraryImport(Libc, EntryPoint = "munmap", SetLastError = true)]
     internal static partial int Munmap(nint addr, nuint length);
+
+    /// <summary>getrlimit's and setrlimit's RLIMIT_MEMLOCK on Linux x64.</summary>
+    internal const int RlimitMemlock = 8;
+
+    /// <summary>int getrlimit(int resource, struct rlimit *rlim).</summary>
+    /// <param name="resource">RLIMIT_* (<see cref="RlimitMemlock"/>).</param>
+    /// <param name="limit">Receives the soft and the hard limit.</param>
+    /// <returns>0, or -1 with errno set.</returns>
+    [LibraryImport(Libc, EntryPoint = "getrlimit", SetLastError = true)]
+    internal static partial int GetRlimit(int resource, out Rlimit limit);
+
+    /// <summary>int setrlimit(int resource, const struct rlimit *rlim).</summary>
+    /// <param name="resource">RLIMIT_* (<see cref="RlimitMemlock"/>).</param>
+    /// <param name="limit">The new soft and hard limit.</param>
+    /// <returns>0, or -1 with errno set (EPERM: raising a hard limit without the privilege).</returns>
+    /// <remarks>
+    /// Process-wide: every thread of the test process sees the new limit at once, so a test that
+    /// lowers one must not run beside others that depend on it (see
+    /// <see cref="SerialCollection"/>), and must put the old one back.
+    /// </remarks>
+    [LibraryImport(Libc, EntryPoint = "setrlimit", SetLastError = true)]
+    internal static partial int SetRlimit(int resource, in Rlimit limit);
+}
+
+/// <summary>struct rlimit on Linux x64: the soft limit, then the hard one (RLIM_INFINITY = ~0).</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct Rlimit
+{
+    /// <summary>rlim_cur: what the kernel enforces now; any process may lower or raise it up to <see cref="Max"/>.</summary>
+    public ulong Current;
+
+    /// <summary>rlim_max: the ceiling for <see cref="Current"/>; only privilege raises it.</summary>
+    public ulong Max;
 }
