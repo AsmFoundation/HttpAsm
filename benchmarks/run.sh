@@ -39,6 +39,9 @@ server_cpus="${SERVER_CPUS:-0-3}"
 client_cpus="${CLIENT_CPUS:-8-15}"
 workers="${WORKERS:-4}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The version measured, taken now: the binaries are what the tree held when they were built, and
+# a file edited while the run goes on must not mark the report "-dirty" after the fact.
+measured="$(git -C "$repo" describe --always --dirty)"
 work="$(mktemp -d)"
 mkdir -p "$repo/benchmarks/results"
 report="$repo/benchmarks/results/$(date +%F-%H%M).md"
@@ -182,7 +185,7 @@ range() {
   echo "- Machine: $(lscpu | awk -F: '/Model name/ {gsub(/^ +/, "", $2); print $2}'), $(nproc) logical CPUs; kernel $(uname -r)"
   echo "- Servers: $workers workers on CPUs $server_cpus; load generators on CPUs $client_cpus"
   # --dirty: a run on uncommitted changes says so, instead of naming a commit it did not measure.
-  echo "- Versions: HttpAsm $(git -C "$repo" describe --always --dirty), $(nginx -v 2>&1 | sed 's/.*: //'), $(h2o --version | head -1), $(wrk -v 2>&1 | head -1 | awk '{print "wrk " $2}'), h2load $(h2load --version | awk '{print $2}')"
+  echo "- Versions: HttpAsm $measured, $(nginx -v 2>&1 | sed 's/.*: //'), $(h2o --version | head -1), $(wrk -v 2>&1 | head -1 | awk '{print "wrk " $2}'), h2load $(h2load --version | awk '{print $2}')"
   echo "- $rounds rounds of ${seconds} s per server and scenario, interleaved; medians, and the CPU range over the rounds"
   echo "- httpasm-control is a second process of the same full build: the A/A noise floor"
   echo

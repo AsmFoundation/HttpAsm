@@ -191,9 +191,12 @@ stays only if the difference is within noise.
 4. *The Linux driver:* per-core epoll loops (done): accept with SO_REUSEPORT, timers as
    deadline lists, idle without polling, back-pressure, graceful stop, the server's and the
    client's calls in the C ABI. **Left:** the io_uring loop, with epoll as its fallback.
-5. *The isolation measurement (`benchmarks/`):* the same sources built without HTTP/2 (the
-   `H1Only` configuration) against the full build, with an A/A control (the full build twice)
-   as the noise floor. Against nginx 1.24 and h2o 2.2.5 too: see `benchmarks/README.md`.
+5. *The isolation measurement (done, `benchmarks/`):* the same sources built without HTTP/2
+   (the `H1Only` configuration) against the full build, with an A/A control (the full build
+   twice) as the noise floor. On 2026-11-23 (f75c380): 4.11 and 4.13 µs of CPU per HTTP/1.1
+   request, where the A/A pair differs by more (4.13 and 4.17); 0.55 for all three pipelined.
+   No measurable cost, so the design stays. Against nginx 1.24 and h2o 2.2.5 too: see
+   `benchmarks/README.md`.
 6. *HTTP/2 (done):*
    - frames, stream states, flow control, SETTINGS (`src/HttpAsm/h2.asm`);
    - HPACK, with its static table and Huffman code generated from RFC 7541 (the encoder

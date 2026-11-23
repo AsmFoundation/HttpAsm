@@ -35,9 +35,10 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 - **A sans-I/O core.** The protocol codecs do no I/O: bytes go in, and bytes and events come
   out. Per-core loops drive them, and so can a host's own loop or a test.
 - **Shared source, separate code.** HTTP/1.1, HTTP/2 and HTTP/3 share each RFC 9110 rule as one
-  NASM macro, assembled into each version's own code, so no hot path checks a version. Whether
-  that costs HTTP/1.1 anything is measured in [benchmarks/](benchmarks/README.md): the full
-  build against an HTTP/1.1-only build, with an A/A control as the noise floor.
+  NASM macro, assembled into each version's own code, so no hot path checks a version. It costs
+  HTTP/1.1 nothing measurable: the full build and an HTTP/1.1-only build use the same CPU time
+  per request, closer to each other than two runs of one build are
+  ([benchmarks/](benchmarks/README.md)).
 - **One C ABI for every consumer.** .NET's standard interfaces come first (an ASP.NET Core
   server, an `HttpClient` handler). C, Python and NASM programs bind to the same
   `libhttpasm.so` (`include/httpasm.h`, `include/httpasm.inc`).
