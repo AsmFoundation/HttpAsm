@@ -24,8 +24,8 @@ httpasm_abi_version:
 ; uint32_t httpasm_struct_size(uint32_t which)
 ;   The size the library uses for one of its structures, so a binding (the .NET tests' copies,
 ;   a C program's header) can check its layout matches: 1 httpasm_field, 2 httpasm_request,
-;   3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head, 6 httpasm_h1_chunked;
-;   0 for anything else.
+;   3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head, 6 httpasm_h1_chunked,
+;   7 httpasm_server_options; 0 for anything else.
 ;   In: edi. Out: eax. Clobbers rcx and the flags.
 ; -----------------------------------------------------------------------------
 section .rodata
@@ -38,6 +38,7 @@ struct_sizes:
     dd httpasm_response_size
     dd httpasm_response_head_size
     dd httpasm_h1_chunked_size
+    dd httpasm_server_options_size
 STRUCT_SIZES equ ($ - struct_sizes) / 4
 
 section .text

@@ -145,6 +145,72 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_h1_write_last_chunk")]
     internal static partial long H1WriteLastChunk(byte* output, nuint capacity, HttpField* trailers, uint count);
 
+    /// <summary>httpasm_server *httpasm_server_create(options, int *error).</summary>
+    /// <param name="options">The options.</param>
+    /// <param name="error">Receives -errno on failure.</param>
+    /// <returns>The server, or null.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_create")]
+    internal static partial nint ServerCreate(ServerOptions* options, int* error);
+
+    /// <summary>int httpasm_server_start(server).</summary>
+    /// <param name="server">The server.</param>
+    /// <returns>0 or -errno.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_start")]
+    internal static partial int ServerStart(nint server);
+
+    /// <summary>uint16_t httpasm_server_port(server).</summary>
+    /// <param name="server">The server.</param>
+    /// <returns>The port it listens on.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_port")]
+    internal static partial ushort ServerPort(nint server);
+
+    /// <summary>void httpasm_server_stop(server).</summary>
+    /// <param name="server">The server.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_stop")]
+    internal static partial void ServerStop(nint server);
+
+    /// <summary>void httpasm_server_destroy(server).</summary>
+    /// <param name="server">The server.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_server_destroy")]
+    internal static partial void ServerDestroy(nint server);
+
+    /// <summary>const httpasm_request *httpasm_exchange_request(exchange).</summary>
+    /// <param name="exchange">The exchange.</param>
+    /// <returns>The request.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_exchange_request")]
+    internal static partial HttpRequest* ExchangeRequest(nint exchange);
+
+    /// <summary>const uint8_t *httpasm_exchange_body(exchange, size_t *length).</summary>
+    /// <param name="exchange">The exchange.</param>
+    /// <param name="length">Receives the body's length.</param>
+    /// <returns>The body.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_exchange_body")]
+    internal static partial byte* ExchangeBody(nint exchange, nuint* length);
+
+    /// <summary>const httpasm_field *httpasm_exchange_trailers(exchange, uint32_t *count).</summary>
+    /// <param name="exchange">The exchange.</param>
+    /// <param name="count">Receives how many.</param>
+    /// <returns>The trailer fields.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_exchange_trailers")]
+    internal static partial HttpField* ExchangeTrailers(nint exchange, uint* count);
+
+    /// <summary>int httpasm_exchange_defer(exchange).</summary>
+    /// <param name="exchange">The exchange.</param>
+    /// <returns>0 or -EINVAL.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_exchange_defer")]
+    internal static partial int ExchangeDefer(nint exchange);
+
+    /// <summary>int httpasm_exchange_respond(exchange, status, fields, count, body, length).</summary>
+    /// <param name="exchange">The exchange.</param>
+    /// <param name="status">The status.</param>
+    /// <param name="fields">The fields.</param>
+    /// <param name="count">How many.</param>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its length.</param>
+    /// <returns>0 or a negative error.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_exchange_respond")]
+    internal static partial int ExchangeRespond(nint exchange, ushort status, HttpField* fields, uint count, byte* body, nuint length);
+
     /// <summary>void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset).</summary>
     /// <param name="addr">A placement hint; zero lets the kernel choose.</param>
     /// <param name="length">The mapping's size in bytes.</param>

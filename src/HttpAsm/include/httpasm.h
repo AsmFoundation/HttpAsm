@@ -211,7 +211,7 @@ uint32_t httpasm_abi_version(void);
 
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
- * 6 httpasm_h1_chunked; 0 for any other value. */
+ * 6 httpasm_h1_chunked, 7 httpasm_server_options; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -304,6 +304,80 @@ int64_t httpasm_h1_write_chunk(uint8_t *out, size_t cap, const uint8_t *data, si
  * small, or -HTTPASM_ERROR_* for a trailer field that is invalid or not allowed in trailers. */
 int64_t httpasm_h1_write_last_chunk(uint8_t *out, size_t cap, const httpasm_field *trailers,
                                     uint32_t count);
+
+/* ------------------------------------------------------------------------------------------
+ * The server (Linux): one worker thread per core, each with its own listening socket
+ * (SO_REUSEPORT), epoll, and connections. Handlers run on the worker that read the request.
+ * ------------------------------------------------------------------------------------------ */
+
+typedef struct httpasm_server httpasm_server;       /* opaque */
+typedef struct httpasm_exchange httpasm_exchange;   /* one request and its response; opaque */
+
+/* Called on a worker thread for each complete request (head, body, trailers). The handler
+ * answers with httpasm_exchange_respond before returning, or calls httpasm_exchange_defer and
+ * answers later from any thread. It must not block the worker for long: every connection of
+ * that worker waits meanwhile. A handler that returns without either answers 500 and closes the
+ * connection. */
+typedef void (*httpasm_handler)(void *context, httpasm_exchange *exchange);
+
+/* The server's settings (64 octets). A zero field takes its default. */
+typedef struct httpasm_server_options {
+    httpasm_handler handler;    /* required */
+    void *context;              /* passed to the handler */
+    uint64_t max_body;          /* request bodies past this get 413; default 1 MiB */
+    uint32_t workers;           /* worker threads; default: the CPUs this process may run on */
+    uint32_t idle_timeout_ms;   /* a connection idle, or a request head not complete, this long
+                                   is closed; default 60000 */
+    uint32_t bind_address;      /* IPv4, network byte order; 0 is 0.0.0.0 */
+    uint16_t port;              /* 0: any free port (httpasm_server_port tells which) */
+    uint16_t flags;             /* reserved: 0 */
+    httpasm_h1_limits limits;   /* the heads' limits */
+    uint64_t reserved;
+} httpasm_server_options;
+
+/* A server with these options, not started. NULL on failure, with *error = -EINVAL (no handler),
+ * -ENOMEM, or -EMFILE/-ENFILE (no descriptor left for a worker's eventfd); error may be NULL. */
+httpasm_server *httpasm_server_create(const httpasm_server_options *options, int *error);
+
+/* Opens every worker's socket and starts its thread. 0, or -errno (EADDRINUSE, ...): on failure
+ * nothing is left running. -EINVAL when already running. */
+int httpasm_server_start(httpasm_server *server);
+
+/* The port the server listens on (the kernel's choice for port 0, once started). */
+uint16_t httpasm_server_port(const httpasm_server *server);
+
+/* Stops accepting, lets exchanges in flight finish for up to 5 seconds (deferred ones too, even
+ * when their client is gone), closes every connection, and returns when every worker has
+ * exited. A deferred exchange may still be answered after that (its answer is dropped, freed by
+ * the next start or by httpasm_server_destroy). The server may be started again. */
+void httpasm_server_stop(httpasm_server *server);
+
+/* Stops the server if it runs, and frees it with every answer still waiting for it. Every
+ * deferred exchange must be answered before this: an answer after it uses freed memory, and an
+ * exchange never answered leaks its connection's memory. */
+void httpasm_server_destroy(httpasm_server *server);
+
+/* The request: valid until the exchange is answered. */
+const httpasm_request *httpasm_exchange_request(const httpasm_exchange *exchange);
+
+/* The request's body, decoded (no chunked framing), *length octets; valid until answered. */
+const uint8_t *httpasm_exchange_body(const httpasm_exchange *exchange, size_t *length);
+
+/* The trailer fields of a chunked request (*count, 0 when none), kept apart from the header. */
+const httpasm_field *httpasm_exchange_trailers(const httpasm_exchange *exchange, uint32_t *count);
+
+/* In the handler: answer later, from any thread. The connection waits; later requests on it
+ * too (responses leave in request order). 0, or -EINVAL outside the handler. */
+int httpasm_exchange_defer(httpasm_exchange *exchange);
+
+/* Answers the exchange: status, the caller's fields (the library adds Date, Content-Length or
+ * chunked, Connection), and the body (left out for HEAD, 1xx, 204, 304). In the handler, or
+ * after httpasm_exchange_defer from any thread; once. The fields and body are copied before it
+ * returns. 0; -HTTPASM_ERROR_* when the status or a field is refused (nothing sent: answer
+ * again); -EINVAL when already answered; -ENOMEM. */
+int httpasm_exchange_respond(httpasm_exchange *exchange, uint16_t status,
+                             const httpasm_field *fields, uint32_t count, const uint8_t *body,
+                             size_t length);
 
 #ifdef __cplusplus
 }

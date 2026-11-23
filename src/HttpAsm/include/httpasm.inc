@@ -12,6 +12,22 @@
 ; promised before it.
 HTTPASM_ABI_VERSION equ 0
 
+; -----------------------------------------------------------------------------
+; httpasm_server_options (httpasm.h): 64 octets. Zero fields take their defaults.
+; -----------------------------------------------------------------------------
+struc httpasm_server_options
+    .handler:           resq 1  ; void (*)(void *context, httpasm_exchange *exchange)
+    .context:           resq 1
+    .max_body:          resq 1  ; request bodies past this get 413; default 1 MiB
+    .workers:           resd 1  ; worker threads; default: the CPUs this process may run on
+    .idle_timeout_ms:   resd 1  ; idle and request-head timeout; default 60000
+    .bind_address:      resd 1  ; IPv4 in network order; 0 = 0.0.0.0
+    .port:              resw 1  ; 0: any free port (httpasm_server_port tells which)
+    .flags:             resw 1  ; reserved, 0
+    .limits:            resb httpasm_h1_limits_size
+    .reserved:          resq 1
+endstruc
+
 extern httpasm_abi_version          ; uint32_t (void)
 extern httpasm_struct_size          ; uint32_t (uint32_t which)
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
@@ -26,5 +42,15 @@ extern httpasm_h1_write_response    ; int64_t (out, cap, response)
 extern httpasm_h1_write_request     ; int64_t (out, cap, request)
 extern httpasm_h1_write_chunk       ; int64_t (out, cap, data, len)
 extern httpasm_h1_write_last_chunk  ; int64_t (out, cap, trailers, count)
+extern httpasm_server_create        ; httpasm_server * (options, int *error)
+extern httpasm_server_start         ; int (server)
+extern httpasm_server_port          ; uint16_t (server)
+extern httpasm_server_stop          ; void (server)
+extern httpasm_server_destroy       ; void (server)
+extern httpasm_exchange_request     ; const httpasm_request * (exchange)
+extern httpasm_exchange_body        ; const uint8_t * (exchange, size_t *length)
+extern httpasm_exchange_trailers    ; const httpasm_field * (exchange, uint32_t *count)
+extern httpasm_exchange_defer       ; int (exchange)
+extern httpasm_exchange_respond     ; int (exchange, status, fields, count, body, length)
 
 %endif

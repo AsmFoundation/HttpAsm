@@ -215,6 +215,41 @@ internal struct ChunkedState
     public uint Reserved;
 }
 
+/// <summary>httpasm_server_options (httpasm.h): 64 octets; zero fields take their defaults.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ServerOptions
+{
+    /// <summary>void (*)(void *context, httpasm_exchange *exchange).</summary>
+    public nint Handler;
+
+    /// <summary>Passed to the handler.</summary>
+    public nint Context;
+
+    /// <summary>Request bodies past this get 413.</summary>
+    public ulong MaxBody;
+
+    /// <summary>Worker threads.</summary>
+    public uint Workers;
+
+    /// <summary>The idle and request-head timeout.</summary>
+    public uint IdleTimeoutMs;
+
+    /// <summary>IPv4, network byte order.</summary>
+    public uint BindAddress;
+
+    /// <summary>0 for any free port.</summary>
+    public ushort Port;
+
+    /// <summary>Reserved.</summary>
+    public ushort Flags;
+
+    /// <summary>The heads' limits.</summary>
+    public H1Limits Limits;
+
+    /// <summary>Reserved.</summary>
+    public ulong Reserved;
+}
+
 /// <summary>The constants of httpasm.h that the tests use.</summary>
 internal static class Abi
 {
