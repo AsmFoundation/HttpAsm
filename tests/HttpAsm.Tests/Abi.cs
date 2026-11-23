@@ -110,9 +110,153 @@ internal struct H1Limits
     public uint Reserved;
 }
 
+/// <summary>httpasm_response (httpasm.h): what a server answers, 48 octets; Flags is in and out.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct HttpResponse
+{
+    /// <summary>The handler's fields.</summary>
+    public HttpField* Fields;
+
+    /// <summary>A 29-octet IMF-fixdate, or null.</summary>
+    public byte* Date;
+
+    /// <summary>The body's length, with <see cref="Abi.ResponseLength"/>.</summary>
+    public ulong ContentLength;
+
+    /// <summary>How many fields.</summary>
+    public uint FieldCount;
+
+    /// <summary>HTTPASM_RESPONSE_*.</summary>
+    public uint Flags;
+
+    /// <summary>100-599.</summary>
+    public ushort Status;
+
+    /// <summary>The request's version: 10 or 11.</summary>
+    public byte RequestVersion;
+
+    /// <summary>The request's HTTPASM_METHOD_*.</summary>
+    public byte RequestMethod;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+
+    /// <summary>Unused.</summary>
+    public ulong Reserved2;
+}
+
+/// <summary>httpasm_response_head (httpasm.h): a response's head as a client reads it, 64 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct ResponseHead
+{
+    /// <summary>The reason-phrase.</summary>
+    public byte* Reason;
+
+    /// <summary>The caller's field array.</summary>
+    public HttpField* Fields;
+
+    /// <summary>The body's length, with the CONTENT_LENGTH flag.</summary>
+    public ulong ContentLength;
+
+    /// <summary>The reason's length.</summary>
+    public uint ReasonLength;
+
+    /// <summary>Field records written.</summary>
+    public uint FieldCount;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_*.</summary>
+    public uint Flags;
+
+    /// <summary>The head's octets.</summary>
+    public uint HeadLength;
+
+    /// <summary>The status code as received.</summary>
+    public ushort Status;
+
+    /// <summary>10 or 11.</summary>
+    public byte Version;
+
+    /// <summary>Unused.</summary>
+    public byte Reserved0;
+
+    /// <summary>HTTPASM_ERROR_* after a refusal.</summary>
+    public ushort Error;
+
+    /// <summary>Unused.</summary>
+    public ushort Reserved1;
+
+    /// <summary>Unused.</summary>
+    public ulong Reserved2;
+
+    /// <summary>Unused.</summary>
+    public ulong Reserved3;
+}
+
+/// <summary>httpasm_h1_chunked (httpasm.h): the chunked decoder's state, 32 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct ChunkedState
+{
+    /// <summary>Data octets left in the current chunk.</summary>
+    public ulong Remaining;
+
+    /// <summary>Data octets decoded so far.</summary>
+    public ulong Total;
+
+    /// <summary>HTTPASM_CHUNKED_*.</summary>
+    public uint State;
+
+    /// <summary>chunk-ext octets on the current line.</summary>
+    public uint ExtensionLength;
+
+    /// <summary>HEXDIGs of the current chunk-size.</summary>
+    public uint SizeDigits;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
 /// <summary>The constants of httpasm.h that the tests use.</summary>
 internal static class Abi
 {
+    /// <summary>HTTPASM_RESPONSE_LENGTH.</summary>
+    public const uint ResponseLength = 0x0001;
+
+    /// <summary>HTTPASM_RESPONSE_CLOSE.</summary>
+    public const uint ResponseClose = 0x0002;
+
+    /// <summary>HTTPASM_RESPONSE_CHUNKED.</summary>
+    public const uint ResponseChunked = 0x0004;
+
+    /// <summary>HTTPASM_RESPONSE_NO_BODY.</summary>
+    public const uint ResponseNoBody = 0x0008;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH.</summary>
+    public const uint HeadContentLength = 0x0001;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_CHUNKED.</summary>
+    public const uint HeadChunked = 0x0002;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_UNTIL_CLOSE.</summary>
+    public const uint HeadUntilClose = 0x0004;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_NO_BODY.</summary>
+    public const uint HeadNoBody = 0x0008;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_TUNNEL.</summary>
+    public const uint HeadTunnel = 0x0010;
+
+    /// <summary>HTTPASM_RESPONSE_HEAD_KEEP_ALIVE.</summary>
+    public const uint HeadKeepAlive = 0x0020;
+
+    /// <summary>HTTPASM_CHUNKED_TRAILERS.</summary>
+    public const uint ChunkedTrailers = 6;
+
+    /// <summary>HTTPASM_CHUNKED_ERROR.</summary>
+    public const uint ChunkedError = 7;
+
+    /// <summary>HTTPASM_FIELD_FLAG_TRAILER.</summary>
+    public const int FieldTrailer = 0x0001;
+
     /// <summary>HTTPASM_REQUEST_KEEP_ALIVE.</summary>
     public const uint RequestKeepAlive = 0x0001;
 
@@ -231,4 +375,16 @@ public enum ParseError
 
     /// <summary>An expectation other than 100-continue: 417.</summary>
     Expect = 23,
+
+    /// <summary>A writer was given a field it owns.</summary>
+    FramingField = 24,
+
+    /// <summary>A status outside 100-599, or a bad status-line.</summary>
+    Status = 25,
+
+    /// <summary>Malformed chunked framing.</summary>
+    Chunk = 26,
+
+    /// <summary>An authority with octets Host may not hold.</summary>
+    Authority = 27,
 }

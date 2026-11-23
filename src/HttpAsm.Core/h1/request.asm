@@ -517,6 +517,73 @@ ha_h1_fields:
     jmp     .next_line
 
 .obs_fold:
+    ; A line that starts with whitespace. In a request or a trailer section it is refused
+    ; (RFC9112-5.2-4, RFC9112-2.2-8). In a response, a user agent MUST replace the obs-fold with
+    ; SP and keep the value (RFC9112-5.2-6): the CRLF before this line becomes SP SP in the
+    ; buffer, so the previous field's value runs on into this line. Directly after the
+    ; status-line there is no field to continue, and refusing is allowed (RFC9112-2.2-8). A
+    ; framing field is never joined: its rule already ran on the first line.
+    cmp     dword [r12 + h1ctx.mode], HA_H1_RESPONSE
+    jne     .obs_fold_refused
+    mov     eax, [r12 + h1ctx.count]
+    test    eax, eax
+    jz      .obs_fold_refused
+    dec     eax
+    shl     rax, 5
+    add     rax, [r12 + h1ctx.fields]
+    mov     [r12 + h1ctx.record], rax
+    movzx   ecx, word [rax + httpasm_field.id]
+    cmp     ecx, HA_FIELD_CONTENT_LENGTH
+    je      .obs_fold_refused
+    cmp     ecx, HA_FIELD_TRANSFER_ENCODING
+    je      .obs_fold_refused
+    cmp     ecx, HA_FIELD_CONNECTION
+    je      .obs_fold_refused
+    mov     word [rbx + r13 - 2], 0x2020    ; the CRLF that ended the previous line
+    lea     rdi, [rbx + r13]
+    lea     rsi, [rbp + 2]
+    sub     rsi, r13
+    call    ha_find_lf
+    add     rax, r13
+    mov     [r12 + h1ctx.line_lf], rax
+    lea     rdx, [rax - 1]                  ; this line's CR: the joined value ends before it
+    mov     r8, [r12 + h1ctx.record]
+    mov     r15, [r8 + httpasm_field.value]
+    sub     r15, rbx                        ; the value's start, as an offset
+.fold_leading:                              ; an empty first part leaves only whitespace in front
+    cmp     r15, rdx
+    jae     .fold_trailing
+    movzx   ecx, byte [rbx + r15]
+    cmp     cl, ' '
+    je      .fold_leading_one
+    cmp     cl, 9
+    jne     .fold_trailing
+.fold_leading_one:
+    inc     r15
+    jmp     .fold_leading
+.fold_trailing:
+    cmp     rdx, r15
+    jbe     .fold_check
+    movzx   ecx, byte [rbx + rdx - 1]
+    cmp     cl, ' '
+    je      .fold_trailing_one
+    cmp     cl, 9
+    jne     .fold_check
+.fold_trailing_one:
+    dec     rdx
+    jmp     .fold_trailing
+.fold_check:
+    lea     rdi, [rbx + r15]
+    mov     rsi, rdx
+    sub     rsi, r15
+    HA_FIELD_VALUE_SCAN rdi, rsi, rax, rcx, ecx, rdx, xmm0, xmm1, xmm2, xmm3, xmm4, xmm5
+    cmp     rax, rsi
+    jne     .bad_value
+    mov     r8, [r12 + h1ctx.record]
+    mov     [r8 + httpasm_field.value], rdi
+    mov     [r8 + httpasm_field.value_length], esi
+    jmp     .next_line
+.obs_fold_refused:
     H1_FAIL HTTPASM_ERROR_OBS_FOLD, 400
 .bad_name:
     H1_FAIL HTTPASM_ERROR_FIELD_NAME, 400

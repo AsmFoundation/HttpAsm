@@ -101,6 +101,84 @@ HTTPASM_ERROR_TE_HTTP10             equ 20  ; Transfer-Encoding in an HTTP/1.0 m
 HTTPASM_ERROR_TE_NOT_CHUNKED        equ 21  ; chunked is missing or not the final coding
 HTTPASM_ERROR_TE_UNKNOWN            equ 22  ; a transfer coding HttpAsm does not implement: 501
 HTTPASM_ERROR_EXPECT                equ 23  ; an expectation other than 100-continue: 417
+HTTPASM_ERROR_FRAMING_FIELD         equ 24  ; a writer was given a field it owns (Content-Length, ...)
+HTTPASM_ERROR_STATUS                equ 25  ; a status code outside 100-599, or a malformed status-line
+HTTPASM_ERROR_CHUNK                 equ 26  ; malformed chunked framing
+HTTPASM_ERROR_AUTHORITY             equ 27  ; a writer was given an authority with octets a Host may not hold
+
+; -----------------------------------------------------------------------------
+; httpasm_response: what a server answers (48 octets), for httpasm_h1_write_response. flags is
+; in and out: the writer reports how the body must be framed.
+; -----------------------------------------------------------------------------
+struc httpasm_response
+    .fields:            resq 1  ; const httpasm_field *: the handler's fields, framing excluded
+    .date:              resq 1  ; const uint8_t *: a 29-octet IMF-fixdate, or NULL
+    .content_length:    resq 1  ; with HTTPASM_RESPONSE_LENGTH
+    .field_count:       resd 1
+    .flags:             resd 1  ; HTTPASM_RESPONSE_*
+    .status:            resw 1  ; 100-599
+    .request_version:   resb 1  ; 10 or 11: the request's version decides chunked or close
+    .request_method:    resb 1  ; HTTPASM_METHOD_*: HEAD and CONNECT change the framing
+    .reserved:          resd 1
+    .reserved2:         resq 1
+endstruc
+
+HTTPASM_RESPONSE_LENGTH         equ 0x0001  ; in: content_length is the body's length
+HTTPASM_RESPONSE_CLOSE          equ 0x0002  ; in/out: the connection closes after this response
+HTTPASM_RESPONSE_CHUNKED        equ 0x0004  ; out: send the body chunked
+HTTPASM_RESPONSE_NO_BODY        equ 0x0008  ; out: this response has no body at all
+
+; -----------------------------------------------------------------------------
+; httpasm_response_head: a response's head as a client reads it (64 octets).
+; -----------------------------------------------------------------------------
+struc httpasm_response_head
+    .reason:            resq 1  ; const uint8_t *
+    .fields:            resq 1  ; httpasm_field *: the caller's array
+    .content_length:    resq 1  ; with HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH
+    .reason_length:     resd 1
+    .field_count:       resd 1
+    .flags:             resd 1  ; HTTPASM_RESPONSE_HEAD_*
+    .head_length:       resd 1
+    .status:            resw 1  ; 3DIGIT as received (RFC 9110 15: 100-599 are valid)
+    .version:           resb 1  ; 10, 11
+    .reserved0:         resb 1
+    .error:             resw 1  ; HTTPASM_ERROR_* when parsing failed
+    .reserved1:         resw 1
+    .reserved2:         resq 1
+    .reserved3:         resq 1
+endstruc
+
+HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH equ 0x0001 ; the body is content_length octets
+HTTPASM_RESPONSE_HEAD_CHUNKED       equ 0x0002  ; the body is chunked
+HTTPASM_RESPONSE_HEAD_UNTIL_CLOSE   equ 0x0004  ; the body runs until the server closes
+HTTPASM_RESPONSE_HEAD_NO_BODY       equ 0x0008  ; no body (HEAD, 1xx, 204, 304)
+HTTPASM_RESPONSE_HEAD_TUNNEL        equ 0x0010  ; a 2xx to CONNECT: the connection is a tunnel now
+HTTPASM_RESPONSE_HEAD_KEEP_ALIVE    equ 0x0020  ; the connection may carry another request
+
+; -----------------------------------------------------------------------------
+; httpasm_h1_chunked: the chunked decoder's state between calls (32 octets). Zero it before a
+; body; the decoder updates it.
+; -----------------------------------------------------------------------------
+struc httpasm_h1_chunked
+    .remaining:         resq 1  ; data octets left in the current chunk
+    .total:             resq 1  ; data octets decoded so far
+    .state:             resd 1  ; HTTPASM_CHUNKED_*
+    .extension_length:  resd 1  ; chunk-ext octets so far in this chunk-size line
+    .size_digits:       resd 1  ; HEXDIGs read in this chunk-size
+    .reserved:          resd 1
+endstruc
+
+HTTPASM_CHUNKED_SIZE            equ 0       ; reading a chunk-size (the initial state)
+HTTPASM_CHUNKED_EXTENSION       equ 1       ; reading chunk-ext, up to the line's CR
+HTTPASM_CHUNKED_SIZE_LF         equ 2       ; the chunk-size line's LF
+HTTPASM_CHUNKED_DATA            equ 3       ; inside chunk-data
+HTTPASM_CHUNKED_DATA_CR         equ 4       ; the CR after chunk-data
+HTTPASM_CHUNKED_DATA_LF         equ 5       ; the LF after chunk-data
+HTTPASM_CHUNKED_TRAILERS        equ 6       ; the last chunk was read: the trailer section follows
+HTTPASM_CHUNKED_ERROR           equ 7       ; refused; the decoder will not continue
+HTTPASM_CHUNKED_EXTENSION_BWS   equ 8       ; whitespace after chunk-size: only ";" may follow
+
+HA_CHUNK_MAX_EXTENSION          equ 4096    ; chunk-ext octets per line before a 400 (RFC 9112 7.1.1)
 
 ; -----------------------------------------------------------------------------
 ; httpasm_h1_limits: what one head may take (16 octets). Zero fields take the defaults.

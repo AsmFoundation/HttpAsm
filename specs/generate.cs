@@ -62,6 +62,7 @@ try
     IReadOnlyList<(int Symbol, uint Code, int Length)> huffman = Tables.Huffman(hpackText);
     IReadOnlyList<string> fields = Fields.Known(hpack, qpack);
     PerfectHash hash = PerfectHash.Search(fields);
+    IReadOnlyList<(int Code, string Reason)> statuses = Tables.Statuses(pinned.Xml("RFC9110"), pinned.Text("RFC6585"));
 
     var outputs = new Dictionary<string, string>
     {
@@ -70,6 +71,7 @@ try
         ["src/HttpAsm.Core/include/generated/hpack.inc"] = Emit.StaticTable("HPACK", "RFC 7541 appendix A", hpack, fields),
         ["src/HttpAsm.Core/include/generated/qpack.inc"] = Emit.StaticTable("QPACK", "RFC 9204 appendix A", qpack, fields),
         ["src/HttpAsm.Core/include/generated/huffman.inc"] = Emit.Huffman(huffman),
+        ["src/HttpAsm.Core/include/generated/status.inc"] = Emit.StatusLines(statuses),
         ["src/HttpAsm/include/httpasm_fields.h"] = Emit.FieldIdsHeader(fields),
     };
 
@@ -100,7 +102,7 @@ try
         throw new GenerateException($"{stale} generated file(s) out of date: run dotnet run specs/generate.cs and commit them");
     }
 
-    Console.WriteLine($"{fields.Count} known fields (hash multiplier 0x{hash.Multiplier:X16}), HPACK {hpack.Count}, QPACK {qpack.Count}, Huffman {huffman.Count} codes");
+    Console.WriteLine($"{fields.Count} known fields (hash multiplier 0x{hash.Multiplier:X16}), HPACK {hpack.Count}, QPACK {qpack.Count}, Huffman {huffman.Count} codes, {statuses.Count} status codes");
     return 0;
 }
 catch (GenerateException e)
@@ -233,6 +235,41 @@ internal static partial class Tables
         }
 
         return rows;
+    }
+
+    /// <summary>A section heading of RFC 6585: "4.  429 Too Many Requests".</summary>
+    [GeneratedRegex(@"^\d+\.\s+(\d{3}) (\S.*?)\s*$", RegexOptions.Multiline)]
+    private static partial Regex Rfc6585Status();
+
+    /// <summary>
+    /// The registered status codes and their descriptions: RFC 9110 section 18.3's table, then
+    /// RFC 6585's codes (428, 429, 431, 511). Rows marked "(Unused)" are left out.
+    /// </summary>
+    /// <param name="rfc9110">RFC 9110's prepped XML.</param>
+    /// <param name="rfc6585">RFC 6585's text.</param>
+    /// <returns>(code, reason) in code order.</returns>
+    /// <exception cref="GenerateException">The table is missing, or a code is out of 100-599 or repeated.</exception>
+    public static IReadOnlyList<(int Code, string Reason)> Statuses(XDocument rfc9110, string rfc6585)
+    {
+        XElement table = rfc9110.Descendants("section")
+            .FirstOrDefault(s => (string?)s.Element("name")?.Attribute("slugifiedName") == "name-status-code-registration")
+            ?.Descendants("table").FirstOrDefault()
+            ?? throw new GenerateException("RFC9110: the status code registration table was not found");
+
+        var codes = table.Element("tbody")!.Elements("tr")
+            .Select(tr => tr.Elements("td").Select(td => td.Value.Trim()).ToArray())
+            .Where(td => !td[1].StartsWith('('))
+            .Select(td => (Code: int.Parse(td[0]), Reason: td[1]))
+            .ToList();
+        codes.AddRange(Rfc6585Status().Matches(rfc6585).Select(m => (int.Parse(m.Groups[1].Value), m.Groups[2].Value)));
+
+        // RFC 9110 registers 44 named codes and RFC 6585 adds 4: far fewer means a broken parse.
+        if (codes.Count < 40 || codes.Any(c => c.Code is < 100 or > 599) || codes.Select(c => c.Code).Distinct().Count() != codes.Count)
+        {
+            throw new GenerateException($"status codes: {codes.Count} parsed, some out of range or repeated");
+        }
+
+        return codes.OrderBy(c => c.Code).ToList();
     }
 
     /// <summary>The Huffman code: 257 symbols (EOS is 256), each code checked against its hex and length columns.</summary>
@@ -620,6 +657,40 @@ internal static class Emit
             s.Append("    dd ").Append(string.Join(", ", entries.Select(e => $"0x{e:X5}"))).Append($"    ; {state}\n");
         }
 
+        return s.ToString();
+    }
+
+    /// <summary>generated/status.inc: HTTP/1.1 status lines of the registered codes (data, include once).</summary>
+    /// <param name="statuses">The registered codes and reasons.</param>
+    /// <returns>The file.</returns>
+    /// <remarks>ha_status_line[code - 100] is a dword: the line's offset in ha_status_text shifted
+    /// left 8, or'ed with its length; 0 for a code with no registered reason. Each line is
+    /// "HTTP/1.1 " code SP reason CRLF.</remarks>
+    public static string StatusLines(IReadOnlyList<(int Code, string Reason)> statuses)
+    {
+        var s = new StringBuilder(Banner("status.inc - the status lines of the registered status codes (data).",
+            "RFC 9110 section 18.3 and RFC 6585"));
+        var byCode = statuses.ToDictionary(x => x.Code, x => x.Reason);
+        s.Append("; ha_status_line[code - 100] = offset << 8 | length of its line in ha_status_text, or 0.\n");
+        s.Append("align 4\nha_status_line:\n");
+        int offset = 0;
+        var text = new StringBuilder();
+        for (int code = 100; code <= 599; code++)
+        {
+            if (!byCode.TryGetValue(code, out string? reason))
+            {
+                s.Append("    dd 0\n");
+                continue;
+            }
+
+            string line = $"HTTP/1.1 {code} {reason}";
+            int length = line.Length + 2;
+            s.Append($"    dd 0x{offset << 8 | length:X}    ; {code} {reason}\n");
+            text.Append($"    db {Db(line)}, 13, 10\n");
+            offset += length;
+        }
+
+        s.Append("\nha_status_text:\n").Append(text);
         return s.ToString();
     }
 

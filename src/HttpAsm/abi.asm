@@ -24,26 +24,31 @@ httpasm_abi_version:
 ; uint32_t httpasm_struct_size(uint32_t which)
 ;   The size the library uses for one of its structures, so a binding (the .NET tests' copies,
 ;   a C program's header) can check its layout matches: 1 httpasm_field, 2 httpasm_request,
-;   3 httpasm_h1_limits; 0 for anything else.
-;   In: edi. Out: eax. Clobbers the flags.
+;   3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head, 6 httpasm_h1_chunked;
+;   0 for anything else.
+;   In: edi. Out: eax. Clobbers rcx and the flags.
 ; -----------------------------------------------------------------------------
+section .rodata
+align 4
+struct_sizes:
+    dd 0
+    dd httpasm_field_size
+    dd httpasm_request_size
+    dd httpasm_h1_limits_size
+    dd httpasm_response_size
+    dd httpasm_response_head_size
+    dd httpasm_h1_chunked_size
+STRUCT_SIZES equ ($ - struct_sizes) / 4
+
+section .text
 global httpasm_struct_size:function (httpasm_struct_size.end - httpasm_struct_size)
 align 16
 httpasm_struct_size:
     xor     eax, eax
-    cmp     edi, 1
-    jne     .request
-    mov     eax, httpasm_field_size
-    ret
-.request:
-    cmp     edi, 2
-    jne     .limits
-    mov     eax, httpasm_request_size
-    ret
-.limits:
-    cmp     edi, 3
-    jne     .done
-    mov     eax, httpasm_h1_limits_size
+    cmp     edi, STRUCT_SIZES
+    jae     .done
+    lea     rcx, [rel struct_sizes]
+    mov     eax, [rcx + rdi * 4]            ; edi is the zero-extended uint32_t
 .done:
     ret
 .end:

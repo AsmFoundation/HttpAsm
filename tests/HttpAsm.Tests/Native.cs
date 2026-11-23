@@ -79,6 +79,72 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_h1_parse_request")]
     internal static partial long H1ParseRequest(byte* buffer, nuint length, nuint* scanFrom, H1Limits* limits, HttpRequest* request, HttpField* fields);
 
+    /// <summary>int64_t httpasm_h1_parse_response(buf, len, scan_from, limits, request_method, head, fields).</summary>
+    /// <param name="buffer">The received octets (writable: obs-fold is joined in place).</param>
+    /// <param name="length">How many.</param>
+    /// <param name="scanFrom">The resume point.</param>
+    /// <param name="limits">The limits, or null.</param>
+    /// <param name="requestMethod">The request's HTTPASM_METHOD_*.</param>
+    /// <param name="head">Receives the head.</param>
+    /// <param name="fields">Receives the fields.</param>
+    /// <returns>The head's length, 0 when incomplete, or -status.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_parse_response")]
+    internal static partial long H1ParseResponse(byte* buffer, nuint length, nuint* scanFrom, H1Limits* limits, uint requestMethod, ResponseHead* head, HttpField* fields);
+
+    /// <summary>int64_t httpasm_h1_chunked_decode(state, in, len, produced).</summary>
+    /// <param name="state">The decoder's state.</param>
+    /// <param name="input">The body octets, decoded in place.</param>
+    /// <param name="length">How many.</param>
+    /// <param name="produced">Receives the data octets now at the input's start.</param>
+    /// <returns>The octets consumed, or -400.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_chunked_decode")]
+    internal static partial long H1ChunkedDecode(ChunkedState* state, byte* input, nuint length, nuint* produced);
+
+    /// <summary>int64_t httpasm_h1_parse_trailers(buf, len, scan_from, limits, fields, count).</summary>
+    /// <param name="buffer">The octets after the last chunk's line.</param>
+    /// <param name="length">How many.</param>
+    /// <param name="scanFrom">The resume point.</param>
+    /// <param name="limits">The limits, or null.</param>
+    /// <param name="fields">Receives the trailer fields.</param>
+    /// <param name="count">Receives how many.</param>
+    /// <returns>The section's length, 0 when incomplete, or -status.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_parse_trailers")]
+    internal static partial long H1ParseTrailers(byte* buffer, nuint length, nuint* scanFrom, H1Limits* limits, HttpField* fields, uint* count);
+
+    /// <summary>int64_t httpasm_h1_write_response(out, cap, response).</summary>
+    /// <param name="output">The output buffer.</param>
+    /// <param name="capacity">Its size.</param>
+    /// <param name="response">The response; its flags come back updated.</param>
+    /// <returns>The head's length, 0 if too small, or -error.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_write_response")]
+    internal static partial long H1WriteResponse(byte* output, nuint capacity, HttpResponse* response);
+
+    /// <summary>int64_t httpasm_h1_write_request(out, cap, request).</summary>
+    /// <param name="output">The output buffer.</param>
+    /// <param name="capacity">Its size.</param>
+    /// <param name="request">The request's description.</param>
+    /// <returns>The head's length, 0 if too small, or -error.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_write_request")]
+    internal static partial long H1WriteRequest(byte* output, nuint capacity, HttpRequest* request);
+
+    /// <summary>int64_t httpasm_h1_write_chunk(out, cap, data, len).</summary>
+    /// <param name="output">The output buffer.</param>
+    /// <param name="capacity">Its size.</param>
+    /// <param name="data">The chunk's data.</param>
+    /// <param name="length">At least 1.</param>
+    /// <returns>The chunk's length, 0 if too small, or -error.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_write_chunk")]
+    internal static partial long H1WriteChunk(byte* output, nuint capacity, byte* data, nuint length);
+
+    /// <summary>int64_t httpasm_h1_write_last_chunk(out, cap, trailers, count).</summary>
+    /// <param name="output">The output buffer.</param>
+    /// <param name="capacity">Its size.</param>
+    /// <param name="trailers">The trailer fields, or null.</param>
+    /// <param name="count">How many.</param>
+    /// <returns>The length, 0 if too small, or -error.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h1_write_last_chunk")]
+    internal static partial long H1WriteLastChunk(byte* output, nuint capacity, HttpField* trailers, uint count);
+
     /// <summary>void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset).</summary>
     /// <param name="addr">A placement hint; zero lets the kernel choose.</param>
     /// <param name="length">The mapping's size in bytes.</param>

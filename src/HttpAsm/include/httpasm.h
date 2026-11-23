@@ -122,6 +122,75 @@ typedef struct httpasm_request {
 #define HTTPASM_ERROR_TE_NOT_CHUNKED        21  /* chunked missing, repeated, or not final */
 #define HTTPASM_ERROR_TE_UNKNOWN            22  /* a coding not implemented yet: 501 */
 #define HTTPASM_ERROR_EXPECT                23  /* an expectation other than 100-continue: 417 */
+#define HTTPASM_ERROR_FRAMING_FIELD         24  /* a writer was given a field it owns */
+#define HTTPASM_ERROR_STATUS                25  /* a status outside 100-599, or a bad status-line */
+#define HTTPASM_ERROR_CHUNK                 26  /* malformed chunked framing */
+#define HTTPASM_ERROR_AUTHORITY             27  /* an authority with octets Host may not hold */
+
+/* What a server answers (48 octets), for httpasm_h1_write_response. flags is in and out. */
+typedef struct httpasm_response {
+    const httpasm_field *fields;    /* the handler's fields; never Content-Length,
+                                       Transfer-Encoding, Connection, Keep-Alive, TE */
+    const uint8_t *date;            /* a 29-octet IMF-fixdate, or NULL (no Date field) */
+    uint64_t content_length;        /* with HTTPASM_RESPONSE_LENGTH */
+    uint32_t field_count;
+    uint32_t flags;                 /* HTTPASM_RESPONSE_* */
+    uint16_t status;                /* 100-599 */
+    uint8_t request_version;        /* the request's: 10 or 11 */
+    uint8_t request_method;         /* the request's HTTPASM_METHOD_*: HEAD and CONNECT matter */
+    uint32_t reserved;
+    uint64_t reserved2;
+} httpasm_response;
+
+#define HTTPASM_RESPONSE_LENGTH   0x0001  /* in: content_length is the body's length */
+#define HTTPASM_RESPONSE_CLOSE    0x0002  /* in/out: the connection closes after this response */
+#define HTTPASM_RESPONSE_CHUNKED  0x0004  /* out: send the body chunked */
+#define HTTPASM_RESPONSE_NO_BODY  0x0008  /* out: send nothing after the head */
+
+/* A response's head as a client reads it (64 octets). */
+typedef struct httpasm_response_head {
+    const uint8_t *reason;
+    httpasm_field *fields;          /* the caller's array */
+    uint64_t content_length;        /* with HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH */
+    uint32_t reason_length;
+    uint32_t field_count;
+    uint32_t flags;                 /* HTTPASM_RESPONSE_HEAD_* */
+    uint32_t head_length;
+    uint16_t status;                /* the 3DIGIT as received */
+    uint8_t version;                /* 10, 11 */
+    uint8_t reserved0;
+    uint16_t error;                 /* HTTPASM_ERROR_* when parsing failed */
+    uint16_t reserved1;
+    uint64_t reserved2;
+    uint64_t reserved3;
+} httpasm_response_head;
+
+#define HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH 0x0001 /* the body is content_length octets */
+#define HTTPASM_RESPONSE_HEAD_CHUNKED       0x0002  /* the body is chunked */
+#define HTTPASM_RESPONSE_HEAD_UNTIL_CLOSE   0x0004  /* the body runs until the server closes */
+#define HTTPASM_RESPONSE_HEAD_NO_BODY       0x0008  /* no body (HEAD, 1xx, 204, 304) */
+#define HTTPASM_RESPONSE_HEAD_TUNNEL        0x0010  /* a 2xx to CONNECT */
+#define HTTPASM_RESPONSE_HEAD_KEEP_ALIVE    0x0020  /* the connection may carry another request */
+
+/* The chunked decoder's state between calls (32 octets): zero it before each body. */
+typedef struct httpasm_h1_chunked {
+    uint64_t remaining;             /* data octets left in the current chunk */
+    uint64_t total;                 /* data octets decoded so far */
+    uint32_t state;                 /* HTTPASM_CHUNKED_* */
+    uint32_t extension_length;
+    uint32_t size_digits;
+    uint32_t reserved;
+} httpasm_h1_chunked;
+
+#define HTTPASM_CHUNKED_SIZE      0
+#define HTTPASM_CHUNKED_EXTENSION 1
+#define HTTPASM_CHUNKED_SIZE_LF   2
+#define HTTPASM_CHUNKED_DATA      3
+#define HTTPASM_CHUNKED_DATA_CR   4
+#define HTTPASM_CHUNKED_DATA_LF   5
+#define HTTPASM_CHUNKED_TRAILERS  6   /* the last chunk was read: the trailer section follows */
+#define HTTPASM_CHUNKED_ERROR     7
+#define HTTPASM_CHUNKED_EXTENSION_BWS 8 /* whitespace after chunk-size: only ";" may follow */
 
 /* What one HTTP/1.1 head may take (16 octets). A zero field takes its default. */
 typedef struct httpasm_h1_limits {
@@ -141,7 +210,8 @@ typedef struct httpasm_h1_limits {
 uint32_t httpasm_abi_version(void);
 
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
- * 2 httpasm_request, 3 httpasm_h1_limits; 0 for any other value. */
+ * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
+ * 6 httpasm_h1_chunked; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -188,6 +258,52 @@ const uint8_t *httpasm_field_name(uint32_t id, size_t *length);
 int64_t httpasm_h1_parse_request(const uint8_t *buf, size_t len, size_t *scan_from,
                                  const httpasm_h1_limits *limits, httpasm_request *request,
                                  httpasm_field *fields);
+
+/* Decodes a chunked body in place: in[0..len) are body octets as received; the data octets are
+ * moved to in[0..*produced) and the framing removed. Returns the octets consumed, or -400 (the
+ * state becomes HTTPASM_CHUNKED_ERROR and stays so). It stops after the last chunk's line
+ * (state HTTPASM_CHUNKED_TRAILERS): the trailer section starts at in[consumed]. chunk-size is
+ * refused past 2^63; chunk-ext is skipped (at most 4096 octets per line, no control
+ * characters). */
+int64_t httpasm_h1_chunked_decode(httpasm_h1_chunked *state, uint8_t *in, size_t len,
+                                  size_t *produced);
+
+/* The trailer section after the last chunk (its fields flagged HTTPASM_FIELD_FLAG_TRAILER, never
+ * merged into the header section). Returns its length (2 when empty), 0 incomplete (scan_from as
+ * for a head), -400 or -431. *count receives the number of fields. */
+int64_t httpasm_h1_parse_trailers(uint8_t *buf, size_t len, size_t *scan_from,
+                                  const httpasm_h1_limits *limits, httpasm_field *fields,
+                                  uint32_t *count);
+
+/* The client's side: one response head. request_method is the request's HTTPASM_METHOD_* (HEAD
+ * and CONNECT decide the framing). buf is writable: an obs-fold is replaced with SP in place, as
+ * RFC 9112 5.2 requires of a user agent. Returns the head's length, 0 incomplete, -400 (close
+ * and discard; head->error names the rule) or -431. A 1xx comes back with
+ * HTTPASM_RESPONSE_HEAD_NO_BODY; read the final response after it. */
+int64_t httpasm_h1_parse_response(uint8_t *buf, size_t len, size_t *scan_from,
+                                  const httpasm_h1_limits *limits, uint32_t request_method,
+                                  httpasm_response_head *head, httpasm_field *fields);
+
+/* A server's response head into out[0..cap): the status-line, the writer's framing fields
+ * (Content-Length or Transfer-Encoding, Connection, Date), the caller's fields, CRLF. See
+ * httpasm_response for the flags it reports. Returns the head's length, 0 if cap is too small,
+ * or -HTTPASM_ERROR_* (nothing written). */
+int64_t httpasm_h1_write_response(uint8_t *out, size_t cap, httpasm_response *response);
+
+/* A client's request head from an httpasm_request: method, target, authority (sent first as
+ * Host), fields; flags HTTPASM_REQUEST_CONTENT_LENGTH (with content_length) or _CHUNKED, _CLOSE,
+ * _EXPECT_CONTINUE. Always HTTP/1.1. Returns the length, 0 if cap is too small, or
+ * -HTTPASM_ERROR_*. */
+int64_t httpasm_h1_write_request(uint8_t *out, size_t cap, const httpasm_request *request);
+
+/* One chunk (len >= 1): hex size CRLF data CRLF. Returns the length, 0 if cap is too small, or
+ * -HTTPASM_ERROR_CHUNK for len 0. */
+int64_t httpasm_h1_write_chunk(uint8_t *out, size_t cap, const uint8_t *data, size_t len);
+
+/* The end of a chunked body: "0" CRLF, the trailers, CRLF. Returns the length, 0 if cap is too
+ * small, or -HTTPASM_ERROR_* for a trailer field that is invalid or not allowed in trailers. */
+int64_t httpasm_h1_write_last_chunk(uint8_t *out, size_t cap, const httpasm_field *trailers,
+                                    uint32_t count);
 
 #ifdef __cplusplus
 }
