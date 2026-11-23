@@ -27,7 +27,8 @@
 ;   - Content-Length: 1*DIGIT, or a list of identical ones (RFC 9112 6.3); anything else is 400.
 ;   - Transfer-Encoding: with Content-Length, 400 (RFC 9112 6.3 lets a server reject it; it then
 ;     closes). In HTTP/1.0, 400 (RFC 9112 6.1: faulty framing). chunked must be the final coding,
-;     once (400). Any other coding is not implemented yet: 501 (RFC 9112 6.1).
+;     once, without parameters (400; RFC9112-7.1-6). Any other coding is not implemented yet:
+;     501 (RFC 9112 6.1).
 ;   - Expect: 100-continue is flagged; any other expectation is 417 (RFC 9110 10.1.1 MAY).
 ;   - Persistence (RFC 9112 9.3): HTTP/1.1 persists unless Connection: close; HTTP/1.0 only with
 ;     keep-alive.
@@ -295,6 +296,16 @@ ha_h1_fields:
     cmp     ecx, 'nked'
     jne     .te_other
     or      dword [r12 + h1ctx.seen], HA_SEEN_CHUNKED
+    ; chunked defines no parameters: one after it is an error (RFC9112-7.1-6), handled like a
+    ; coding this side cannot name (a request's 400; a response read to the close), because
+    ; two parties that disagree on whether "chunked;x" is chunked frame the body differently.
+    lea     rdi, [r15 + rax]                ; past the token (rax: its length, kept)
+    SKIP_OWS rdi, r14
+    cmp     rdi, r14
+    jae     .te_parameters
+    cmp     byte [rdi], ';'
+    jne     .te_parameters
+    or      dword [r12 + h1ctx.seen], HA_SEEN_BAD_CODING
     jmp     .te_parameters
 .te_other:
     or      dword [r12 + h1ctx.seen], HA_SEEN_UNKNOWN_CODING
@@ -934,6 +945,14 @@ httpasm_h1_parse_request:
     mov     rdi, [r14 + httpasm_request.authority]
     cmp     byte [rdi], ':'
     je      .bad_form                       ; "http://:80/": a port without a host
+    ; userinfo ("user@host") in an http(s) URI hides the real authority behind a lookalike
+    ; (phishing): its presence is an error (RFC9110-4.2.4-4), as in HTTP/2's :authority.
+.userinfo:
+    cmp     byte [rdi], '@'
+    je      .bad_form
+    inc     rdi
+    dec     eax                             ; eax: the authority's octets left
+    jnz     .userinfo
 .absolute_done:
     mov     byte [r14 + httpasm_request.target_form], HTTPASM_TARGET_ABSOLUTE
     jmp     .fields

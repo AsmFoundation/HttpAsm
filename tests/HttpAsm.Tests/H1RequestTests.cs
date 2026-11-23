@@ -27,7 +27,8 @@ public sealed class H1RequestTests
 
     /// <summary>A plain GET: every part reported, pointers into the buffer, fields with their ids.</summary>
     [Fact]
-    [Requirement("RFC9112-2.1-2", "RFC9112-3-2", "RFC9112-3.1-2", "RFC9112-3.2.1-2", "RFC9112-2.3-3", "RFC9112-5-2", "RFC9110-9.1-4")]
+    [Requirement("RFC9112-2.1-2", "RFC9112-3-2", "RFC9112-3.1-2", "RFC9112-3.2.1-2", "RFC9112-2.3-3", "RFC9112-5-2", "RFC9110-9.1-4",
+        "RFC9112-2.1-4", "RFC9110-5.1-6#2")]
     public void ParsesAGet()
     {
         Platform.RequireLinuxX64();
@@ -169,7 +170,8 @@ public sealed class H1RequestTests
 
     /// <summary>A field value holding a control character is refused; HTAB and obs-text are not.</summary>
     [Fact]
-    [Requirement("RFC9110-5.5-5#1", "RFC9110-5.5-5#2", "RFC9110-5.5-2", "RFC9110-5.5-4#2")]
+    [Requirement("RFC9110-5.5-5#1", "RFC9110-5.5-5#2", "RFC9110-5.5-2", "RFC9110-5.5-4#2", "RFC9112-2.2-2", "RFC9110-5.5-3",
+        "RFC9110-5.6.3-7")]
     public void ChecksFieldValues()
     {
         Platform.RequireLinuxX64();
@@ -179,6 +181,8 @@ public sealed class H1RequestTests
         ParsedRequest ok = H1Parsing.Parse($"GET / HTTP/1.1\r\n{Host}X: tab\there and café\r\n\r\n");
         Assert.True(ok.Result > 0);
         Assert.Equal("tab\there and café", ok.Field("x"));
+        // Whitespace around a value (OWS: SP and HTAB, any amount) is not part of it.
+        Assert.Equal("padded", H1Parsing.Parse($"GET / HTTP/1.1\r\n{Host}X:\t \tpadded \t \r\n\r\n").Field("x"));
     }
 
     /// <summary>The request-line's elements are separated by single SPs; any other spacing is a 400.</summary>
@@ -233,7 +237,7 @@ public sealed class H1RequestTests
     [InlineData("HTTP/1.10", -400)]
     [InlineData("HTTP/11", -400)]
     [InlineData("HTTP/1.", -400)]
-    [Requirement("RFC9112-2.3-3")]
+    [Requirement("RFC9112-2.3-3", "RFC9110-6.2-8")]
     public void ReadsTheVersion(string version, int expected)
     {
         Platform.RequireLinuxX64();
@@ -284,7 +288,7 @@ public sealed class H1RequestTests
 
     /// <summary>The absolute-form is accepted; its authority is the request's, and Host is ignored.</summary>
     [Fact]
-    [Requirement("RFC9112-3.2.2-9", "RFC9112-3.2.2-8", "RFC9112-3.2.2-2")]
+    [Requirement("RFC9112-3.2.2-9", "RFC9112-3.2.2-8", "RFC9112-3.2.2-2", "RFC9110-4.2.1-2", "RFC9110-4.2.2-2", "RFC9110-4.2.4-4")]
     public void AcceptsTheAbsoluteForm()
     {
         Platform.RequireLinuxX64();
@@ -293,6 +297,12 @@ public sealed class H1RequestTests
         Assert.Equal(Abi.TargetAbsolute, r.TargetForm);
         Assert.Equal("http", r.Scheme);
         Assert.Equal("origin.example:81", r.Authority);
+
+        ParsedRequest secure = H1Parsing.Parse("GET https://origin.example HTTP/1.1\r\nHost: origin.example\r\n\r\n");
+        Assert.Equal(("https", "origin.example"), (secure.Scheme, secure.Authority));
+        // userinfo in an http(s) URI hides the authority it seems to name: an error.
+        ParsedRequest disguised = H1Parsing.Parse("GET http://bank.example@evil.example/ HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+        Assert.Equal((-400, ParseError.TargetForm), (disguised.Result, disguised.Error));
     }
 
     /// <summary>An http or https URI without a host is invalid.</summary>
@@ -324,7 +334,7 @@ public sealed class H1RequestTests
     [InlineData("OPTIONS * HTTP/1.1", true)]
     [InlineData("GET * HTTP/1.1", false)]
     [InlineData("OPTIONS *x HTTP/1.1", false)]
-    [Requirement("RFC9112-3.2-2", "RFC9112-3.2.3-2", "RFC9112-3.2.4-2")]
+    [Requirement("RFC9112-3.2-2", "RFC9112-3.2.3-2", "RFC9112-3.2.4-2", "RFC9110-9.3.6-4", "RFC9110-7.1-6")]
     public void MatchesTheTargetFormToTheMethod(string line, bool accepted)
     {
         Platform.RequireLinuxX64();
@@ -427,12 +437,17 @@ public sealed class H1RequestTests
 
     /// <summary>Two Content-Length lines must agree.</summary>
     [Fact]
-    [Requirement("RFC9112-6.3-2.5#1")]
+    [Requirement("RFC9112-6.3-2.5#1", "RFC9110-8.6-13#2")]
     public void RequiresContentLengthLinesToAgree()
     {
         Platform.RequireLinuxX64();
         Assert.Equal(5ul, H1Parsing.Parse($"POST / HTTP/1.1\r\n{Host}Content-Length: 5\r\nContent-Length: 5\r\n\r\n").ContentLength);
         Assert.Equal(ParseError.ContentLength, H1Parsing.Parse($"POST / HTTP/1.1\r\n{Host}Content-Length: 5\r\nContent-Length: 6\r\n\r\n").Error);
+        // One line holding a list of the same value (a duplicate merged upstream) is taken as that
+        // value, the recipient's other choice besides rejecting it; a list that disagrees is no
+        // length at all.
+        Assert.Equal(5ul, H1Parsing.Parse($"POST / HTTP/1.1\r\n{Host}Content-Length: 5, 5\r\n\r\n").ContentLength);
+        Assert.Equal(ParseError.ContentLength, H1Parsing.Parse($"POST / HTTP/1.1\r\n{Host}Content-Length: 5, 6\r\n\r\n").Error);
     }
 
     /// <summary>Transfer-Encoding: chunked as the final coding, once, in HTTP/1.1, without Content-Length.</summary>
@@ -454,7 +469,10 @@ public sealed class H1RequestTests
     [InlineData("Transfer-Encoding: gzip, chunked\r\n", "HTTP/1.1", -501, ParseError.TeUnknown)]
     [InlineData("Transfer-Encoding: \"chunked\"\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
     [InlineData("Transfer-Encoding: chunkedx\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
-    [Requirement("RFC9112-6.1-2", "RFC9112-6.1-4#2", "RFC9112-6.1-11", "RFC9112-6.1-15#1", "RFC9112-6.1-15#2", "RFC9112-6.1-16", "RFC9112-6.3-2.4.3", "RFC9110-5.6.1.2-1#1")]
+    [InlineData("Transfer-Encoding: chunked;x=1\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
+    [InlineData("Transfer-Encoding: gzip;q=1, chunked\r\n", "HTTP/1.1", -501, ParseError.TeUnknown)]
+    [Requirement("RFC9112-6.1-2", "RFC9112-6.1-4#2", "RFC9112-6.1-11", "RFC9112-6.1-15#1", "RFC9112-6.1-15#2", "RFC9112-6.1-16", "RFC9112-6.3-2.4.3", "RFC9110-5.6.1.2-1#1",
+        "RFC9110-5.6.1.2-1#2", "RFC9112-7.1-6", "RFC9112-7.2-3")]
     public void JudgesTransferEncoding(string fields, string version, int expected, ParseError error)
     {
         Platform.RequireLinuxX64();

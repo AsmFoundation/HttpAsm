@@ -30,4 +30,13 @@
     <LinkerArg Include="-z defs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- What a NASM program that references this library may %include: httpasm.inc (here), and
+         the ABI's structures and constants it includes in turn, httpasm_abi.inc with the
+         generated field ids, which live with the core because the core's code uses them too.
+         Declaring any public directory replaces the SDK's default (include/), so both are named. -->
+    <AsmPublicIncludeDirectory Include="$(MSBuildProjectDirectory)/include/" />
+    <AsmPublicIncludeDirectory Include="$(MSBuildProjectDirectory)/../HttpAsm.Core/include/" />
+  </ItemGroup>
+
 </Project>

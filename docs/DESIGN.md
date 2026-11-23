@@ -9,11 +9,15 @@ This file is the single plan: the decisions, the architecture and the milestones
 decisions are made. Evidence (measurements, test reports) lives next to the code that produced
 it.
 
-**Status (2026-11-23):** in development. The repository's scaffolding is done:
-- `specs/` and its requirement registry;
-- the two assembly projects;
-- the first shared rules: tokens and field values;
-- the C ABI and the .NET tests that trace requirements.
+**Status (2026-11-23):** in development; M1 nearly complete (section 7 lists what is left).
+Working on Linux x64:
+- the server: HTTP/1.1 and HTTP/2 (h2c with prior knowledge, h2spec 146/146) on one port,
+  epoll workers, handlers that answer at once or later from any thread;
+- the client: one blocking HTTP/1.1 connection;
+- the codecs: HTTP/1.1 both ways, chunked bodies, HPACK, HTTP/2's request rules;
+- `specs/` with the requirement registry and the tables generated from the RFC files;
+- the C ABI and the .NET tests that trace requirements, with M1's registry gate passing (every
+  row of its documents proven or deferred with a reason); benchmarks against nginx and h2o.
 
 Nothing is released.
 
@@ -175,23 +179,38 @@ stays only if the difference is within noise.
 **M1: the shared semantics + HTTP/1.1 + HTTP/2** (in progress):
 1. *Scaffolding (done):* the repository, `specs/` and the registry, the core and library
    projects, the C ABI, the tests and CI.
-2. *Shared rules:* tokens and field values first (done: `httpasm_token_length`,
-   `httpasm_field_value_scan`). Then field names per version, the field-id perfect hash, the
-   request view, and the event model.
-3. *HTTP/1.1,* RFC 9112 with the RFC 9110 semantics it needs, in both directions:
+2. *Shared rules (done):* tokens and field values (`httpasm_token_length`,
+   `httpasm_field_value_scan`); field names per version (HTTP/2 adds lower case); the field-id
+   perfect hash; the request view every version fills (`httpasm_request`); the event model:
+   handlers called inline by the loops, answering at once or later from any thread.
+3. *HTTP/1.1 (done),* RFC 9112 with the RFC 9110 semantics it needs, in both directions:
    - request and status lines (sections 3 and 4) and field lines (section 5);
    - body length with Content-Length and chunked, and the smuggling defenses of section 6.3;
    - persistence and pipelining (section 9);
-   - SIMD parsing.
-4. *The Linux driver:* the per-core io_uring loop (epoll fallback), accept, timers, idle without
-   polling, and the first server and client calls in the C ABI.
-5. *The isolation measurement:* HTTP/1.1 from shared source against a hand-isolated HTTP/1.1,
-   then against nginx and h2o.
-6. *HTTP/2:*
-   - frames, stream states, flow control, SETTINGS;
-   - HPACK, with its static table and Huffman code generated from RFC 7541;
-   - h2c with prior knowledge;
-   - h2spec, starting from GrpcAsm's h2spec-proven knowledge.
+   - SIMD parsing (SSE2: line ends, field values).
+4. *The Linux driver:* per-core epoll loops (done): accept with SO_REUSEPORT, timers as
+   deadline lists, idle without polling, back-pressure, graceful stop, the server's and the
+   client's calls in the C ABI. **Left:** the io_uring loop, with epoll as its fallback.
+5. *The isolation measurement (`benchmarks/`):* the same sources built without HTTP/2 (the
+   `H1Only` configuration) against the full build, with an A/A control (the full build twice)
+   as the noise floor. Against nginx 1.24 and h2o 2.2.5 too: see `benchmarks/README.md`.
+6. *HTTP/2 (done):*
+   - frames, stream states, flow control, SETTINGS (`src/HttpAsm/h2.asm`);
+   - HPACK, with its static table and Huffman code generated from RFC 7541 (the encoder
+     reproduces Appendix C octet for octet);
+   - h2c with prior knowledge, on the same port as HTTP/1.1;
+   - h2spec: 146/146, pinned and required in CI;
+   - every frame the server sends is checked against RFC 9113's sending rules in every test;
+     GOAWAY before every close, a graceful stop's two GOAWAYs (2^31 - 1, then the last stream),
+     400 before the reset of a malformed request, the flood guards (rapid reset, CONTINUATION).
+7. *The registry gate (done):* every row of RFC 9110, 9112, 9113, 7541 and 6585 is proven by a
+   test that names it or deferred in `specs/deferred.tsv` with its milestone and a reason;
+   `RegistryTests.AccountsForEveryM1Row` fails on a row that is neither and on a stale rule.
+   On 2026-11-23: RFC 7541 20 of 20 proven; RFC 9113 184 of 302 (the rest: TLS, push, the
+   HTTP/2 client, intermediaries, options); RFC 9112 112 of 160; RFC 9110 97 of 509 (most of
+   the rest is the application's, the client's or an intermediary's).
+
+**Left for M1's exit:** the io_uring loop (step 4).
 
 *Exit:* every RFC 9112, RFC 9113 and RFC 7541 row proven, or deferred with a reason. The RFC
 9110 rows M1 needs are proven; the others are deferred with reasons. h2spec 146/146,
@@ -200,8 +219,11 @@ request-smuggling cases, and recorded measurements.
 **Then, in order:**
 - **M2:** crypto in assembly + TLS 1.3 (RFC 8446).
 - **M3:** TLS 1.2 + certificates (RFC 5280, X.509/ASN.1/DER).
-- **M4:** QUIC + HTTP/3 + QPACK (RFC 9000, 9001, 9002, 9114, 9204).
-- **M5:** the .NET standard interfaces (ASP.NET Core `IServer`, an `HttpClient` handler).
+- **M4:** QUIC + HTTP/3 + QPACK (RFC 9000, 9001, 9002, 9114, 9204), and server push, built
+  once for HTTP/2 and HTTP/3 with the stream logic they share (section 4).
+- **M5:** the .NET standard interfaces (ASP.NET Core `IServer`, an `HttpClient` handler). The
+  handler is the full client: HTTP/2, redirects, credentials, retries, pipelining; M1's C ABI
+  client is one blocking HTTP/1.1 connection.
 - **M6:** the extensions and roles that "complete" is decided to include.
 
 Other platforms (Windows, macOS, ARM64), Python's ASGI and the benchmarking suite follow once

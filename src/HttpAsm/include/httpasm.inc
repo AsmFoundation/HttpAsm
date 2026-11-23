@@ -28,6 +28,19 @@ struc httpasm_server_options
     .reserved:          resq 1
 endstruc
 
+; -----------------------------------------------------------------------------
+; httpasm_client_response (httpasm.h): what httpasm_client_send reads (96 octets). Every
+; pointer is valid until the next call on the client.
+; -----------------------------------------------------------------------------
+struc httpasm_client_response
+    .head:              resb httpasm_response_head_size ; status, reason, fields, flags
+    .body:              resq 1  ; the decoded body
+    .body_length:       resq 1
+    .trailers:          resq 1  ; a chunked body's trailer fields, or NULL
+    .trailer_count:     resd 1
+    .reserved:          resd 1
+endstruc
+
 extern httpasm_abi_version          ; uint32_t (void)
 extern httpasm_struct_size          ; uint32_t (uint32_t which)
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
@@ -62,5 +75,8 @@ extern httpasm_exchange_body        ; const uint8_t * (exchange, size_t *length)
 extern httpasm_exchange_trailers    ; const httpasm_field * (exchange, uint32_t *count)
 extern httpasm_exchange_defer       ; int (exchange)
 extern httpasm_exchange_respond     ; int (exchange, status, fields, count, body, length)
+extern httpasm_client_connect       ; httpasm_client * (address, port, timeout_ms, int *error)
+extern httpasm_client_send          ; int (client, request, body, length, response)
+extern httpasm_client_close         ; void (client)
 
 %endif

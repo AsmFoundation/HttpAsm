@@ -207,6 +207,30 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_hpack_entry")]
     internal static partial int HpackEntry(byte* table, uint index, HttpField* field);
 
+    /// <summary>httpasm_client *httpasm_client_connect(address, port, timeout_ms, int *error).</summary>
+    /// <param name="address">IPv4, network byte order.</param>
+    /// <param name="port">The port.</param>
+    /// <param name="timeoutMs">The connect and I/O timeout (0: none).</param>
+    /// <param name="error">Receives -errno on failure.</param>
+    /// <returns>The client, or null.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_client_connect")]
+    internal static partial nint ClientConnect(uint address, ushort port, uint timeoutMs, int* error);
+
+    /// <summary>int httpasm_client_send(client, request, body, length, response).</summary>
+    /// <param name="client">The client.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="response">Receives the response.</param>
+    /// <returns>0, -HTTPASM_ERROR_*, or -errno.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_client_send")]
+    internal static partial int ClientSend(nint client, HttpRequest* request, byte* body, nuint length, ClientResponse* response);
+
+    /// <summary>void httpasm_client_close(client).</summary>
+    /// <param name="client">The client.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_client_close")]
+    internal static partial void ClientClose(nint client);
+
     /// <summary>httpasm_server *httpasm_server_create(options, int *error).</summary>
     /// <param name="options">The options.</param>
     /// <param name="error">Receives -errno on failure.</param>

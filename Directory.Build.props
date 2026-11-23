@@ -27,4 +27,15 @@
     <!-- NASM reports file(line): error, which MSBuild counts and IDEs link to the line. -->
     <AsmFlags>-Xvc</AsmFlags>
   </PropertyGroup>
+
+  <!--
+    The H1Only configuration (dotnet build -c H1Only) is the isolation measurement's control
+    (docs/DESIGN.md, "Sharing between the HTTP versions"): the same sources with HTTP/2's
+    detection and dispatch assembled out of the connection loop, so HTTP/1.1 runs exactly the
+    code it would if HTTP/2 did not exist. benchmarks/run.sh compares it with the full build;
+    nothing ships it.
+  -->
+  <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'H1Only'">
+    <AsmFlags>$(AsmFlags) -DHTTPASM_H1_ONLY</AsmFlags>
+  </PropertyGroup>
 </Project>

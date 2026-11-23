@@ -10,7 +10,8 @@
 # Linux. The test app is a portable .NET app whose deps.json names
 # runtimes/linux-x64/native/libhttpasm.so, so the same folder runs unchanged in either place:
 #   native  on a Linux x64 host: the folder itself
-#   docker  mcr.microsoft.com/dotnet/runtime:10.0, the folder mounted read-only (Docker Desktop
+#   docker  mcr.microsoft.com/dotnet/aspnet:10.0 (ASP.NET Core: ClientTests runs Kestrel), the
+#           folder mounted read-only (Docker Desktop
 #           on Windows; its default seccomp profile refuses io_uring, so the driver's tests cover
 #           the epoll fallback there)
 #   wsl     the WSL distribution $HTTPASM_WSL_DISTRO (default Ubuntu), with the .NET 10 runtime
@@ -60,7 +61,7 @@ case "$runner" in
       -v "$out:/t:ro" -w /t -v "$tools:/tools:ro" \
       -e HTTPASM_REQUIRE_LINUX=1 -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
       -e HTTPASM_H2SPEC=/tools/h2spec -e HTTPASM_REQUIRE_H2SPEC=1 \
-      mcr.microsoft.com/dotnet/runtime:10.0 \
+      mcr.microsoft.com/dotnet/aspnet:10.0 \
       dotnet HttpAsm.Tests.dll "$@"
     ;;
   wsl)

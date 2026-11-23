@@ -26,6 +26,10 @@
     <PackageReference Include="xunit.v3" />
     <!-- xunit.v3 4.x adds no implicit using for its namespace; one global using serves every file. -->
     <Using Include="Xunit" />
+    <!-- Kestrel, the independent server the C ABI's client is tested against (ClientTests). The
+         runners need the ASP.NET Core shared framework: run-linux.sh's container is the aspnet
+         image, WSL's ~/.dotnet has it, CI's SDK does. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,6 +41,8 @@
     <!-- The registry travels with the tests, so a container that only has the output folder
          (tests/run-linux.sh) can check every [Requirement] id against it. -->
     <None Include="../../specs/requirements.tsv" Link="specs/requirements.tsv" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The deferrals: what M1 does not prove, and why (RegistryTests.AccountsForEveryM1Row). -->
+    <None Include="../../specs/deferred.tsv" Link="specs/deferred.tsv" CopyToOutputDirectory="PreserveNewest" />
     <!-- RFC 7541 itself: the HPACK tests read Appendix C's examples from the pinned file. -->
     <None Include="../../specs/rfc/rfc7541.txt" Link="specs/rfc/rfc7541.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

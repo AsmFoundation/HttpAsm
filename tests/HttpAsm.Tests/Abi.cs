@@ -215,6 +215,29 @@ internal struct ChunkedState
     public uint Reserved;
 }
 
+/// <summary>httpasm_client_response (httpasm.h): 96 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct ClientResponse
+{
+    /// <summary>The head: status, reason, fields, flags.</summary>
+    public ResponseHead Head;
+
+    /// <summary>The decoded body.</summary>
+    public byte* Body;
+
+    /// <summary>Its length.</summary>
+    public nuint BodyLength;
+
+    /// <summary>A chunked body's trailer fields, or null.</summary>
+    public HttpField* Trailers;
+
+    /// <summary>How many.</summary>
+    public uint TrailerCount;
+
+    /// <summary>Reserved.</summary>
+    public uint Reserved;
+}
+
 /// <summary>httpasm_hpack_output (httpasm.h): 48 octets.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct HpackOutput

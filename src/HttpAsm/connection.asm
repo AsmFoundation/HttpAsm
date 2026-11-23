@@ -24,6 +24,11 @@ default rel
 section .rodata
 s_continue:     db "HTTP/1.1 100 Continue", 13, 10, 13, 10     ; RFC 9110 10.1.1
 s_continue_len  equ $ - s_continue
+s_content_type: db "Content-Type"                               ; the refusals' explanations are
+s_text_plain:   db "text/plain"                                 ; plain text (RFC9110-8.3-5#1)
+; A 505 says which versions this server speaks (RFC9110-15.6.6-1), not only that it refused one.
+s_505_body:     db "HTTP Version Not Supported: this server speaks HTTP/1.1, and HTTP/2 with prior knowledge", 10
+s_505_body_len  equ $ - s_505_body
 
 section .text
 
@@ -137,8 +142,10 @@ lru_unlink:
 ;     descriptor (the handler's code holds the exchange, and another thread reads the request
 ;     and the connection's worker when it answers): the connection becomes a zombie, released
 ;     by the worker when the last deferred answer arrives (ha_conn_release).
-;   - An HTTP/2 connection's state is freed here in either case (ha_h2_free); its deferred
-;     streams are detached, each freed when its answer arrives.
+;   - An HTTP/2 connection says GOAWAY first (ha_h2_goodbye: NO_ERROR and the last stream the
+;     peer opened, one best-effort send, unless an error's GOAWAY went out already); then its
+;     state is freed here in either case (ha_h2_free); its deferred streams are detached, each
+;     freed when its answer arrives.
 ;   - Otherwise it goes on the worker's closed list, freed by ha_conn_reap once the current
 ;     event batch is done: an event later in the same epoll_wait may still carry this
 ;     connection's pointer (handle_completions or close_idle can close a connection whose own
@@ -159,6 +166,11 @@ ha_conn_close:
     call    lru_unlink
     mov     rsi, [rbx + conn.worker]
     dec     qword [rsi + worker.conn_count]
+    ; HTTP/2: a GOAWAY before the close (RFC 9113 6.8), whoever closes and why: the idle
+    ; timeout, a stop, the end of a stop's grace, the peer's own end. A connection error
+    ; wrote and flushed its GOAWAY already, and then this sends nothing.
+    mov     rdi, rbx
+    call    ha_h2_goodbye                   ; nothing for HTTP/1.1 (conn.h2 = 0)
     mov     edi, [rbx + conn.fd]
     mov     eax, SYS_close                  ; closing the descriptor removes it from epoll
     syscall
@@ -605,19 +617,55 @@ ha_conn_append:
 .end:
 
 ; -----------------------------------------------------------------------------
-; error_response: answers with an empty response of status esi and closes after it.
+; error_response: answers the server's own refusal (400, 413, 414, 417, 431, 501, 505, the
+; 500 for a handler that did not answer) with status esi, and closes after it. Its body is a
+; one-line explanation as text/plain (RFC9110-15.5-1#1, 15.6-1#1: a 4xx or 5xx explains
+; itself): the status's reason phrase, or for 505 the versions this server speaks
+; (RFC9110-15.6.6-1). A HEAD request's answer drops the body, as the writer does for every
+; HEAD; a status with no registered phrase goes out empty.
 ;   In: rdi = conn, esi = status. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
+E_CLOSE     equ 0       ; the close argument (the 7th), at [rsp] when ha_conn_respond is called
+E_FIELD     equ 8       ; httpasm_field: Content-Type: text/plain (32)
+E_CONN      equ 40
+E_STATUS    equ 48
+E_FRAME     equ 56      ; entered at 8 past 16: 56 more leaves rsp aligned for the calls
+
 align 16
 error_response:
-    sub     rsp, 24
-    mov     qword [rsp], 1                  ; the close argument, at [rsp] when called
-    xor     edx, edx
-    xor     ecx, ecx
-    xor     r8d, r8d
-    xor     r9d, r9d
+    sub     rsp, E_FRAME
+    mov     [rsp + E_CONN], rdi
+    mov     [rsp + E_STATUS], esi
+    cmp     esi, 505
+    je      .version
+    mov     edi, esi
+    call    ha_status_reason                ; rax = the phrase, edx = its length (0: none)
+    mov     r8, rax
+    mov     r9d, edx                        ; zero-extended into r9
+    xor     ecx, ecx                        ; no Content-Type without content
+    test    edx, edx
+    jz      .respond
+    jmp     .typed
+.version:
+    lea     r8, [rel s_505_body]
+    mov     r9d, s_505_body_len
+.typed:
+    lea     rax, [rel s_content_type]
+    mov     [rsp + E_FIELD + httpasm_field.name], rax
+    lea     rax, [rel s_text_plain]
+    mov     [rsp + E_FIELD + httpasm_field.value], rax
+    mov     dword [rsp + E_FIELD + httpasm_field.name_length], 12
+    mov     dword [rsp + E_FIELD + httpasm_field.value_length], 10
+    mov     dword [rsp + E_FIELD + httpasm_field.id], 0     ; id and flags: none
+    mov     dword [rsp + E_FIELD + httpasm_field.reserved], 0
+    mov     ecx, 1
+.respond:
+    lea     rdx, [rsp + E_FIELD]
+    mov     rdi, [rsp + E_CONN]
+    mov     esi, [rsp + E_STATUS]
+    mov     qword [rsp + E_CLOSE], 1
     call    ha_conn_respond
-    add     rsp, 24
+    add     rsp, E_FRAME
     ret
 
 ; -----------------------------------------------------------------------------
@@ -726,8 +774,10 @@ ha_conn_process:
     sub     rax, [rbx + conn.wsent]
     cmp     rax, HA_OUTPUT_HIGH
     ja      .pressure                       ; back-pressure: answer more only after a flush
+%ifndef HTTPASM_H1_ONLY                     ; the isolation measurement's control assembles HTTP/2 out
     cmp     dword [rbx + conn.proto], HA_PROTO_H2
     je      .h2
+%endif
     mov     eax, [rbx + conn.state]
     cmp     eax, CS_HEAD
     je      .head
@@ -742,16 +792,24 @@ ha_conn_process:
 .head:
     cmp     qword [rbx + conn.rlen], 0
     je      .out
+%ifdef HTTPASM_H1_ONLY
+    mov     dword [rbx + conn.proto], HA_PROTO_H1
+    jmp     .parse_head
+%endif
     cmp     dword [rbx + conn.proto], HA_PROTO_UNKNOWN
     jne     .parse_head
     ; The connection's first octets decide its protocol, once: HTTP/2's preface (h2c with prior
-    ; knowledge, RFC 9113 3.3), or anything else as HTTP/1.1 (which would refuse "PRI * HTTP/2.0"
-    ; as an unsupported version).
+    ; knowledge, RFC 9113 3.3), or anything else as HTTP/1.1. A preface whose first line came
+    ; whole but whose end is wrong is an HTTP/2 client's connection error (RFC9113-3.4-9): the
+    ; connection closes without a GOAWAY (allowed: the peer is not speaking HTTP/2 after all)
+    ; rather than get HTTP/1.1's 505 for a request it never meant to send.
     mov     rdi, rbx
     call    ha_h2_detect
     test    eax, eax
     js      .out                            ; a prefix of the preface: wait for more
     jz      .is_h1
+    cmp     eax, 2
+    je      .not_http                       ; an invalid preface: close, nothing said
     mov     rdi, rbx
     call    ha_h2_start
     test    eax, eax

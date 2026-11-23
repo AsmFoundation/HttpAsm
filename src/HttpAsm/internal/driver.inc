@@ -284,8 +284,10 @@ H2S_PREFACE         equ 0       ; the client's preface is next
 H2S_SETTINGS        equ 1       ; its first frame must be SETTINGS
 H2S_OPEN            equ 2
 
-H2F_CLOSING         equ 0x01    ; a connection error: GOAWAY written, input ignored, close after it
+H2F_CLOSING         equ 0x01    ; the final GOAWAY is written (an error, or a goodbye): input ignored, close after it
 H2F_GOAWAY_RECEIVED equ 0x02    ; the peer is leaving: close once no stream is active
+H2F_NOTICE          equ 0x04    ; a graceful stop's first GOAWAY (last stream 2^31 - 1) went out:
+                                ; streams already on their way are still served, none should follow
 
 ; How a remembered stream closed: what a later frame on it means (RFC 9113 5.1).
 H2C_NORMAL          equ 1       ; both sides ended it: DATA or HEADERS are a connection error STREAM_CLOSED
@@ -348,13 +350,17 @@ extern ha_conn_finish       ; (rdi = conn): the answered message leaves the inpu
 extern ha_conn_free         ; (rdi = conn): frees a closed connection's memory
 extern ha_output_reserve    ; (rdi = conn, rsi = octets) -> eax 0 or -ENOMEM: room after the output's end
 extern ha_input_reserve     ; (rdi = conn, rsi = capacity) -> eax 0 or -ENOMEM: the input holds this much
-extern ha_h2_detect         ; (rdi = conn) -> eax 1 HTTP/2's preface, 0 HTTP/1.1, -1 too few octets to tell
+extern ha_h2_detect         ; (rdi = conn) -> eax 1 HTTP/2's preface, 0 HTTP/1.1, -1 too few octets to tell,
+                            ;   2 an HTTP/2 preface broken after its first line (close silently)
 extern ha_h2_start          ; (rdi = conn) -> eax 0 or -ENOMEM: the connection speaks HTTP/2 from now on
 extern ha_h2_process        ; (rdi = conn) -> eax 1 when back-pressure stopped it: frames in the input
 extern ha_h2_respond        ; (rdi = conn, rsi = stream, edx = status, rcx = fields, r8d = count, r9 = body, [rsp+8] = length)
 extern ha_h2_completion     ; (rdi = conn, rsi = completion): a deferred stream's answer arrived
 extern ha_h2_free           ; (rdi = conn): frees the HTTP/2 state; deferred streams are detached
+extern ha_h2_goodbye        ; (rdi = conn): GOAWAY(NO_ERROR) and one best-effort send, before a close
+extern ha_h2_notice         ; (rdi = conn) -> eax 1 if closed: a graceful stop's GOAWAY(2^31 - 1), flushed
 extern ha_check_fields      ; (rdi = fields, esi = count, edx = HA_CHECK_*) -> eax 0 or HTTPASM_ERROR_*
+extern ha_status_reason     ; (edi = status) -> rax = its reason phrase, edx = its length (0: none)
 
 ; ha_check_fields' modes (the core's h1/write.asm WR_*)
 HA_CHECK_RESPONSE       equ 0

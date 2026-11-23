@@ -19,6 +19,9 @@
 ;          SETTINGS_MAX_CONCURRENT_STREAMS (REFUSED_STREAM beyond);
 ;   5.3    a stream depending on itself is a stream error;
 ;   5.4    connection errors write GOAWAY and close; stream errors write RST_STREAM;
+;   6.8    every close is preceded by a GOAWAY: an error's, or NO_ERROR with the last stream the
+;          peer opened (ha_h2_goodbye: the idle timeout, a stop, the peer's own GOAWAY); a
+;          graceful stop first says GOAWAY with 2^31 - 1 while streams finish (ha_h2_notice);
 ;   6.x    every frame type's fields, lengths, stream-0 rules and padding;
 ;   6.9    flow control both ways, windows signed (a SETTINGS change can make them negative),
 ;          2^31 - 1 the most; a response's body waits for window and resumes on WINDOW_UPDATE and
@@ -26,7 +29,8 @@
 ;   8.1    a request ends with END_STREAM; trailers end it too; content-length must equal the
 ;          DATA; a response before the request's end is followed by RST_STREAM(NO_ERROR);
 ;   8.2/8.3 field and pseudo-field rules (the core's httpasm_h2_request), cookies joined
-;          (8.2.3), connection-specific fields refused in responses as well;
+;          (8.2.3), connection-specific fields refused in responses as well; a malformed
+;          request head gets 400 and then RST_STREAM(PROTOCOL_ERROR) (h2_bad_request);
 ;   8.4    a client's PUSH_PROMISE is a PROTOCOL_ERROR.
 ; Hardening: rapid resets (CVE-2023-44487) beyond HA_H2_RESET_FLOOR and half of the streams
 ; opened are ENHANCE_YOUR_CALM; field blocks are bounded in octets and CONTINUATION frames
@@ -52,13 +56,19 @@ s_preface:          db "PRI * HTTP/2.0", 13, 10, 13, 10, "SM", 13, 10, 13, 10
 s_status:           db ":status"
 s_date:             db "date"
 s_content_length:   db "content-length"
+s_content_type:     db "content-type"   ; the server's own answers explain themselves in
+s_text_plain:       db "text/plain"     ; plain text (h2_error_response)
 
 section .text
 
 ; -----------------------------------------------------------------------------
 ; ha_h2_detect: whether a connection's first octets are HTTP/2's client preface (RFC 9113 3.4).
 ;   In: rdi = conn (input non-empty). Out: eax = 1 (the whole preface), 0 (not HTTP/2), -1 (a
-;   prefix of it so far: wait). Clobbers rcx, rdx, rsi, r8 and the flags.
+;   prefix of it so far: wait), 2 (an invalid preface: its first line "PRI * HTTP/2.0" came
+;   whole, so the client speaks HTTP/2, but what follows is not the preface's end; a
+;   connection error PROTOCOL_ERROR whose GOAWAY may be omitted, RFC9113-3.4-9: the caller
+;   closes without a word, where HTTP/1.1 would have answered its 505).
+;   Clobbers rcx, rdx, rsi, r8 and the flags.
 ; -----------------------------------------------------------------------------
 global ha_h2_detect:function hidden (ha_h2_detect.end - ha_h2_detect)
 align 16
@@ -85,6 +95,10 @@ ha_h2_detect:
     ret
 .not_h2:
     xor     eax, eax
+    cmp     r8, H2_PREFACE_LINE             ; the mismatch's offset: past "PRI * HTTP/2.0\r\n"?
+    jb      .other
+    mov     eax, 2                          ; an HTTP/2 client with a broken preface
+.other:
     ret
 .end:
 
@@ -196,6 +210,119 @@ h2_connection_error:
     or      dword [rbx + conn.flags], C_CLOSE_AFTER
 .out:
     ret
+
+; -----------------------------------------------------------------------------
+; h2_goaway_frame: appends a GOAWAY (RFC 9113 6.8) with a last stream id and an error code, and
+; no debug data (RFC9113-6.8-21#1 allows some; this side has nothing to say in it). Used by the
+; closing paths that are not connection errors: the goodbye before a close, a graceful stop's
+; notice.
+;   In: rbx = conn, edi = the last stream id, esi = the error code. Out: eax = 0, or -ENOMEM
+;   (nothing written). Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+align 16
+h2_goaway_frame:
+    sub     rsp, 24                         ; entered at 8 past 16: 24 more leaves rsp aligned
+    bswap   edi
+    mov     [rsp], edi                      ; Last-Stream-ID (the reserved bit is 0: ids < 2^31)
+    bswap   esi
+    mov     [rsp + 4], esi                  ; Error Code
+    mov     edi, H2_GOAWAY
+    xor     esi, esi                        ; GOAWAY defines no flags
+    xor     edx, edx                        ; and always goes on stream 0
+    mov     rcx, rsp
+    mov     r8d, 8
+    call    h2_frame
+    add     rsp, 24
+    ret
+
+; -----------------------------------------------------------------------------
+; ha_h2_goodbye: the connection is about to close. Unless its final GOAWAY went out already (a
+; connection error, or an earlier goodbye), GOAWAY(NO_ERROR) with the last stream the peer
+; opened is appended, so the client learns which of its requests this side may have acted on
+; and which it can safely retry elsewhere (RFC9113-6.8-5, 9.1-5, 5.4.1-4#2: a GOAWAY before
+; every close). Then one non-blocking send of whatever the output still holds, the GOAWAY last.
+; Best effort, on purpose: the descriptor closes right after this returns, whatever the send
+; did; a full socket or a peer already gone loses the GOAWAY, which costs the client nothing a
+; bare close would not have.
+;   Footgun: call it while the descriptor is still open and before ha_h2_free (it reads the
+;   state's last stream); after a shutdown(SHUT_WR) the send just fails, harmlessly.
+;   In: rdi = conn (conn.h2 may be 0: nothing happens). Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+global ha_h2_goodbye:function hidden (ha_h2_goodbye.end - ha_h2_goodbye)
+align 16
+ha_h2_goodbye:
+    push    rbx
+    push    r12
+    sub     rsp, 8                          ; two pushes + 8: aligned for the calls below
+    mov     rbx, rdi
+    mov     r12, [rbx + conn.h2]
+    test    r12, r12
+    jz      .out
+    test    dword [r12 + h2.flags], H2F_CLOSING
+    jnz     .out                            ; the final GOAWAY was written before (and flushed)
+    or      dword [r12 + h2.flags], H2F_CLOSING
+    mov     edi, [r12 + h2.last_stream]
+    mov     esi, H2_NO_ERROR
+    call    h2_goaway_frame
+    test    eax, eax
+    jnz     .out                            ; no memory for it: the close goes ahead without
+    mov     edi, [rbx + conn.fd]
+    mov     rsi, [rbx + conn.wbuf]
+    add     rsi, [rbx + conn.wsent]         ; the unsent output, the GOAWAY at its end
+    mov     rdx, [rbx + conn.wlen]
+    sub     rdx, [rbx + conn.wsent]
+    mov     r10d, MSG_NOSIGNAL              ; a gone peer is an error code, not a SIGPIPE
+    xor     r8d, r8d
+    xor     r9d, r9d
+    mov     eax, SYS_sendto                 ; the socket is non-blocking: a full one returns at once
+    syscall                                 ; whatever it returns: the descriptor closes next
+.out:
+    add     rsp, 8
+    pop     r12
+    pop     rbx
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_h2_notice: a graceful stop began while this connection still has streams in progress.
+; GOAWAY(NO_ERROR) with the last stream id 2^31 - 1 tells the client to open no more streams,
+; while every stream already on its way is still served (RFC9113-6.8-18#1); the final GOAWAY,
+; with the real last stream id, goes out when the connection closes once idle (ha_h2_goodbye,
+; RFC9113-6.8-18#2), so no request is lost between the two. Once per connection; nothing after a
+; connection error. The output is flushed at once (the stop has no other reason to write).
+;   In: rdi = conn (conn.h2 may be 0: nothing happens). Out: eax = 0, or 1 when the flush closed
+;   the connection (a failed send). Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+global ha_h2_notice:function hidden (ha_h2_notice.end - ha_h2_notice)
+align 16
+ha_h2_notice:
+    push    rbx
+    push    r12
+    sub     rsp, 8                          ; two pushes + 8: aligned for the calls below
+    mov     rbx, rdi
+    xor     eax, eax
+    mov     r12, [rbx + conn.h2]
+    test    r12, r12
+    jz      .out
+    test    dword [r12 + h2.flags], H2F_CLOSING | H2F_NOTICE
+    jnz     .out                            ; said already, or closing anyway
+    or      dword [r12 + h2.flags], H2F_NOTICE
+    mov     edi, 0x7FFFFFFF                 ; 2^31 - 1: every stream id is still "may be served"
+    mov     esi, H2_NO_ERROR
+    call    h2_goaway_frame
+    test    eax, eax
+    jnz     .unsent                         ; no memory: the stop goes on without the notice
+    mov     rdi, rbx
+    call    ha_conn_flush                   ; eax = 1 when it closed the connection
+    jmp     .out
+.unsent:
+    xor     eax, eax
+.out:
+    add     rsp, 8
+    pop     r12
+    pop     rbx
+    ret
+.end:
 
 ; -----------------------------------------------------------------------------
 ; h2_find: the active stream with an id. In: r12 = h2, edi = id. Out: rax = stream, or 0.
@@ -345,9 +472,32 @@ h2_stream_error:
     call    h2_close
     jmp     .out
 .remember:
+    ; Not active: a frame on a stream that closed before (a peer's reset, say) or never opened.
+    ; A stream the ring holds already has its entry turned into this side's reset, so the
+    ; peer's frames still in flight are ignored from now on instead of drawing one more
+    ; RST_STREAM each (RFC9113-5.4.2-4#1: normally one per stream). Appending instead would
+    ; leave the older entry first in h2_closed_how's search. The scan costs only on this error
+    ; path; a normal close (h2_close) appends without one.
+    test    r13d, r13d
+    jz      .append                         ; id 0 is no stream (empty slots hold 0)
+    xor     ecx, ecx
+.scan:
+    mov     rax, [r12 + h2.closed + rcx * 8]
+    cmp     eax, r13d
+    je      .update
+    inc     ecx
+    cmp     ecx, HA_H2_CLOSED_RING
+    jb      .scan
+.append:
     mov     edi, r13d
     mov     esi, H2C_RESET
     call    h2_remember
+    jmp     .out
+.update:
+    mov     eax, H2C_RESET
+    shl     rax, 32
+    or      rax, r13                        ; r13's upper half is 0 (mov r13d above)
+    mov     [r12 + h2.closed + rcx * 8], rax
 .out:
     add     rsp, 8
     pop     r14
@@ -688,12 +838,17 @@ ha_h2_process:
     mov     rdi, rbx                        ; frames arrived: the idle timeout starts over
     call    ha_lru_touch
 .no_activity:
-    ; The peer said GOAWAY: once no stream is active, the connection closes.
+    ; The peer said GOAWAY: once no stream is active, the connection closes, with a GOAWAY of
+    ; this side's first (RFC9113-6.8-7: a receiver done with the connection still says GOAWAY).
+    ; It goes into the output here, before the flush half-closes the socket after it: written
+    ; later, at the close itself, it could no longer be sent. NO_ERROR, so nothing is wrong;
+    ; the function's other effects (input ignored, C_CLOSE_AFTER) are what a goodbye needs too.
     test    dword [r12 + h2.flags], H2F_GOAWAY_RECEIVED
     jz      .out
     cmp     dword [r12 + h2.stream_count], 0
     jne     .out
-    or      dword [rbx + conn.flags], C_CLOSE_AFTER
+    mov     edi, H2_NO_ERROR
+    call    h2_connection_error             ; once: it does nothing when closing already
 .out:
     mov     eax, r15d
     add     rsp, 8
@@ -1361,7 +1516,7 @@ h2_block_done:
 
     ; A request head.
     test    dword [rsp + B_FLAGS], H2B_SELF_DEPENDENT
-    jnz     .malformed
+    jnz     .malformed                      ; a priority error (RFC 9113 5.3.1), not a bad message: reset only
     test    rbp, rbp
     jnz     .too_large
     mov     rdi, [rsp + B_OUTPUT + httpasm_hpack_output.fields]
@@ -1371,7 +1526,7 @@ h2_block_done:
     cmp     eax, -HTTPASM_ERROR_EXPECT
     je      .expectation_failed
     test    eax, eax
-    jnz     .malformed
+    jnz     .bad_request                    ; 400, then the reset (h2_bad_request)
     lea     rdi, [rsp + B_OUTPUT]
     mov     rsi, r13
     call    h2_keep_head                    ; into the stream's own memory, cookies joined
@@ -1383,7 +1538,7 @@ h2_block_done:
     test    dword [r13 + h2stream.request + httpasm_request.flags], HTTPASM_REQUEST_CONTENT_LENGTH
     jz      .dispatch
     cmp     qword [r13 + h2stream.request + httpasm_request.content_length], 0
-    jne     .malformed                      ; content-length promised DATA that never comes
+    jne     .bad_request                    ; content-length promised DATA that never comes
 .dispatch:
     mov     rdi, r13
     call    h2_dispatch
@@ -1438,6 +1593,10 @@ h2_block_done:
     mov     rdi, r13
     mov     esi, 417
     call    h2_error_response
+    jmp     .out
+.bad_request:
+    mov     rdi, r13                        ; a malformed request head: 400, then RST_STREAM(PROTOCOL_ERROR)
+    call    h2_bad_request
     jmp     .out
 .malformed:
     mov     edi, [rsp + B_ID]               ; RFC9113-8.1.1-3: a stream error PROTOCOL_ERROR
@@ -1974,23 +2133,47 @@ h2_dispatch:
     ret
 
 ; -----------------------------------------------------------------------------
-; h2_error_response: an answer with no body and no fields (413, 417, 431, 500), before or
-; after the request ended. Done before the request's end, the stream is then reset with
-; NO_ERROR (RFC 9113 8.1: the client should stop sending).
+; h2_error_response: the server's own answer (413, 417, 431, 500), before or after the request
+; ended, explaining itself in one line of text/plain: the status's reason phrase
+; (RFC9110-15.5-1#1, 15.6-1#1; HEAD drops it, as ha_h2_respond does for every HEAD). Done
+; before the request's end, the stream is then reset with NO_ERROR (RFC 9113 8.1: the client
+; should stop sending).
 ;   In: rbx = conn, r12 = h2, rdi = stream, esi = status. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
+HE_LENGTH   equ 0       ; the body's length (the 7th argument), at [rsp] when called
+HE_FIELD    equ 8       ; httpasm_field: content-type: text/plain (32)
+HE_STREAM   equ 40
+HE_STATUS   equ 48
+HE_FRAME    equ 56      ; entered at 8 past 16: 56 more leaves rsp aligned for the calls
+
 align 16
 h2_error_response:
-    sub     rsp, 24
-    mov     edx, esi
-    mov     rsi, rdi
+    sub     rsp, HE_FRAME
+    mov     [rsp + HE_STREAM], rdi
+    mov     [rsp + HE_STATUS], esi
+    mov     edi, esi
+    call    ha_status_reason                ; rax = the phrase, edx = its length (0: none)
+    mov     r9, rax                         ; the body
+    mov     [rsp + HE_LENGTH], rdx          ; edx's write zero-extended rdx
+    xor     r8d, r8d                        ; no content-type without content
+    test    edx, edx
+    jz      .respond
+    lea     rax, [rel s_content_type]
+    mov     [rsp + HE_FIELD + httpasm_field.name], rax
+    lea     rax, [rel s_text_plain]
+    mov     [rsp + HE_FIELD + httpasm_field.value], rax
+    mov     dword [rsp + HE_FIELD + httpasm_field.name_length], 12
+    mov     dword [rsp + HE_FIELD + httpasm_field.value_length], 10
+    mov     dword [rsp + HE_FIELD + httpasm_field.id], 0    ; id and flags: none
+    mov     dword [rsp + HE_FIELD + httpasm_field.reserved], 0
+    mov     r8d, 1
+.respond:
+    lea     rcx, [rsp + HE_FIELD]
+    mov     edx, [rsp + HE_STATUS]
+    mov     rsi, [rsp + HE_STREAM]
     mov     rdi, rbx
-    xor     ecx, ecx
-    xor     r8d, r8d
-    xor     r9d, r9d
-    mov     qword [rsp], 0                  ; the body's length (the 7th argument)
     call    ha_h2_respond
-    add     rsp, 24
+    add     rsp, HE_FRAME
     ret
 
 ; -----------------------------------------------------------------------------
@@ -2042,6 +2225,74 @@ h2_continue:
     ret
 
 ; -----------------------------------------------------------------------------
+; h2_bad_request: a request head that breaks HTTP/2's message rules (a field or pseudo-field the
+; core's httpasm_h2_request refused, or a content-length that END_STREAM contradicts) gets
+; 400 (Bad Request), then RST_STREAM(PROTOCOL_ERROR). Both, because both apply: the SHOULD of
+; RFC9113-8.2.1-6 (a 400 where one can be sent; RFC9113-8.1.1-4#1 allows a response before the
+; reset) and the MUST of RFC9113-8.1.1-3 (a malformed request is a stream error, which is a
+; RST_STREAM, RFC 9113 5.4.2).
+;   The 400's HEADERS does not end the stream: when the request ended already, END_STREAM
+;   would close the stream, and a closed stream can carry no RST_STREAM (RFC9113-5.1-7.14.3);
+;   the reset is what tells the client its request was malformed, and it comes last. The
+;   response holds :status and the worker's date (RFC 9110 6.6.1: a 4xx carries Date), encoded
+;   by the connection's encoder like every block, so the HPACK tables stay in step.
+;   Not for trailers or DATA (there the 400 may contradict an answer in progress, and
+;   RFC9113-8.2.1-6 itself exempts trailers): those get the reset alone (h2_stream_error).
+;   In: rbx = conn, r12 = h2, rdi = stream (active, not dispatched). Clobbers every caller-saved
+;   register; the stream is closed (reset) afterwards, and freed unless a handler holds it.
+; -----------------------------------------------------------------------------
+BR_STATUS   equ 0       ; httpasm_field: ":status: 400"
+BR_DATE     equ 32      ; httpasm_field: "date: <the worker's IMF-fixdate>"
+BR_DIGITS   equ 64      ; "400"
+BR_BLOCK    equ 72      ; the block: a size update (3), :status (1), date (1 + 1 + 29) at most
+BR_FRAME    equ 176     ; one push + 176: aligned; the block's room is 104 octets
+
+align 16
+h2_bad_request:
+    push    r13
+    sub     rsp, BR_FRAME
+    mov     r13, rdi
+    mov     dword [rsp + BR_DIGITS], '400'
+    lea     rax, [rel s_status]
+    mov     [rsp + BR_STATUS + httpasm_field.name], rax
+    lea     rax, [rsp + BR_DIGITS]
+    mov     [rsp + BR_STATUS + httpasm_field.value], rax
+    mov     dword [rsp + BR_STATUS + httpasm_field.name_length], 7
+    mov     dword [rsp + BR_STATUS + httpasm_field.value_length], 3
+    mov     dword [rsp + BR_STATUS + httpasm_field.id], 0
+    mov     dword [rsp + BR_STATUS + httpasm_field.reserved], 0
+    lea     rax, [rel s_date]
+    mov     [rsp + BR_DATE + httpasm_field.name], rax
+    mov     rax, [rbx + conn.worker]
+    lea     rax, [rax + worker.date]        ; refreshed every second by the worker's loop
+    mov     [rsp + BR_DATE + httpasm_field.value], rax
+    mov     dword [rsp + BR_DATE + httpasm_field.name_length], 4
+    mov     dword [rsp + BR_DATE + httpasm_field.value_length], 29
+    mov     dword [rsp + BR_DATE + httpasm_field.id], 0
+    mov     dword [rsp + BR_DATE + httpasm_field.reserved], 0
+    mov     rdi, [r12 + h2.encoder]
+    lea     rsi, [rsp + BR_STATUS]
+    mov     edx, 2
+    lea     rcx, [rsp + BR_BLOCK]
+    mov     r8d, BR_FRAME - BR_BLOCK
+    call    httpasm_hpack_encode
+    test    rax, rax
+    jle     .reset                          ; cannot happen in this room; the reset must come anyway
+    mov     edi, H2_HEADERS
+    mov     esi, H2_FLAG_END_HEADERS        ; no END_STREAM: the reset is the stream's last frame
+    mov     edx, [r13 + h2stream.id]
+    lea     rcx, [rsp + BR_BLOCK]
+    mov     r8, rax
+    call    h2_frame
+.reset:
+    mov     edi, [r13 + h2stream.id]
+    mov     esi, H2_PROTOCOL_ERROR
+    call    h2_stream_error                 ; closes the stream as reset by this side
+    add     rsp, BR_FRAME
+    pop     r13
+    ret
+
+; -----------------------------------------------------------------------------
 ; ha_h2_respond: a final response on a stream: HEADERS (and CONTINUATIONs when the block is
 ; larger than the peer's frame size), then the body as DATA frames as far as the windows allow;
 ; the rest waits on the stream (a copy) for WINDOW_UPDATE or a SETTINGS change.
@@ -2051,7 +2302,8 @@ h2_continue:
 ;   1xx, 204 and 304). HEAD and the bodiless statuses end the stream on HEADERS.
 ;   In: rdi = conn, rsi = stream, edx = status (200-599), rcx = fields, r8d = count, r9 = body,
 ;   [rsp + 8] = the body's length. Out: eax = 0 (also when the stream is gone: the answer is
-;   dropped), -HTTPASM_ERROR_* (nothing sent), or -ENOMEM.
+;   dropped), -HTTPASM_ERROR_* (nothing sent; _STATUS also for a 205 with a body, which must
+;   carry none), or -ENOMEM.
 ;   Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 R_STATUS    equ 0
@@ -2094,6 +2346,11 @@ ha_h2_respond:
     jb      .out
     cmp     dword [rsp + R_STATUS], 599
     ja      .out
+    cmp     dword [rsp + R_STATUS], 205
+    jne     .status_allowed
+    cmp     qword [rsp + R_LENGTH], 0       ; 205 carries no content (RFC9110-15.3.6-3): refused
+    jne     .out                            ; with a body, as HTTP/1.1's writer refuses it
+.status_allowed:
     mov     rdi, [rsp + R_FIELDS]
     mov     esi, [rsp + R_COUNT]
     mov     edx, HA_CHECK_H2_RESPONSE

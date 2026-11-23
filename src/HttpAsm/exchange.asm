@@ -89,7 +89,8 @@ httpasm_exchange_defer:
 ;   and Connection), and the body (none for HEAD, 1xx, 204, 304). Inside the handler, or after
 ;   httpasm_exchange_defer from any thread; once.
 ;   Returns 0; -HTTPASM_ERROR_* when the writer refused the status or a field (nothing is sent,
-;   and the exchange may be answered again); -EINVAL when it was already answered, or never
+;   and the exchange may be answered again), -HTTPASM_ERROR_STATUS also for a 2xx to CONNECT
+;   (a tunnel, not carried before M6); -EINVAL when it was already answered, or never
 ;   deferred outside its handler; -ENOMEM.
 ;   The fields and body are copied before this returns: the caller may free them.
 ; -----------------------------------------------------------------------------
@@ -111,11 +112,28 @@ httpasm_exchange_respond:
     mov     rbp, r9                         ; length
     mov     eax, [rbx + exchange.state]
     cmp     eax, X_IN_HANDLER
-    je      .now
+    je      .answerable
     cmp     eax, X_DEFERRED
-    je      .later
+    je      .answerable
     mov     eax, -EINVAL
     jmp     .out
+
+.answerable:
+    ; A 2xx to CONNECT would make the connection (HTTP/1.1) or the stream (HTTP/2) a tunnel,
+    ; which this driver cannot carry until tunnels come (DESIGN.md, M6): its next octets would
+    ; be parsed as requests. Refused like an invalid status, before anything is written, so the
+    ; handler can still answer otherwise (501, 405, ...) and the exchange stays answerable.
+    mov     rax, [rbx + exchange.request]
+    cmp     word [rax + httpasm_request.method_id], HTTPASM_METHOD_CONNECT
+    jne     .dispatch
+    lea     eax, [r12 - 200]                ; r12d = the status
+    cmp     eax, 100
+    jae     .dispatch                       ; not 2xx: an ordinary answer
+    mov     eax, -HTTPASM_ERROR_STATUS
+    jmp     .out
+.dispatch:
+    cmp     dword [rbx + exchange.state], X_IN_HANDLER
+    jne     .later
 
 .now:
     ; Inside the handler, on the worker's thread: straight into the output.

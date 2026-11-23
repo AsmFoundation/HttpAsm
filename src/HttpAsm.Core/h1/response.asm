@@ -7,7 +7,9 @@
 ; parser would refuse instead.
 ;
 ; The body's framing, by RFC 9112 section 6.3, which needs the request's method:
-;   1. HEAD, and every 1xx, 204 and 304: no body (RFC 9112 6.3 item 1).
+;   1. HEAD, and every 1xx, 204 and 304: no body (RFC 9112 6.3 item 1). A code outside
+;      100-599 is invalid and framed as a 5xx's (RFC9110-15-6): 000-099 too are final answers
+;      with a body, not interim ones.
 ;   2. A 2xx to CONNECT: the connection becomes a tunnel; Content-Length and Transfer-Encoding
 ;      are ignored (RFC9112-6.3-2.2).
 ;   3. Transfer-Encoding: chunked as the final coding means chunked. Any other final coding
@@ -181,8 +183,11 @@ httpasm_h1_parse_response:
     xor     r8d, r8d                        ; the flags
     cmp     edx, HTTPASM_METHOD_HEAD
     je      .no_body
+    cmp     ecx, 100
+    jb      .not_interim                    ; 000-099: an invalid code, framed as a 5xx's (RFC9110-15-6)
     cmp     ecx, 200
-    jb      .no_body
+    jb      .no_body                        ; 1xx (known or not: RFC9110-15-4) has no content
+.not_interim:
     cmp     ecx, 204
     je      .no_body
     cmp     ecx, 304

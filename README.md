@@ -7,33 +7,51 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 [GrpcAsm](https://github.com/AsmFoundation/GrpcAsm). It builds with
 [AsmSdk](https://asmfoundation.github.io/AsmSdk/).
 
-> **Status: in development; nothing is released.** The design is settled for the first
-> milestone. The code so far is the requirement registry, the first shared rules (tokens and
-> field values), the C ABI and its tests. [docs/DESIGN.md](docs/DESIGN.md) holds the decisions,
-> the architecture and the milestones.
+> **Status: in development; nothing is released.** Milestone 1 (the shared semantics, HTTP/1.1
+> and HTTP/2) is being completed. What works today, on Linux x64:
+> - **a server** (`httpasm_server_*`): HTTP/1.1 and HTTP/2 (h2c with prior knowledge) on one
+>   port, one epoll worker per core, handlers that answer at once or later from any thread;
+>   HTTP/2 passes all 146 cases of h2spec;
+> - **a client** (`httpasm_client_*`): one blocking HTTP/1.1 connection, tested against this
+>   server and against Kestrel;
+> - **the codecs** behind them, callable on their own: HTTP/1.1 parsing and writing in both
+>   directions, chunked bodies, HPACK, HTTP/2's request rules.
+>
+> [docs/DESIGN.md](docs/DESIGN.md) holds the decisions, the architecture and the milestones;
+> [benchmarks/](benchmarks/README.md) holds the measurements.
 
 ## How it is built
 
 - **From the official documents.** `specs/` pins the RFC Editor's files by SHA-256 and extracts
-  every MUST, SHOULD and MAY into [specs/requirements.tsv](specs/requirements.tsv): today 2,542
-  requirements and 102 grammar blocks from RFC 9110-9114, 9204, 7541, 8446 and 9000-9002. Each
-  test names the rows it proves: `[Requirement("RFC9110-5.5-5#1")]`.
-- **A sans-I/O core.** The protocol engines do no I/O: bytes go in, and bytes and events come
+  every MUST, SHOULD and MAY into [specs/requirements.tsv](specs/requirements.tsv): 2,554
+  requirements and 102 grammar blocks from RFC 9110-9114, 9204, 7541, 6585, 8446 and
+  9000-9002. Each test names the rows it proves: `[Requirement("RFC9110-5.5-5#1")]`. Every row
+  of milestone 1's documents is accounted for: proven by a test that names it, or deferred in
+  [specs/deferred.tsv](specs/deferred.tsv) with the milestone it belongs to and a reason (a test
+  fails on any row that is neither, and on a deferral that has gone stale). Tables
+  (HPACK's and QPACK's static tables, the Huffman code, the known fields' perfect hash, the
+  status lines) are generated from the same files, and the HPACK tests read RFC 7541's examples
+  from the pinned file itself.
+- **A sans-I/O core.** The protocol codecs do no I/O: bytes go in, and bytes and events come
   out. Per-core loops drive them, and so can a host's own loop or a test.
 - **Shared source, separate code.** HTTP/1.1, HTTP/2 and HTTP/3 share each RFC 9110 rule as one
-  NASM macro, assembled into each version's own code, so no hot path checks a version.
+  NASM macro, assembled into each version's own code, so no hot path checks a version. Whether
+  that costs HTTP/1.1 anything is measured in [benchmarks/](benchmarks/README.md): the full
+  build against an HTTP/1.1-only build, with an A/A control as the noise floor.
 - **One C ABI for every consumer.** .NET's standard interfaces come first (an ASP.NET Core
   server, an `HttpClient` handler). C, Python and NASM programs bind to the same
-  `libhttpasm.so`.
+  `libhttpasm.so` (`include/httpasm.h`, `include/httpasm.inc`).
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/HttpAsm.Core/` | The core: no I/O, no system calls, no allocation (freestanding) |
-| `src/HttpAsm/` | `libhttpasm.so`: the C ABI (`include/httpasm.h`, `include/httpasm.inc`); the Linux driver from M1 on |
-| `specs/` | The pinned official documents, the registry tool (`specs.cs`) and `requirements.tsv` |
-| `tests/HttpAsm.Tests/` | xunit v3 tests through the C ABI, each naming its requirement rows |
+| `src/HttpAsm.Core/` | The core: no I/O, no system calls, no allocation (freestanding): HTTP/1.1, HPACK, HTTP/2's request rules, the shared field rules |
+| `src/HttpAsm/` | `libhttpasm.so`: the C ABI, the Linux driver (server, HTTP/2 engine), the client |
+| `samples/Hello/` | The smallest complete server: "Hello, World!" over HTTP/1.1 and HTTP/2 |
+| `benchmarks/` | The measurements against nginx and h2o, and the isolation measurement |
+| `specs/` | The pinned official documents, the registry tool (`specs.cs`), the table generator (`generate.cs`), `requirements.tsv` |
+| `tests/HttpAsm.Tests/` | xunit v3 tests through the C ABI, each naming its requirement rows; h2spec |
 | `docs/DESIGN.md` | Decisions, architecture, milestones |
 
 ## Building and testing
@@ -42,14 +60,16 @@ Linux x64 only for now. AsmSdk builds `libhttpasm.so` from Windows, macOS or Lin
 tests run on Linux x64.
 
 ```bash
-dotnet build HttpAsm.slnx                          # the library and the tests
-tests/run-linux.sh                                 # every test, in a Linux container (any host with Docker)
+dotnet build HttpAsm.slnx                          # the library, the sample and the tests
+tests/run-linux.sh Release                         # every test on Linux: natively, in WSL or in a container
 dotnet test --project tests/HttpAsm.Tests          # natively, on Linux x64
 
-dotnet run specs/specs.cs -- fetch                 # re-download the pinned documents, check their hashes
 dotnet run specs/specs.cs -- extract --check       # the registry matches the pinned documents
-dotnet run specs/specs.cs -- stats                 # requirements per document and keyword
+dotnet run specs/generate.cs -- --check            # the generated tables match them too
+benchmarks/run.sh                                  # HttpAsm, nginx and h2o, side by side (Linux)
 ```
+
+`tests/run-linux.sh` fetches h2spec (pinned by SHA-256) and requires its 146 cases to pass.
 
 ## License
 

@@ -247,7 +247,8 @@ uint32_t httpasm_abi_version(void);
 
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
- * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output; 0 for any other value. */
+ * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response;
+ * 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -328,8 +329,8 @@ int64_t httpasm_h1_write_response(uint8_t *out, size_t cap, httpasm_response *re
 
 /* A client's request head from an httpasm_request: method, target, authority (sent first as
  * Host), fields; flags HTTPASM_REQUEST_CONTENT_LENGTH (with content_length) or _CHUNKED, _CLOSE,
- * _EXPECT_CONTINUE. Always HTTP/1.1. Returns the length, 0 if cap is too small, or
- * -HTTPASM_ERROR_*. */
+ * _EXPECT_CONTINUE (written only when the request has content: chunked, or a length above 0).
+ * Always HTTP/1.1. Returns the length, 0 if cap is too small, or -HTTPASM_ERROR_*. */
 int64_t httpasm_h1_write_request(uint8_t *out, size_t cap, const httpasm_request *request);
 
 /* One chunk (len >= 1): hex size CRLF data CRLF. Returns the length, 0 if cap is too small, or
@@ -479,10 +480,52 @@ int httpasm_exchange_defer(httpasm_exchange *exchange);
  * chunked, Connection), and the body (left out for HEAD, 1xx, 204, 304). In the handler, or
  * after httpasm_exchange_defer from any thread; once. The fields and body are copied before it
  * returns. 0; -HTTPASM_ERROR_* when the status or a field is refused (nothing sent: answer
- * again); -EINVAL when already answered; -ENOMEM. */
+ * again); -EINVAL when already answered; -ENOMEM. Footgun: a 2xx to CONNECT is refused
+ * (-HTTPASM_ERROR_STATUS), because it would start a tunnel the server cannot carry yet; answer
+ * CONNECT with a 4xx or 5xx (501, 405). */
 int httpasm_exchange_respond(httpasm_exchange *exchange, uint16_t status,
                              const httpasm_field *fields, uint32_t count, const uint8_t *body,
                              size_t length);
+
+/* ------------------------------------------------------------------------------------------
+ * The client (Linux): one blocking HTTP/1.1 connection, requests answered in order. Not
+ * thread-safe: one thread at a time per client.
+ * ------------------------------------------------------------------------------------------ */
+
+typedef struct httpasm_client httpasm_client;       /* opaque */
+
+/* What httpasm_client_send reads (96 octets). Every pointer is valid until the next call on the
+ * client (they point into its input buffer). */
+typedef struct httpasm_client_response {
+    httpasm_response_head head;     /* status, reason, fields, flags (HTTPASM_RESPONSE_HEAD_*) */
+    const uint8_t *body;            /* the decoded body (chunked framing removed) */
+    size_t body_length;
+    const httpasm_field *trailers;  /* a chunked body's trailer fields (kept apart), or NULL */
+    uint32_t trailer_count;
+    uint32_t reserved;
+} httpasm_client_response;
+
+/* Connects to an IPv4 address (network byte order) and port; timeout_ms bounds the connect and
+ * every later read and write (0: none). NULL with *error = -errno on failure (error may be NULL). */
+httpasm_client *httpasm_client_connect(uint32_t address, uint16_t port, uint32_t timeout_ms,
+                                       int *error);
+
+/* Sends a request (method, target, authority as Host, fields; flags HTTPASM_REQUEST_CLOSE or
+ * _EXPECT_CONTINUE; the framing is the client's: Content-Length when there is a body or the
+ * method defines one) and reads the final response whole: 1xx skipped, the body by its framing
+ * (chunked decoded, trailers apart, or until the close). 0; -HTTPASM_ERROR_* for a request the
+ * writer refuses (nothing sent) or an invalid response (connection closed); -errno for I/O
+ * (ETIMEDOUT, ECONNRESET, ENOMEM; connection closed); -ENOTCONN once the connection is closed,
+ * which also follows a response that does not keep it, or a request that asked to close.
+ * Unsolicited octets are never read as a response (RFC 9112 9.2): octets after a response
+ * close the connection once it is returned; octets that came while idle fail the next send
+ * with -EPROTO, and an idle connection the server closed with -ECONNRESET, before anything is
+ * sent (so that request can safely be retried on a new connection). */
+int httpasm_client_send(httpasm_client *client, const httpasm_request *request,
+                        const uint8_t *body, size_t length, httpasm_client_response *response);
+
+/* Closes the connection and frees the client. NULL does nothing. */
+void httpasm_client_close(httpasm_client *client);
 
 #ifdef __cplusplus
 }

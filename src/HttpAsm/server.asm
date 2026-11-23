@@ -949,7 +949,11 @@ begin_stop:
     add     rsp, 8
     ret
 
-; close_idle: closes every connection with no request in progress and nothing to send.
+; close_idle: closes every connection with no request in progress and nothing to send (an
+; HTTP/2 one says GOAWAY as it closes: ha_conn_close). An HTTP/2 connection that has to stay
+; open for its streams gets a graceful stop's notice instead, once (ha_h2_notice: GOAWAY with
+; the last stream 2^31 - 1, RFC9113-6.8-18), so its client opens nothing new; a later call
+; closes it once its streams are done. Called only while the worker is stopping.
 ;   In: rbx = worker. Keeps rbx, rbp, r12-r15 (r13, r14 saved here).
 align 16
 close_idle:
@@ -977,7 +981,13 @@ close_idle:
 .idle:
     mov     rdi, r13
     call    ha_conn_close
+    jmp     .advance
 .skip:
+    ; Kept open for its requests: an HTTP/2 client is told the stop has begun (once; the
+    ; notice may close the connection when its flush fails, which r14 already stepped past).
+    mov     rdi, r13
+    call    ha_h2_notice                    ; nothing for HTTP/1.1 (conn.h2 = 0)
+.advance:
     mov     r13, r14
     jmp     .next
 .out:

@@ -15,6 +15,8 @@
 ;     there (RFC9110-8.6-7#1, RFC9112-6.1-9).
 ;   - HEAD: Content-Length when the caller gives the length its GET would carry
 ;     (RFC9110-8.6-6#1), no body.
+;   - 205 carries no content (RFC9110-15.3.6-3): Content-Length: 0 only; a body, or one of
+;     unknown length, is refused (HTTPASM_ERROR_STATUS).
 ;   - A body of unknown length: chunked for HTTP/1.1. HTTP/1.0 never gets Transfer-Encoding
 ;     (RFC9112-6.1-13#2), so the body runs to the connection's close instead.
 ;   - Date on final responses when the caller supplies the clock's value (RFC 9110 6.6.1).
@@ -332,6 +334,15 @@ httpasm_h1_write_response:
     and     ebp, HTTPASM_RESPONSE_LENGTH | HTTPASM_RESPONSE_CLOSE
     movzx   eax, word [r14 + httpasm_response.status]
     movzx   ecx, byte [r14 + httpasm_response.request_method]
+    ; 205 (Reset Content) carries no content (RFC9110-15.3.6-3): only a declared length of 0
+    ; may go out with it; a body, or one of unknown length, is refused before anything is written.
+    cmp     eax, 205
+    jne     .not_reset_content
+    test    ebp, HTTPASM_RESPONSE_LENGTH
+    jz      .bad_status
+    cmp     qword [r14 + httpasm_response.content_length], 0
+    jne     .bad_status
+.not_reset_content:
     cmp     eax, 200
     jb      .no_framing                     ; 1xx
     cmp     eax, 204
@@ -485,7 +496,9 @@ httpasm_h1_write_response:
 ;   A request's head, from the client's description in an httpasm_request: method, target,
 ;   authority (Host's value, sent first; may be empty), fields and field_count, and flags:
 ;   HTTPASM_REQUEST_CONTENT_LENGTH with content_length, or HTTPASM_REQUEST_CHUNKED (not both);
-;   HTTPASM_REQUEST_CLOSE adds Connection: close; HTTPASM_REQUEST_EXPECT_CONTINUE adds Expect.
+;   HTTPASM_REQUEST_CLOSE adds Connection: close; HTTPASM_REQUEST_EXPECT_CONTINUE adds Expect,
+;   but only to a request with content (chunked, or a Content-Length above 0): without content
+;   the flag is ignored (RFC9110-10.1.1-11.1).
 ;   Always HTTP/1.1. Returns the head's length, 0 if cap is too small, or -HTTPASM_ERROR_METHOD
 ;   / _TARGET / _AUTHORITY / _FIELD_NAME / _FIELD_VALUE / _FRAMING_FIELD.
 ;   In: rdi, rsi, rdx. Keeps rbx, rbp, r12-r15.
@@ -628,8 +641,18 @@ httpasm_h1_write_request:
     call    wr_put
     jc      .full
 .request_no_close:
+    ; Expect: 100-continue only ahead of content: a request with none must not carry it
+    ; (RFC9110-10.1.1-11.1). The flag is dropped then, not refused: with no content there is
+    ; nothing to wait for, so the request means the same without it.
     test    dword [r14 + httpasm_request.flags], HTTPASM_REQUEST_EXPECT_CONTINUE
     jz      .request_fields
+    test    dword [r14 + httpasm_request.flags], HTTPASM_REQUEST_CHUNKED
+    jnz     .request_expect                 ; chunked: content of a length not known yet
+    test    dword [r14 + httpasm_request.flags], HTTPASM_REQUEST_CONTENT_LENGTH
+    jz      .request_fields                 ; no framing: no content
+    cmp     qword [r14 + httpasm_request.content_length], 0
+    je      .request_fields                 ; Content-Length: 0: no content either
+.request_expect:
     lea     rsi, [rel s_expect]
     mov     edx, s_expect_len
     call    wr_put
@@ -672,6 +695,32 @@ httpasm_h1_write_request:
     pop     r12
     pop     rbp
     pop     rbx
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_status_reason: a registered status code's reason phrase ("Bad Request"), taken from the
+; generated status-lines (each "HTTP/1.1 NNN phrase" CRLF), for the one-line explanation the
+; server's own refusals carry (RFC 9110 15.5, 15.6). Used by the driver, for both versions.
+;   In: edi = the status (100-599; the caller checked). Out: rax = the phrase (read-only,
+;   inside the table), edx = its length; edx = 0 for a code with no registered phrase (rax
+;   then points at the table: valid, with nothing to read). Clobbers rcx and the flags.
+; -----------------------------------------------------------------------------
+global ha_status_reason:function hidden (ha_status_reason.end - ha_status_reason)
+align 16
+ha_status_reason:
+    mov     ecx, edi                        ; zero-extended: the table's index below
+    lea     rax, [rel ha_status_line]
+    mov     edx, [rax + rcx * 4 - 400]      ; offset << 8 | the line's length, or 0
+    lea     rax, [rel ha_status_text]
+    test    edx, edx
+    jz      .out                            ; unregistered: no phrase
+    mov     ecx, edx
+    shr     ecx, 8                          ; the line's offset
+    and     edx, 0xFF
+    sub     edx, 15                         ; "HTTP/1.1 NNN " (13) before, CRLF (2) after
+    lea     rax, [rax + rcx + 13]
+.out:
     ret
 .end:
 

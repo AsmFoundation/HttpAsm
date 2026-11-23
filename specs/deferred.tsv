@@ -1,0 +1,170 @@
+# deferred.tsv - the requirement rows milestone 1 does not prove, and why.
+#
+# RegistryTests.AccountsForEveryM1Row is M1's gate (docs/DESIGN.md section 7): every row of
+# RFC 9110, RFC 9112, RFC 9113, RFC 7541 and RFC 6585 in requirements.tsv is either named by a
+# test ([Requirement]) or matched by a rule here. A row's reason is the FIRST rule that matches it,
+# so narrow rules come before broad ones. Stale rules fail the gate: one naming an exact id
+# that a test proves, and one that is the first match of no unproven row (it defers nothing).
+#
+# Columns (tab-separated): match (a row id, or a glob with * over ids), actor (empty: any),
+# keyword (empty: any), milestone (where the work belongs), reason.
+#
+# Milestones:
+#   M2      TLS 1.3 (and TLS in general: ALPN, SNI, https, closure alerts)
+#   M3      TLS 1.2 + certificates
+#   M4      QUIC + HTTP/3, and server push, built once for HTTP/2 and HTTP/3 (their shared
+#           stream logic, docs/DESIGN.md section 4)
+#   M5      the .NET interfaces: the HttpClient handler is the full client (HTTP/2, redirects,
+#           credentials, retries, pipelining, user-agent behavior); M1's C ABI client is one
+#           blocking HTTP/1.1 connection that sends what its caller writes
+#   M6      the roles and extensions "complete" is decided to include (docs/DESIGN.md section 1,
+#           open): proxies, gateways, tunnels, caches, priorities, protocol upgrades
+#   app     semantics a server library hands to its application (the handler decides them:
+#           methods, representations, validators, conditions, ranges, authentication), or that
+#           a client's caller decides (what a request carries); proven, if ever, by the
+#           components that implement them
+#   option  a MAY or OPTIONAL this library does not take (the reason says what it does instead)
+#   design  met by construction, with nothing a test could observe (the reason says where)
+#   spec    addressed to authors of specifications or registrations, not to implementations
+#
+# match	actor	keyword	milestone	reason
+RFC9113-3.2-*			M2	h2 over TLS (the h2 ALPN token, the preface after the TLS handshake) comes with TLS; M1 serves h2c with prior knowledge
+RFC9113-3.3-2			M2	HTTP/2 over TLS is negotiated by ALPN, which comes with TLS
+RFC9113-9.1.1-2			M3	checking the server's certificate comes with certificates
+RFC9113-9.2-*			M2	TLS under HTTP/2 (its version, SNI) comes with TLS
+RFC9113-9.2.1-*			M3	HTTP/2's restrictions on TLS 1.2 come with TLS 1.2
+RFC9113-9.2.2-*			M3	HTTP/2's TLS 1.2 cipher suites come with TLS 1.2
+RFC9113-9.2.3-*			M2	HTTP/2's TLS 1.3 rules come with TLS 1.3
+RFC9113-A-*			M3	the TLS 1.2 cipher suites HTTP/2 prohibits come with TLS 1.2
+RFC9113-10.6-3#3			M2	TLS's own compression: TLS 1.3 has none, and the TLS 1.2 of M3 will not enable it
+RFC9113-10.6-3#*			design	the library compresses no content (no content coding of its own); HPACK keeps credentials out of its tables (RFC 7541 7.1, HpackTests)
+RFC9113-5.1-7.4.*			M4	the reserved stream states exist only with server push
+RFC9113-5.1-7.6.*			M4	the reserved stream states exist only with server push
+RFC9113-6.5.2-2.4.1#*			M4	SETTINGS_ENABLE_PUSH matters with server push: sent from M4, received by the HTTP/2 client (M5)
+RFC9113-6.5.2-2.4.3#4			M5	a client's view of a server's SETTINGS_ENABLE_PUSH: the HTTP/2 client comes with the HttpClient handler
+RFC9113-6.6-*			M4	PUSH_PROMISE is server push: sent from M4, received by the HTTP/2 client (M5); a client's PUSH_PROMISE is already refused (Http2FrameTests.RefusesMalformedFrames)
+RFC9113-8.4*			M4	server push: sent from M4, received by the HTTP/2 client (M5); a client's PUSH_PROMISE is already refused
+RFC9113-10.4-*			M4	the authority of pushed responses: server push
+RFC9113-10.5-2			M5	a client that accepts pushes limits them: the HTTP/2 client comes with the HttpClient handler
+RFC9113-9.1.1-1			M5	reusing a connection for several authorities is a client's choice: the HTTP/2 client comes with the HttpClient handler
+RFC9113-8.3.1-2.3.3#3			M6	"other servers" than origin servers are intermediaries; an origin server may compare :authority and Host as it likes
+RFC9113-8.5-6#*			M6	frames on a CONNECT tunnel: tunnels come with the proxy role; the server refuses to start one (ServerTests.RefusesToStartATunnel)
+RFC9113-5.3.2-5#1			M6	streams are answered as their handlers finish; scheduling by priority comes with RFC 9218's extensible priorities, an extension still undecided
+RFC9113-5.3.2-5#2			option	the server reads no meaning into the absence of priority signals: it uses none
+RFC9113-6.7-5#2			M6	not followed in M1: a PING's ACK joins the connection's output in arrival order, and only TCP back-pressure ever holds that output; moving it ahead of frames already queued (one may be half sent) belongs with priorities
+RFC9113-5.5-*			spec	rules for designers of HTTP/2 extensions; unknown frames and settings are ignored (Http2FrameTests.IgnoresWhatItDoesNotKnow)
+RFC9113-4.3.1-4#2			design	the server never lowers its SETTINGS_HEADER_TABLE_SIZE (it keeps the default 4096, unsent: h2.asm ha_h2_start), so no acknowledged reduction ever precedes a field block
+RFC9113-5.1-7.14.6#2			design	closed streams are remembered by count (a ring of the last 64), not by time: no timer decides how a late frame is treated (h2.asm h2_remember)
+RFC9113-5.1-7.14.6#1			option	no other signal is used: a frame on a closed stream is judged by how the stream closed, while the ring remembers it
+RFC9113-6.8-21#2			design	the server neither logs nor stores a GOAWAY's debug data: h2_goaway reads the last stream id and the code only
+RFC9113-6.9.3-*			design	the server never reduces its SETTINGS_INITIAL_WINDOW_SIZE: its one SETTINGS raises it (65535 to 262144) and nothing lowers it later (h2.asm ha_h2_start)
+RFC9113-5.4-4#1			option	errors are reported as they are found: the first one ends the frame's processing
+RFC9113-5.4-5#2			option	taken in code, untested: a connection error after a graceful stop's notice gets its own GOAWAY (h2_connection_error after ha_h2_notice)
+RFC9113-5.4-6#1			option	the first error found is the one reported
+RFC9113-5.4-6#3			option	the server uses the error code the RFC names for each condition
+RFC9113-5.4.2-4#2			option	not taken: frames on a stream after this side's RST_STREAM are ignored however late (Http2FrameTests.ClosesClosedStreams)
+RFC9113-6.5.2-2.12.2			option	not taken: the limit enforced is the one advertised (max_head as SETTINGS_MAX_HEADER_LIST_SIZE)
+RFC9113-6.5.3-3			option	not taken: no SETTINGS timeout; the idle timeout closes a peer that stays silent
+RFC9113-6.9-4#2			option	not taken: frames outside flow control are always taken in (Http2FrameTests.ReadsFramesWhileItsAnswerWaits)
+RFC9113-6.9.1-2#2			option	never needed: END_STREAM rides on the HEADERS of a bodiless answer or on the body's last DATA frame, so no empty DATA frame is ever owed
+RFC9113-7-5#2			option	error codes a peer sends are not acted on, known or not (Http2FrameTests.IgnoresWhatItDoesNotKnow)
+RFC9113-10.5.1-2			option	the server does not hold its answers' field blocks to the client's advisory SETTINGS_MAX_HEADER_LIST_SIZE
+RFC9112-1.2-*			spec	rule names imported from RFC 9110 and RFC 3986: the rules that use them are what is proven
+RFC9112-3-4#1			app	the library implements no method of its own: every method reaches the handler, which answers 501 for those it does not implement
+RFC9112-3.2.3-3			M6	CONNECT through proxies: tunnels come with the proxy role
+RFC9112-3.3-13			option	the server takes the authority from the request (the target's, or Host), never from its context
+RFC9112-6.1-8			option	no transfer coding but chunked is decoded or applied (others are 501)
+RFC9112-6.3-5			option	not taken: chunked request bodies are accepted (ServerTests.DecodesChunkedBodiesAndKeepsTrailersApart)
+RFC9112-7.3-*			spec	registration rules for transfer codings
+RFC9112-7.4-*			M5	the C ABI client sends no TE of its own, and a caller's TE as written; the HttpClient handler builds TE
+RFC9112-9.3-8			M6	a proxy's rule (an origin server's HTTP/1.0 persistence is RFC9112-9.3-1's, proven)
+RFC9112-9.7-*			M2	HTTP/1.1 over TLS comes with TLS
+RFC9112-9.8-*			M2	TLS closure alerts come with TLS
+RFC9112-10.1-1			app	message/http content is the application's: the library parses no content
+RFC6585-5-p2			design	the server's limits bound the whole head and the number of fields, never one field alone, so its 431 has no single field to name (it explains itself as every refusal does: ServerTests.ExplainsItsRefusals)
+RFC6585-5-p1			M5	resubmitting a smaller request is a client's choice: the HttpClient handler's
+RFC6585-3-p5			M6	what a cache may store: caches (RFC 9111) are a role "complete" may include
+RFC6585-4-p7			M6	what a cache may store: caches are a role "complete" may include
+RFC6585-5-p6			M6	what a cache may store: caches are a role "complete" may include
+RFC6585-6-p5			M6	what a cache may store: caches are a role "complete" may include
+RFC6585-6-p4			M6	511 is for intercepting proxies, a role "complete" may include; the origin server never sends it
+RFC6585-*			app	when to answer 428, 429 or 511, and what the answer says, is the handler's
+RFC9110-2.2-5#2			design	each writer produces one role's messages (httpasm_h1_write_request requests; httpasm_h1_write_response and the HTTP/2 engine responses) and refuses the fields that belong to the framing it owns (H1MessageTests.RefusesFieldsItCannotSend)
+RFC9110-2.2-7			option	no workarounds: the parsers apply the grammar to every peer alike
+RFC9110-2.3-3			design	what the library generates itself (status-lines, Date, Content-Length, chunk sizes, Host from the caller's authority) is far shorter than what it parses (8 KiB targets, 64 KiB heads by default); the caller's own fields are the caller's
+RFC9110-2.4-1			spec	the whole specification as one requirement; its parts are rows of their own
+RFC9110-2.4-2			option	not taken: invalid constructs are refused, not repaired (repairing is where request smuggling starts, RFC 9112 11.2)
+RFC9110-3.3-5			app	the library keeps no state about users across requests; whether two requests come from one user agent is the application's question
+RFC9110-3.8-1			M6	caches (RFC 9111) are a role "complete" may include
+RFC9110-4.1-3			spec	rule names imported from RFC 3986: the rules that use them are what is proven
+RFC9110-4.2.2-6			M2	https comes with TLS
+RFC9110-4.3.3-*			M2	https comes with TLS
+RFC9110-4.3.4-*			M3	verifying a server's identity comes with certificates
+RFC9110-4.2.1-4#1			M5	targets from URIs are the HttpClient handler's to build; the C ABI client sends the target its caller writes (its octets checked: H1MessageTests.WritesRequests)
+RFC9110-4.2.2-4#1			M5	targets from URIs are the HttpClient handler's to build; the C ABI client sends the target its caller writes
+RFC9110-4.2.4-3			M5	targets from URIs are the HttpClient handler's to build; the C ABI writer already refuses userinfo in Host (H1MessageTests.WritesRequests) but sends the target its caller writes
+RFC9110-4.2.3-7#1			option	no normalization: targets reach the handler as received
+RFC9110-4.2.3-7#2			app	how resources are named is the application's
+RFC9110-5.3-1			option	HTTP/1.1 delivers each field line as received; HTTP/2 joins only cookies, as RFC 9113 8.2.3 asks (Http2FrameTests.JoinsCookies)
+RFC9110-5.3-3			app	the caller's fields are written as given (which may repeat is each field's definition); the library's own (Date, Content-Length, Transfer-Encoding, Connection, Host) are written once and refused from the caller (H1MessageTests.RefusesFieldsItCannotSend)
+RFC9110-5.4-3			option	not taken: the client fails a response past its limits
+RFC9110-5.5-4#1			spec	a rule for authors of new field definitions
+RFC9110-5.6.1.1-1			design	the lists the library writes have one member each (Connection: close or keep-alive; Transfer-Encoding: chunked)
+RFC9110-5.6.3-3			design	no field the library writes contains RWS (it appears in Via, User-Agent and Server: the caller's)
+RFC9110-5.6.3-4			option	OWS around a value is excluded, never rewritten
+RFC9110-5.6.3-6			option	BWS is skipped where the library parses it (chunk extensions); nothing is rewritten
+RFC9110-5.6.4-3			design	the library takes no meaning from any quoted-string (chunk extensions are skipped: H1MessageTests.DecodesChunkedBodies); applications parse the fields they read
+RFC9110-5.6.4-5#*			design	the library writes no quoted-string and no comment
+RFC9110-5.6.5-2			app	comments appear in User-Agent, Server and Via: fields the library neither writes nor parses
+RFC9110-5.6.6-2			app	parameters belong to media types and the like: fields the library neither writes nor parses
+RFC9110-5.6.7-*			app	the library reads no timestamp (If-Modified-Since, Last-Modified, Retry-After and others are the application's); its own Date is proven (ServerTests.DatesItsAnswersInImfFixdate)
+RFC9110-6.2-6			option	not taken: the client always sends HTTP/1.1
+RFC9110-6.5.1-5			app	which trailer fields to send is the application's
+RFC9110-6.5.2-2			spec	a rule for authors of new field definitions
+RFC9110-6.6.1-7			design	the server always has a clock (CLOCK_REALTIME): it dates every final answer (ServerTests.DatesItsAnswersInImfFixdate)
+RFC9110-6.6.1-8			M6	a recipient that caches or forwards a response appends Date: a cache's or a proxy's rule
+RFC9110-6.6.1-9			M6	a recipient that caches or forwards a response may replace an invalid Date: a cache's or a proxy's option
+RFC9110-6.6.2-*			M5	neither side of the C ABI sends trailers yet: the .NET interfaces bring them (with the Trailer field)
+RFC9110-7.4-3#*			M2	a scheme's requirements: https's (a secured connection) come with TLS; http's (a host) is RFC 9112 3.2's Host rule, proven there
+RFC9110-7.6.1-4			design	the library sends no connection-specific field but Connection itself (close, or keep-alive for HTTP/1.0)
+RFC9110-7.6.1-9			design	the library's connection options are close and keep-alive only
+RFC9110-7.6.2-5			option	the origin server ignores Max-Forwards, a proxy's field
+RFC9110-7.6.2-*			M6	Max-Forwards is a proxy's field
+RFC9110-7.6.3-*			M6	Via is written by proxies and gateways
+RFC9110-7.7-*			M6	message transformations are a proxy's
+RFC9110-7.8-*			M6	switching protocols (101, 426) serves extensions such as WebSocket, still undecided; the server ignores Upgrade (ServerTests.IgnoresUpgrades)
+RFC9110-8.6-12			M6	forwarding a message is a proxy's
+RFC9110-8.6-13#1			M6	forwarding a message is a proxy's
+RFC9110-9.1-9#2			app	every method reaches the handler: which others it implements is its own choice
+RFC9110-9.2.1-6			app	a resource owner's rule
+RFC9110-9.3.2-2#2			app	which fields a HEAD answer carries is the handler's (the library keeps Content-Length: ServerTests.AnswersHeadWithoutTheBody)
+RFC9110-9.3.4-10#1			app	a rule for designing services
+RFC9110-9.3.6-2			M6	a client's CONNECT: tunnels come with the proxy role
+RFC9110-9.3.7-4			app	what an OPTIONS answer says is the handler's
+RFC9110-9.3.8-*			app	TRACE is the handler's to answer, and what a request carries its caller's
+RFC9110-10.1.4-6			M5	the C ABI client sends no TE of its own; the HttpClient handler builds TE (and its connection option)
+RFC9110-10.1.5-5#*			app	the library generates no product token (no User-Agent, no Server): the caller's fields are the caller's
+RFC9110-10.2.4-1			option	the library adds no Server field; a handler may
+RFC9110-12.5.5-9.1.1			M6	a cache's rule about Vary: *
+RFC9110-15.2.2-1			M6	101 (Switching Protocols) serves protocol upgrades, still undecided
+RFC91*	proxy		M6	intermediaries (proxies, gateways, tunnels) are a role "complete" may include, still undecided (docs/DESIGN.md section 1); M1 builds an origin server and a client
+RFC91*	intermediary		M6	intermediaries are a role "complete" may include, still undecided; M1 builds an origin server and a client
+RFC91*	gateway		M6	gateways are a role "complete" may include, still undecided
+RFC91*	tunnel		M6	tunnels (and the intermediaries the rule addresses) are a role "complete" may include, still undecided
+RFC91*	cache		M6	caches (RFC 9111) are a role "complete" may include, still undecided
+RFC9113-*	client		M5	the HTTP/2 client comes with the HttpClient handler; M1's C ABI client speaks HTTP/1.1
+RFC91*	user agent		M5	user-agent behavior (redirects, credentials, retries, preferences, what to show a user) belongs to the HttpClient handler; the C ABI client sends what its caller writes and returns what came
+RFC91*	client		M5	client behavior beyond framing (what to send, when to retry or pipeline, what to do with an answer) belongs to the HttpClient handler; the C ABI client sends what its caller writes and returns what came
+RFC9110-*	origin server		app	what an origin server decides about its resources (methods, representations, validators, conditions, ranges, redirects, authentication) is the handler's; the library carries its answer
+RFC9110-8.3*			app	Content-Type and media types are the application's
+RFC9110-8.4*			app	content codings are the application's (the library applies none)
+RFC9110-8.5*			app	Content-Language is the application's
+RFC9110-8.7-*			app	Content-Location is the application's
+RFC9110-8.8*			app	validators (ETag, Last-Modified) are the application's
+RFC9110-10.*			app	these request and response context fields are the application's (the library writes Date and the framing only)
+RFC9110-11.*			app	authentication is the application's (the handler challenges; the caller sends credentials)
+RFC9110-12.*			app	content negotiation is the application's
+RFC9110-13.*			app	conditional requests are the handler's to evaluate (it owns the validators)
+RFC9110-14*			app	range requests are the handler's (it owns the representations)
+RFC9110-15.*			app	a status code's meaning and the fields it calls for are the handler's; the library frames every status (H1MessageTests, Http2FrameTests)
+RFC9110-16.*			spec	registration rules

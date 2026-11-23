@@ -25,7 +25,8 @@ public sealed class H1MessageTests
 
     /// <summary>A 200 with a known length: status-line, Date, Content-Length, the fields, CRLF.</summary>
     [Fact]
-    [Requirement("RFC9112-4-2", "RFC9110-6.6.1-6#1", "RFC9110-8.6-9")]
+    [Requirement("RFC9112-4-2", "RFC9110-6.6.1-6#1", "RFC9110-8.6-9", "RFC9112-2.2-7", "RFC9110-5.6.3-2#1", "RFC9110-5.6.3-2#2",
+        "RFC9110-5.6.3-5#1", "RFC9112-6.3-3")]
     public void WritesAResponseWithALength()
     {
         Platform.RequireLinuxX64();
@@ -70,7 +71,8 @@ public sealed class H1MessageTests
     [InlineData(200, "CONNECT", "HTTP/1.1 200 OK\r\n\r\n")]
     [InlineData(407, "CONNECT", "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 7\r\n\r\n")]
     [InlineData(200, "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n")]
-    [Requirement("RFC9110-8.6-8#1", "RFC9110-8.6-8#2", "RFC9112-6.1-10#1", "RFC9112-6.1-10#2", "RFC9110-8.6-6#1", "RFC9112-4-9#2")]
+    [Requirement("RFC9110-8.6-8#1", "RFC9110-8.6-8#2", "RFC9112-6.1-10#1", "RFC9112-6.1-10#2", "RFC9110-8.6-6#1", "RFC9112-4-9#2",
+        "RFC9110-8.6-7#1", "RFC9110-8.6-7#2", "RFC9112-6.1-9", "RFC9110-9.3.6-12#1")]
     public void LeavesOutImpossibleBodies(int status, string method, string expected)
     {
         Platform.RequireLinuxX64();
@@ -82,7 +84,7 @@ public sealed class H1MessageTests
 
     /// <summary>An unregistered status keeps the SP before its empty reason; out-of-range ones are refused.</summary>
     [Fact]
-    [Requirement("RFC9112-4-9#2", "RFC9112-4-5", "RFC9110-15.2-1")]
+    [Requirement("RFC9112-4-9#2", "RFC9112-4-5", "RFC9110-15.2-1", "RFC9112-4-1")]
     public void WritesStatusLines()
     {
         Platform.RequireLinuxX64();
@@ -92,6 +94,20 @@ public sealed class H1MessageTests
         Assert.Equal(-(long)ParseError.Status, H1Messages.WriteResponse(99).Result);
         Assert.Equal(-(long)ParseError.Status, H1Messages.WriteResponse(600).Result);
         Assert.Equal(-(long)ParseError.Status, H1Messages.WriteResponse(100, version: 10).Result);   // no 1xx to HTTP/1.0
+    }
+
+    /// <summary>
+    /// 205 (Reset Content) carries no content: it goes out with Content-Length: 0, and a body,
+    /// or one of unknown length, is refused before anything is written.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-15.3.6-3")]
+    public void SendsResetContentEmpty()
+    {
+        Platform.RequireLinuxX64();
+        Assert.Equal("HTTP/1.1 205 Reset Content\r\nContent-Length: 0\r\n\r\n", H1Messages.WriteResponse(205, length: 0, date: null).Text);
+        Assert.Equal(-(long)ParseError.Status, H1Messages.WriteResponse(205, length: 5).Result);
+        Assert.Equal(-(long)ParseError.Status, H1Messages.WriteResponse(205, length: null).Result);
     }
 
     /// <summary>The caller's fields must be valid and may not take over the framing.</summary>
@@ -110,7 +126,9 @@ public sealed class H1MessageTests
     [InlineData("X", " leading", ParseError.FieldValue)]
     [InlineData("X", "trailing\t", ParseError.FieldValue)]
     [InlineData("X", "nul\0", ParseError.FieldValue)]
-    [Requirement("RFC9110-2.2-5#1", "RFC9112-6.2-2")]
+    [InlineData("X", "bare\rcr", ParseError.FieldValue)]
+    [InlineData("X", "folded\r\n line", ParseError.FieldValue)]
+    [Requirement("RFC9110-2.2-5#1", "RFC9112-6.2-2", "RFC9112-2.2-4#1", "RFC9112-5.2-3", "RFC9112-6.1-4#4")]
     public void RefusesFieldsItCannotSend(string name, string value, ParseError error)
     {
         Platform.RequireLinuxX64();
@@ -131,7 +149,7 @@ public sealed class H1MessageTests
 
     /// <summary>What the response writer writes, the response parser reads back: status, fields, framing.</summary>
     [Fact]
-    [Requirement("RFC9112-4-2", "RFC9112-5-2")]
+    [Requirement("RFC9112-4-2", "RFC9112-5-2", "RFC9112-2.1-4")]
     public void ResponsesRoundTrip()
     {
         Platform.RequireLinuxX64();
@@ -142,6 +160,11 @@ public sealed class H1MessageTests
             (string, string)[] fields = Enumerable.Range(0, random.Next(0, 8))
                 .Select(j => ($"X-Field-{j}", new string('v', random.Next(0, 40)) + j)).ToArray();
             long? length = random.Next(3) == 0 ? null : random.Next(0, 100000);
+            if (status == 205)
+            {
+                length = 0;                                         // 205 carries no content (SendsResetContentEmpty)
+            }
+
             var (result, text, _) = H1Messages.WriteResponse(status, fields, length);
             Assert.True(result > 0);
             ParsedResponse parsed = H1Messages.ParseResponse(text + "body");
@@ -187,7 +210,7 @@ public sealed class H1MessageTests
     [InlineData("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n", "GET", 0x01u)]
     [InlineData("HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n", "GET", 0x01u)]
     [InlineData("HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 1\r\n\r\n", "GET", 0x21u)]
-    [Requirement("RFC9112-6.3-2.2", "RFC9112-9.3-6")]
+    [Requirement("RFC9112-6.3-2.2", "RFC9112-9.3-6", "RFC9110-9.3.6-12#2")]
     public void ReadsTheResponsesFraming(string head, string method, uint flags)
     {
         Platform.RequireLinuxX64();
@@ -209,7 +232,7 @@ public sealed class H1MessageTests
     [InlineData("HTTP/2.0 200 OK\r\n\r\n", ParseError.Version)]
     [InlineData("HTTP/1.1 200 O\u0001K\r\n\r\n", ParseError.Status)]
     [InlineData("HTTP/1.1 200 OK\nX: y\r\n\r\n", ParseError.BareLf)]
-    [Requirement("RFC9112-6.1-16", "RFC9112-6.3-2.5#4", "RFC9112-4-2")]
+    [Requirement("RFC9112-6.1-16", "RFC9112-6.3-2.5#4", "RFC9112-4-2", "RFC9112-4-3", "RFC9112-4-8")]
     public void RefusesFaultyResponses(string head, ParseError error)
     {
         Platform.RequireLinuxX64();
@@ -238,7 +261,9 @@ public sealed class H1MessageTests
 
     /// <summary>A request: Host first, one framing, the flags' fields, the caller's fields; it parses back.</summary>
     [Fact]
-    [Requirement("RFC9110-7.2-4#1", "RFC9110-7.2-4#2", "RFC9112-3.2-5#1", "RFC9112-6.3-7#1", "RFC9110-10.1.1-11.2")]
+    [Requirement("RFC9110-7.2-4#1", "RFC9110-7.2-4#2", "RFC9112-3.2-5#1", "RFC9112-6.3-7#1", "RFC9110-10.1.1-11.2", "RFC9112-3.2-5#2",
+        "RFC9112-3.2-5#3", "RFC9112-2.2-5#1", "RFC9110-6.2-5#1", "RFC9110-6.2-5#2", "RFC9110-10.1.1-11.1", "RFC9112-6.1-4#3",
+        "RFC9112-3.2.2-6")]
     public void WritesRequests()
     {
         Platform.RequireLinuxX64();
@@ -259,6 +284,15 @@ public sealed class H1MessageTests
         Assert.Equal(-(long)ParseError.Target, H1Messages.WriteRequest("GET", "/%4", "h").Result);
         Assert.Equal(-(long)ParseError.Authority, H1Messages.WriteRequest("GET", "/", "user@h").Result);
         Assert.Equal("GET / HTTP/1.1\r\nHost: \r\n\r\n", H1Messages.WriteRequest("GET", "/", "").Text);
+
+        // Host goes with an absolute-form target too (old HTTP/1.0 proxies forward only Host).
+        Assert.Equal("GET http://example.com/x HTTP/1.1\r\nHost: example.com\r\n\r\n", H1Messages.WriteRequest("GET", "http://example.com/x", "example.com").Text);
+        // Expect only ahead of content: without any (no framing, or a length of 0) it is left out.
+        Assert.Equal("GET / HTTP/1.1\r\nHost: h\r\n\r\n", H1Messages.WriteRequest("GET", "/", "h", flags: expect).Text);
+        Assert.DoesNotContain("Expect", H1Messages.WriteRequest("POST", "/", "h", flags: contentLength | expect, length: 0).Text);
+        Assert.Contains("Expect: 100-continue", H1Messages.WriteRequest("POST", "/", "h", flags: chunked | expect).Text);
+        // No transfer coding of the caller's: only the writer's chunked can frame a request.
+        Assert.Equal(-(long)ParseError.FramingField, H1Messages.WriteRequest("PUT", "/", "h", [("Transfer-Encoding", "gzip")], chunked).Result);
     }
 
     /// <summary>A chunked body decodes in place, whatever the read sizes, extensions ignored.</summary>
@@ -268,11 +302,14 @@ public sealed class H1MessageTests
     [InlineData(2)]
     [InlineData(7)]
     [InlineData(4096)]
-    [Requirement("RFC9112-7.1-2", "RFC9112-7.1-4", "RFC9112-7.1.1-2", "RFC9112-7.1.1-4")]
+    [Requirement("RFC9112-7.1-2", "RFC9112-7.1-4", "RFC9112-7.1.1-2", "RFC9112-7.1.1-4", "RFC9110-5.6.4-2", "RFC9110-5.6.4-4",
+        "RFC9110-5.6.3-5#2", "RFC9112-7.1-1")]
     public void DecodesChunkedBodies(int piece)
     {
         Platform.RequireLinuxX64();
-        string body = "5\r\nhello\r\n1A;name=value;quoted=\"a;b\"\r\nabcdefghijklmnopqrstuvwxyz\r\n001\r\n!\r\n0\r\nX-Trailer: t\r\n\r\nNEXT";
+        // Extensions are skipped whatever their form: BWS around ";" and "=", a quoted-string
+        // holding ";", one holding a quoted-pair (an escaped DQUOTE).
+        string body = "5\r\nhello\r\n1A ; name = value;quoted=\"a;b\";pair=\"x\\\"y\"\r\nabcdefghijklmnopqrstuvwxyz\r\n001\r\n!\r\n0\r\nX-Trailer: t\r\n\r\nNEXT";
         byte[]? data = H1Messages.DecodeChunked(Encoding.Latin1.GetBytes(body), piece, out ChunkedState state, out byte[] rest);
         Assert.NotNull(data);
         Assert.Equal("helloabcdefghijklmnopqrstuvwxyz!", Encoding.Latin1.GetString(data!));

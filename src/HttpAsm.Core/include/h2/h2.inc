@@ -51,6 +51,8 @@ H2_SETTINGS_MAX_HEADER_LIST_SIZE    equ 0x6
 ; Limits the protocol fixes
 H2_FRAME_HEADER         equ 9           ; length (24), type, flags, R + stream id (31)
 H2_PREFACE_LENGTH       equ 24          ; "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+H2_PREFACE_LINE         equ 16          ; its first line, "PRI * HTTP/2.0\r\n": no HTTP/1.1 request
+                                        ; starts so (version 2.0), so a client sending it speaks HTTP/2
 H2_DEFAULT_WINDOW       equ 65535       ; every window until SETTINGS or WINDOW_UPDATE say otherwise
 H2_MAX_WINDOW           equ 0x7FFFFFFF  ; 2^31 - 1: a window past it is a FLOW_CONTROL_ERROR
 H2_MIN_FRAME_SIZE       equ 16384       ; SETTINGS_MAX_FRAME_SIZE's initial value and minimum

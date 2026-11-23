@@ -156,10 +156,11 @@ public sealed class ServerTests
     /// <summary>
     /// Pipelined requests are answered in the order they came, even when the handler answers
     /// every other one later from the thread pool, after a random delay: later answers wait for
-    /// earlier ones.
+    /// earlier ones. The server supports persistent connections (all of them on one), so it
+    /// never needs to close every answer as a server without that support must.
     /// </summary>
     [Fact]
-    [Requirement("RFC9112-9.3.2-1#2", "RFC9112-9.3.2-1#3", "RFC9112-9.3-1")]
+    [Requirement("RFC9112-9.3.2-1#2", "RFC9112-9.3.2-1#3", "RFC9112-9.3-1", "RFC9112-9.3-5")]
     public void AnswersPipelinedRequestsInOrder()
     {
         Platform.RequireLinuxX64();
@@ -199,10 +200,11 @@ public sealed class ServerTests
 
     /// <summary>
     /// After a request with Connection: close the server answers it with Connection: close,
-    /// closes, and never runs a request pipelined behind it.
+    /// closes, and never runs a request pipelined behind it: a server that sends close starts
+    /// the closing itself and processes nothing more on the connection.
     /// </summary>
     [Fact]
-    [Requirement("RFC9112-9.6-6#1", "RFC9112-9.6-6#2", "RFC9112-9.6-6#3", "RFC9112-9.6-1")]
+    [Requirement("RFC9112-9.6-6#1", "RFC9112-9.6-6#2", "RFC9112-9.6-6#3", "RFC9112-9.6-1", "RFC9112-9.6-7#1", "RFC9112-9.6-7#2")]
     public void ClosesAfterAConnectionCloseRequest()
     {
         Platform.RequireLinuxX64();
@@ -225,10 +227,12 @@ public sealed class ServerTests
 
     /// <summary>
     /// HTTP/1.0 persists only with keep-alive (answered with Connection: keep-alive); without
-    /// it the connection closes after the answer.
+    /// it the connection closes after the answer. Either way the answer is HTTP/1.1, the highest
+    /// version the server conforms to within the request's major version (RawConnection accepts
+    /// no other status-line): the server never downgrades its responses to HTTP/1.0.
     /// </summary>
     [Fact]
-    [Requirement("RFC9112-9.3-1")]
+    [Requirement("RFC9112-9.3-1", "RFC9110-6.2-7#1", "RFC9110-6.2-7#2", "RFC9112-2.3-6#1", "RFC9112-2.3-6#2")]
     public void PersistsHttp10OnlyWithKeepAlive()
     {
         Platform.RequireLinuxX64();
@@ -336,11 +340,12 @@ public sealed class ServerTests
     /// <summary>
     /// A body past max_body is refused with 413 and the connection closes (its unread body
     /// would otherwise be taken for the next request): a declared length at once, before any
-    /// body octet is read; a chunked body as soon as the decoded octets pass the limit. A body
-    /// of exactly the limit is accepted.
+    /// body octet is read, saying Connection: close so the client knows the rest will not be
+    /// read; a chunked body as soon as the decoded octets pass the limit. A body of exactly the
+    /// limit is accepted.
     /// </summary>
     [Fact]
-    [Requirement("RFC9110-15.5.14-1#2", "RFC9112-9.3-7#1")]
+    [Requirement("RFC9110-15.5.14-1#2", "RFC9112-9.3-7#1", "RFC9110-15.5.14-1#1", "RFC9110-10.1.1-13.4")]
     public void RefusesBodiesPastTheLimit()
     {
         Platform.RequireLinuxX64();
@@ -371,7 +376,9 @@ public sealed class ServerTests
 
     /// <summary>
     /// The heads' limits from the server's options apply: a target past max_target is 414, more
-    /// fields than max_fields or a head past max_head is 431.
+    /// fields than max_fields or a head past max_head is 431 (fields larger than the server will
+    /// process get a 4xx, as the semantics require). Parsing is defensive this way: no element
+    /// is trusted to fit, and none is buffered past its bound.
     /// </summary>
     /// <param name="request">The octets sent.</param>
     /// <param name="status">The status expected.</param>
@@ -379,6 +386,7 @@ public sealed class ServerTests
     [InlineData("GET /0123456789012345678901234567890123456789012345678901234567890123456789 HTTP/1.1\r\nHost: t\r\n\r\n", 414)]
     [InlineData("GET / HTTP/1.1\r\nHost: t\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\n\r\n", 431)]
     [InlineData("GET / HTTP/1.1\r\nHost: t\r\nX: 0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\r\n\r\n", 431)]
+    [Requirement("RFC9110-5.4-2", "RFC9110-2.3-1")]
     public void AppliesTheConfiguredLimits(string request, int status)
     {
         Platform.RequireLinuxX64();
@@ -393,10 +401,11 @@ public sealed class ServerTests
 
     /// <summary>
     /// HEAD is answered with GET's fields (Content-Length of the body it would have had) and no
-    /// body: the next response on the connection starts right after the head.
+    /// body: the next response on the connection starts right after the head. GET and HEAD,
+    /// the two methods every general-purpose server must support, both work on any handler.
     /// </summary>
     [Fact]
-    [Requirement("RFC9110-9.3.2-1", "RFC9110-9.3.2-2#1", "RFC9110-8.6-6#1", "RFC9110-8.6-6#2")]
+    [Requirement("RFC9110-9.3.2-1", "RFC9110-9.3.2-2#1", "RFC9110-8.6-6#1", "RFC9110-8.6-6#2", "RFC9110-9.1-9#1")]
     public void AnswersHeadWithoutTheBody()
     {
         Platform.RequireLinuxX64();
@@ -409,6 +418,136 @@ public sealed class ServerTests
 
         Assert.Equal("12", head.Field("Content-Length"));
         Assert.Equal("twelve bytes", get.Text);
+    }
+
+    /// <summary>
+    /// CONNECT reaches the handler, but a 2xx answer, which would turn the connection into a
+    /// tunnel this server cannot carry yet, is refused (-HTTPASM_ERROR_STATUS, nothing sent);
+    /// the handler answers otherwise (501), and the connection goes on. The writer itself never
+    /// frames a 2xx to CONNECT (H1MessageTests.LeavesOutImpossibleBodies); this keeps the server
+    /// from sending one at all.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-9.3.6-6")]
+    public void RefusesToStartATunnel()
+    {
+        Platform.RequireLinuxX64();
+        int refused = 0;
+        using var server = new TestServer(x =>
+        {
+            if (x.Method == "CONNECT")
+            {
+                refused = x.Respond(200);
+                x.Respond(501);
+                return;
+            }
+
+            x.Respond(200, "after");
+        });
+        using var c = new RawConnection(server.Port);
+
+        c.Send("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n");
+        Assert.Equal(501, c.ReadResponse().Status);
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+
+        Assert.Equal("after", c.ReadResponse().Text);
+        Assert.Equal(-25, refused);                                 // -HTTPASM_ERROR_STATUS
+    }
+
+    /// <summary>
+    /// A request inviting an upgrade (Upgrade, with the "upgrade" connection option) is
+    /// answered in HTTP/1.1 as if the invitation were not there: ignoring it is the server's
+    /// choice, and the only one for an HTTP/1.0 request, whose Upgrade must be ignored. No 101
+    /// goes out, and the connection persists.
+    /// </summary>
+    /// <param name="version">The request's HTTP version.</param>
+    [Theory]
+    [InlineData("HTTP/1.1")]
+    [InlineData("HTTP/1.0")]
+    [Requirement("RFC9110-7.8-2#2", "RFC9110-7.8-14#2")]
+    public void IgnoresUpgrades(string version)
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "plain"));
+        using var c = new RawConnection(server.Port);
+        string keepAlive = version == "HTTP/1.0" ? "keep-alive, " : "";
+
+        c.Send($"GET / {version}\r\nHost: t\r\nUpgrade: websocket\r\nConnection: {keepAlive}Upgrade\r\n\r\n");
+        RawResponse response = c.ReadResponse();
+        c.Send($"GET / {version}\r\nHost: t\r\nConnection: keep-alive\r\n\r\n");
+
+        Assert.Equal((200, "plain"), (response.Status, response.Text));
+        Assert.Equal("plain", c.ReadResponse().Text);
+    }
+
+    /// <summary>
+    /// Every final answer carries Date in IMF-fixdate, the one HTTP-date format a sender may
+    /// generate (fixed length, GMT, single spaces), close to now; a 5xx as well (the server has
+    /// a clock, and dating a 5xx is allowed).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-5.6.7-2", "RFC9110-5.6.7-11", "RFC9110-5.6.7-7#2", "RFC9110-5.6.7-17", "RFC9110-6.6.1-2", "RFC9110-6.6.1-6#2")]
+    public void DatesItsAnswersInImfFixdate()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(x.Target == "/fail" ? 503 : 200, "ok"));
+        using var c = new RawConnection(server.Port);
+
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\nGET /fail HTTP/1.1\r\nHost: t\r\n\r\n");
+        RawResponse[] answers = [c.ReadResponse(), c.ReadResponse()];
+
+        Assert.Equal(503, answers[1].Status);
+        foreach (RawResponse answer in answers)
+        {
+            string date = Assert.IsType<string>(answer.Field("Date"));
+            Assert.Matches(@"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$", date);
+            DateTimeOffset when = DateTimeOffset.ParseExact(date, "r", System.Globalization.CultureInfo.InvariantCulture);
+            Assert.InRange(when, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+        }
+    }
+
+    /// <summary>
+    /// A request-target of 8000 octets, the length every sender and recipient should support at
+    /// least, is read whole and reaches the handler (the default limit is 8 KiB).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-4.1-5")]
+    public void ReadsLongTargets()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, x.Target.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        using var c = new RawConnection(server.Port);
+
+        c.Send($"GET /{new string('t', 7999)} HTTP/1.1\r\nHost: t\r\n\r\n");
+
+        Assert.Equal("8000", c.ReadResponse().Text);
+    }
+
+    /// <summary>
+    /// The server's own refusals explain themselves in one line of text/plain: the reason phrase
+    /// (a 4xx, a 5xx), and for 505 the versions this server does speak. An answer to HEAD carries
+    /// no content, a refusal included, but the same fields as GET's (Content-Type too).
+    /// </summary>
+    /// <param name="request">The octets sent.</param>
+    /// <param name="status">The refusal expected.</param>
+    /// <param name="text">The explanation expected ("" for none).</param>
+    [Theory]
+    [InlineData("GET / HTTP/1.1\r\nHost: t\r\nBad Name: x\r\n\r\n", 400, "Bad Request")]
+    [InlineData("POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501, "Not Implemented")]
+    [InlineData("GET / HTTP/2.0\r\nHost: t\r\n\r\n", 505, "HTTP Version Not Supported: this server speaks HTTP/1.1, and HTTP/2 with prior knowledge\n")]
+    [InlineData("HEAD / HTTP/1.1\r\nHost: t\r\nBad Name: x\r\n\r\n", 400, "")]
+    [Requirement("RFC9110-15.5-1#1", "RFC9110-15.6-1#1", "RFC9110-15.6.6-1", "RFC9110-8.3-5#1")]
+    public void ExplainsItsRefusals(string request, int status, string text)
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200));
+        using var c = new RawConnection(server.Port);
+
+        c.Send(request);
+        RawResponse response = c.ReadResponse(head: request.StartsWith("HEAD", StringComparison.Ordinal));
+
+        Assert.Equal((status, text), (response.Status, response.Text));
+        Assert.Equal("text/plain", response.Field("Content-Type"));
     }
 
     /// <summary>
@@ -515,7 +654,7 @@ public sealed class ServerTests
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(7)]
-    [Requirement("RFC9112-7.1-4", "RFC9112-7.1.1-4", "RFC9112-7.1.2-3#2", "RFC9112-7.1.2-3#3", "RFC9110-6.5.1-3")]
+    [Requirement("RFC9112-7.1-4", "RFC9112-7.1.1-4", "RFC9112-7.1.2-3#2", "RFC9112-7.1.2-3#3", "RFC9110-6.5.1-3", "RFC9110-6.5.2-3")]
     public void DecodesChunkedBodiesAndKeepsTrailersApart(int piece)
     {
         Platform.RequireLinuxX64();
@@ -538,8 +677,12 @@ public sealed class ServerTests
         Assert.DoesNotContain(seen.Fields, f => f.Name == "X-Sum");
     }
 
-    /// <summary>A request that arrives an octet at a time is read and answered like any other.</summary>
+    /// <summary>
+    /// A request that arrives an octet at a time is read and answered like any other: the
+    /// handler runs once, on the whole request, never on a header section still arriving.
+    /// </summary>
     [Fact]
+    [Requirement("RFC9110-5.3-6")]
     public void ReadsARequestSentAnOctetAtATime()
     {
         Platform.RequireLinuxX64();
@@ -589,11 +732,12 @@ public sealed class ServerTests
 
     /// <summary>
     /// Connections idle past the timeout are closed, and so are heads that never complete (a
-    /// slow-loris client cannot hold a connection by trickling octets). A connection that keeps
-    /// sending requests gets a full timeout after each.
+    /// slow-loris client cannot hold a connection by trickling octets), without an answer (an
+    /// error response to the incomplete request is the server's option; it closes silently). A
+    /// connection that keeps sending requests gets a full timeout after each.
     /// </summary>
     [Fact]
-    [Requirement("RFC9112-9.5-2#1", "RFC9112-9.5-2#2")]
+    [Requirement("RFC9112-9.5-2#1", "RFC9112-9.5-2#2", "RFC9112-9.5-3", "RFC9112-8-1")]
     public void ClosesIdleConnections()
     {
         Platform.RequireLinuxX64();
@@ -686,9 +830,11 @@ public sealed class ServerTests
     /// <summary>
     /// A client that pipelines many large requests' worth of answers and reads slowly gets them
     /// all, whole and in order: the server stops reading while its output is past the
-    /// high-water mark, and resumes when the socket drains.
+    /// high-water mark, and resumes when the socket drains. The overload is left to TCP's flow
+    /// control; the persistent connection is never dropped for it.
     /// </summary>
     [Fact]
+    [Requirement("RFC9112-9.5-4")]
     public void KeepsOrderAndOctetsUnderBackPressure()
     {
         Platform.RequireLinuxX64();
