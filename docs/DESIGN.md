@@ -343,8 +343,8 @@ HTTP/2, the drivers, the client):
      against an oracle and a guard page: natively, and under SDE as a Sapphire Rapids. The suite
      proves v1; identical results prove the rest. A planted AVX-512-only bug passed natively and
      failed under SDE, as it must.
-   - `benchmarks/micro` times each tier single-threaded, ranked by the fastest of 41 samples
-     with an A/A control: the host's medians swing up to 2x.
+   - The tiers are timed single-threaded by the benchmark framework (`benchmarks/bench.sh`,
+     its tiers suite), every tier in one process, with an A/A control.
    - The pilot is `httpasm_field_value_scan`. Its AVX2 version is kept: 1.28x faster at 32
      octets, 1.8x at 64, 2.0-2.2x from 256 up; below 32, every tier runs the SSE2 code. Its
      AVX-512 version is proven equal, and waits for AVX-512 hardware to be timed
@@ -462,10 +462,15 @@ HTTP/2, the drivers, the client):
        octet after the token, or `chunked x`) was read as chunked, where llhttp reads another
        coding. A coding's token must now end its element (OWS, then `,`, `;` or the end).
    - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per
-     call and bytes per cycle, paired A/B with an A/A control, against picohttpparser, llhttp
-     and nghttp2. Built 2026-11-26 as `benchmarks/rivals/` (with `benchmarks/micro` for the
-     tiers). The rivals are compiled at their best (`-O3 -march=native`), in one process on
-     one core, interleaved, ranked by the fastest sample. The first run is step 4's baseline:
+     call and octets per nanosecond, paired with an A/A control, against picohttpparser,
+     llhttp and nghttp2. Built 2026-11-26 as `benchmarks/rivals/` and `benchmarks/micro`, then
+     the same day folded into one framework, `benchmarks/bench.sh` (`benchmarks/README.md`):
+     tiers, parsers and rivals suites; verdicts from paired rounds with a bootstrap 95%
+     interval against the A/A twin; an in-process A/B of two builds; exact instruction counts
+     under Intel SDE; llvm-mca's loop predictions. Each instrument was validated before use
+     (the README has the numbers). The rivals are compiled at their best (`-O3
+     -march=native`), in one process on one core, interleaved. The first run is step 4's
+     baseline:
      - picohttpparser parses request heads 2.1-2.3x faster than HttpAsm, while checking
        little beyond line structure;
      - llhttp is level with HttpAsm, or up to 1.34x slower;

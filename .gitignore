@@ -17,5 +17,7 @@ tests/coverage/.dumps/
 # The fuzzers' working corpora and findings when run natively (tests/fuzz/run.sh)
 tests/fuzz/.work/
 
-# The rivals benchmark's build directory when run natively (benchmarks/rivals/run.sh)
-benchmarks/rivals/.build/
+# The benchmark framework's build directory when run natively, and its A/B builds: git
+# worktrees of other commits (benchmarks/bench.sh)
+benchmarks/.build/
+benchmarks/.ab/

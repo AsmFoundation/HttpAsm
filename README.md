@@ -82,7 +82,7 @@ dotnet test --project tests/HttpAsm.Tests          # natively, on Linux x64
 dotnet run specs/specs.cs -- extract --check       # the registry matches the pinned documents
 dotnet run specs/generate.cs -- --check            # the generated tables match them too
 benchmarks/run.sh                                  # HttpAsm, nginx and h2o, side by side (Linux)
-$(bash tests/native/build.sh Release)/micro        # each routine's CPU tiers, single-threaded
+benchmarks/bench.sh --quick                        # routines per CPU tier, parsers, rivals (single thread)
 tests/coverage/run.sh                              # every block and branch edge the tests run, and the gate
 tests/fuzz/run.sh 60                               # each fuzzer for 60 s (clang with libFuzzer, Linux or WSL)
 ```

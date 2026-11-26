@@ -1,5 +1,119 @@
 # HttpAsm benchmarks
 
+Two kinds of measurement, both local: benchmarks never run in CI (the owner's rule, 2026-11-26).
+A change is measured on the developer's machine, against the commit before it, before it is
+kept.
+
+- **The framework, `bench.sh`:** single routines on one thread. It times every CPU tier of each
+  multi-version routine, the parsers' whole routines, and the parsers beside picohttpparser,
+  llhttp and nghttp2. This is where a change to the code is proven faster, or not.
+- **Whole servers, `run.sh` and `ab.sh`:** HttpAsm against nginx and h2o, its HTTP/1.1-only
+  build and its two backends; and what a change costs per request.
+
+## The framework: `bench.sh`
+
+### What it measures
+
+A case is one routine on one input. Every contender of a case runs once per round, round after
+round, in one process pinned to one CPU, in a new random order each round. Three suites:
+
+- **`tiers`:** each multi-version routine at v1, v2, v3 and v4, on inputs around the vector
+  widths. A routine joins when it gets a version above v1; today that is
+  `httpasm_field_value_scan`.
+- **`parsers`:** the library's whole routines on realistic inputs, at the best tier the CPU has
+  and at v1. The routines: response heads, chunked bodies (small and large chunks), field-name
+  lookup, token validation, response writing, HPACK encoding, and HTTP/2's request rules. These
+  are the hot paths of phase H step 4.
+- **`rivals`:** the HTTP/1.1 request parser beside picohttpparser (h2o) and llhttp (Node.js) on
+  three request heads, and the HPACK decoder beside nghttp2. The rivals are the sources
+  `tests/tools.sh` pins, compiled with `-O3 -march=native`, their best (picohttpparser's and
+  llhttp's SSE4.2 paths need it). Mind what each one does: picohttpparser splits a head into
+  lines and checks almost nothing else; llhttp checks the grammar; HttpAsm also applies RFC
+  9112's semantics (target and Host grammar, field names and values, every framing rule,
+  known-field ids).
+
+A contender is a build of the library at a tier, or a rival. The first contender runs a second
+time as the A/A control: whatever separates the two is the run's noise. The library is loaded,
+not linked (`dlopen`), so another build can run beside it: see `ab` below.
+
+### How to run
+
+```bash
+dotnet build HttpAsm.slnx -c Release                # libhttpasm.so, which the runner loads
+benchmarks/bench.sh                                 # every suite: 41 rounds of ~0.5 ms samples
+benchmarks/bench.sh --quick --filter 'tiers/*'     # the development loop: 11 shorter rounds
+benchmarks/bench.sh --list                          # the cases, as "suite/name/input"
+benchmarks/bench.sh ab HEAD~1 --suite parsers       # a change against the commit before it
+benchmarks/bench.sh icount --filter 'parsers/*'    # exact instructions per call (Intel SDE)
+benchmarks/bench.sh mca field_value_scan            # llvm-mca on each version's loops
+```
+
+The options: `--suite`, `--filter` (a glob over "suite/name/input"), `--rounds`, `--sample-us`,
+`--quick`, `--json PATH` (the whole record: every raw sample, the host, the builds and the
+settings) and `--meta KEY=VALUE` (a fact to record with it). From Windows it runs in WSL. The
+runner's sources are `bench/`: `bench.c` (the runner) and one `suite_*.c` per suite.
+
+### How to read a verdict
+
+Each row gives the contender's speed, then its comparison with the first row:
+- **fastest and median ns per call**, and octets per ns at the fastest: what the routine costs;
+- **the paired ratio:** each round gives the first row's time over this row's, both measured
+  within milliseconds of each other. The row shows the median of those ratios with its
+  bootstrap 95% interval. Above 1, this row is faster;
+- **the verdict:** `faster` when the whole interval lies above both 1 and the A/A twin's
+  interval, `slower` when it lies below both, and `noise` otherwise.
+
+Why paired rounds decide (measured 2026-11-26, the same 41-round run judged three ways):
+- **The fastest sample**, the rule the earlier harness used, called identical code faster four
+  times and slower once. When the two fastest samples tie, the A/A gap reads 0, and any ratio
+  counts.
+- **Unpaired medians** gave the right verdicts, but the A/A interval spanned ±10% (0.91-1.10 at
+  1024 octets). A real 8% gain would read as noise.
+- **Paired rounds** gave the right verdicts with an A/A interval of about ±2% (0.99-1.03). The
+  host's drift hits both sides of a round alike, so pairing cancels it.
+
+### The instruments
+
+- **A/B of two builds: `ab COMMIT`.** COMMIT's libhttpasm.so is built once, in a git worktree
+  under `.ab/`, and loaded beside the tree's own (`dlopen`, `RTLD_LOCAL`, so neither build's
+  calls reach the other). Both run interleaved at every tier, and each case ends with "speedup
+  of current over COMMIT at TIER". The A/B runs in 3 processes (`--repeat N`), and a change is
+  proven only when every process gives the same verdict. The reason: identical code at another
+  address can run up to 12% faster or slower in one process, through branch-predictor and
+  cache-set aliasing, and every process loads the builds at new random addresses.
+- **Instruction counts: `icount`.** Each contender's batch runs once under Intel SDE (the
+  version `tests/tools.sh` pins), between two marker instructions. SDE counts exactly the
+  instructions executed per call, and the instruction classes that ran (SSE2, AVX2...), which
+  shows that a tier runs its own version. The count is the same on every run. SDE presents
+  this machine's CPU family: Alder Lake here, without AVX-512.
+- **Loop analysis: `mca ROUTINE`.** Each version's loops, cut from the built library, go
+  through llvm-mca (Alder Lake model by default). It gives the simulated cycles per iteration,
+  the throughput bound, the IPC and the busiest execution ports. It models the core alone (no
+  caches, frequency or memory), so it guides a loop's design and never proves anything.
+
+### Why trust it: the validation of 2026-11-26
+
+Each instrument had to be consistently and empirically valid before it was used (the owner's
+condition). On the i9-13900K under WSL2:
+
+| Check | Result |
+|---|---|
+| Paired verdicts with known answers: 5 runs of the tiers suite (41 rounds). Identical code must say noise: v2 everywhere, and every tier below 32 octets. The AVX2 version must say faster from 32 octets up | 165 of 165 right |
+| One-process A/B against an identical copy of the build (5 runs, 220 comparisons) | 6 wrong (2.7%), in random directions, 5 of them at 63 octets |
+| The same comparisons, requiring 3 processes to agree | 0 wrong |
+| A/B against a build slowed by one extra uop per iteration of the AVX2 loop (about 11%), 3 processes | Proven slower at 256 and 4096 octets (3 of 3 processes). Not proven at 1024 (2 of 3). Not detectable at 100 octets and below (3 iterations or fewer: under 4%). Unchanged code was never proven different |
+| SDE counts, repeated, and at 10,000 against 20,000 calls | Identical. The slowed build counted exactly one more instruction per iteration (1941 against 1813 at 4096 octets) |
+| llvm-mca's simulated cycles against measurements | v3 over v1 per octet: 2.00x predicted, 1.99-2.10x measured. The extra uop: +11.0% predicted, +10.7-12.6% measured |
+
+Two agreements are a start for llvm-mca, not a proof. Each loop of step 4 gets the same check
+(prediction against measurement), recorded here, and llvm-mca is dropped if it stops agreeing.
+
+**AVX-512** is not timed, counted or analyzed where the CPU lacks it (the owner's rule,
+2026-11-26): the default SDE and llvm-mca models are this machine's. `tests/native/tiers` still
+proves every AVX-512 version equal to v1 under SDE: a test, not a measurement.
+
+## Whole servers: `run.sh` and `ab.sh`
+
 `run.sh` measures HttpAsm against nginx and h2o, against its own HTTP/1.1-only build, and its
 two backends against each other. The second comparison is the isolation measurement of
 [docs/DESIGN.md](../docs/DESIGN.md) section 4: it checks whether building HTTP/1.1 from shared
@@ -10,7 +124,8 @@ io_uring.
 Every report it writes is kept in [results/](results/), named by date and time, with the machine,
 the versions and the settings it ran with.
 
-## What is measured
+### What is measured
+
 
 Every server answers `GET /` with `200 Hello, World!` (`text/plain`), the TechEmpower plaintext
 shape, from code:
@@ -45,7 +160,7 @@ control), run in the HTTP/1.1 scenarios. Whatever separates it from `httpasm` is
 isolation result (the full build against the HTTP/1.1-only build) counts only where it is
 larger than that gap.
 
-## How to run
+### How to run
 
 On Linux x64 (WSL2 works), with nginx, h2o (with mruby), wrk and h2load (`nghttp2-client`)
 installed:
@@ -72,45 +187,12 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 `HELLO_IO_A` and `HELLO_IO_B` choose each build's backend (`epoll`, the default, or `uring`).
 
-`micro/micro.c` measures single routines, one thread, at every CPU tier (docs/DESIGN.md
-sections 2 and 3: a faster version stays only when it measures faster). For each routine and
-input size, it measures every tier (v1 to v4), and v1 again as the A/A control, in turn, round
-after round, in one process pinned to one CPU, switching tiers with `httpasm_cpu_limit`.
-
-```bash
-bin=$(bash tests/native/build.sh Release)   # builds micro and the tier program
-$bin/micro 41                               # 41 rounds
-```
-
-**How to read it:**
-- It ranks by the fastest sample, not the median. On this machine (WSL2 on a hybrid Intel
-  CPU), interference only ever adds time, and medians of the very same code swung by 2x
-  between the baseline and its A/A twin. The fastest of many 0.5 ms samples kept that gap
-  within about 10%.
-- "vs v1" is the baseline's fastest sample over the tier's.
-- A tier the CPU lacks collapses to the best one it has: here "v4" re-runs v3, since the CPU
-  has no AVX-512.
-
-`rivals/` measures HttpAsm's parsers beside the ones others run, on the same inputs, in one
-process on one core: the HTTP/1.1 request parser against picohttpparser (h2o) and llhttp
-(Node.js), and the HPACK decoder against nghttp2. The rivals are the sources
-`tests/tools.sh` pins for the differential fuzzers, compiled with `-O3 -march=native`, which is
-their best: picohttpparser and llhttp have SSE4.2 paths. HttpAsm runs at its best tier and at
-v1, and the best tier again as the A/A control.
-
-```bash
-benchmarks/rivals/run.sh 41                 # builds the rivals and rivals.c, runs 41 rounds
-```
-
-Read it as micro's table: fastest sample, A/A gap, and each contender's time over HttpAsm's.
-Mind what each parser does. picohttpparser splits a head into lines and checks almost nothing
-else. llhttp checks the grammar. HttpAsm also applies RFC 9112's semantics: target and Host
-grammar, field names and values, every framing rule, and known-field ids.
-
 ## Results
 
-- 2026-11-26, `results/2026-11-26-rivals.md` (i9-13900K under WSL2, the first run): the
-  baseline for phase H step 4.
+- 2026-11-26, `results/2026-11-26-rivals.md` (i9-13900K under WSL2, the first run, by the
+  earlier `rivals` harness and its fastest-sample rule): the baseline for phase H step 4. The
+  framework's rivals suite confirms it (paired, 2026-11-26): picohttpparser 2.1-2.5x faster
+  on the three heads.
   - **Request heads:** picohttpparser is 2.1-2.3x faster than HttpAsm; llhttp is level or up
     to 1.34x slower.
   - **HPACK:** HttpAsm decodes 1.48x faster than nghttp2.
@@ -119,8 +201,10 @@ grammar, field names and values, every framing rule, and known-field ids.
 
 **2026-11-26: `httpasm_field_value_scan` per tier, the tier framework's pilot.** On this
 machine (i9-13900K, WSL2, features 0xff03: v3 with VAES, VPCLMULQDQ, SHA-NI and GFNI, no
-AVX-512), with `micro` at 41 rounds: the fastest ns per call, then the baseline's time over the
-tier's.
+AVX-512), with the earlier `micro` harness at 41 rounds: the fastest ns per call, then the
+baseline's time over the tier's. The framework's paired runs (5 runs of 41 rounds, the same
+day) agree: v3 faster from 32 octets (1.36x at 32, 1.71x at 64, 2.05x at 256, 2.10x at 1024),
+noise below 32.
 
 | Octets | v1 (SSE2) | v3 (AVX2) | v3 vs v1 | A/A (v1 again vs v1) |
 |---:|---:|---:|---:|---:|
@@ -139,8 +223,8 @@ What it shows:
 - **Below 32 octets every tier runs the SSE2 code**, so differences there are noise. The
   0.79x at 31 is one row; the same code measured as "v4" gave 1.07x.
 - **The AVX-512 version cannot run on this CPU.** It is proven equal to the others under
-  Intel SDE (`tests/native/tiers`), and is timed only where CI's runner has AVX-512 (its job
-  summary).
+  Intel SDE (`tests/native/tiers`), and is not timed here: no AVX-512 is measured where the
+  CPU lacks it (the owner's rule, 2026-11-26).
 
 Every run's report is in [results/](results/), named by date and time; a report names the
 commit it measured (`-dirty` when the tree had uncommitted changes when the run began).
