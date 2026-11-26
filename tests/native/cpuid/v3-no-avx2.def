@@ -1,0 +1,12 @@
+# CPUID_VERSION = 1.0
+# HttpAsm's synthetic CPU (tests/native/cpuid/README.md): every x86-64-v3 feature but AVX2
+# (leaf 7 EBX bit 5 clear), as a hypervisor's CPU model can offer it. Level v2.
+#      Input      =>               Output
+# EAX      ECX    =>   EAX      EBX      ECX      EDX
+00000000 ******** => 0000000d 756e6547 6c65746e 49656e69
+00000001 ******** => 000306c3 00000800 3ed83203 078bfbff
+00000007 00000000 => 00000000 00000309 00000000 00000000
+0000000d 00000000 => 00000007 00000340 00000340 00000000
+0000000d 00000001 => 00000001 00000000 00000000 00000000
+80000000 ******** => 80000008 00000000 00000000 00000000
+80000001 ******** => 00000000 00000000 00000021 28100800

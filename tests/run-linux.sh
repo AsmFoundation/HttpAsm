@@ -153,18 +153,26 @@ run_native() {
   # are only reported in the Coverage configuration, whose instrumented blocks distort them.
   local floods_env=''
   [ "$config" = Coverage ] && floods_env='HTTPASM_FLOODS_CPU=report'
-  echo "run-linux.sh: tests/native/fallback, signals, faults, floods (epoll, io_uring), cpu and tiers, natively" >&2
+  # tests/native/dates checks the Date on every day the realtime clock can hold, on both backends
+  # (each refreshes the worker's clock in its own loop).
+  echo "run-linux.sh: tests/native/fallback, signals, faults, floods and dates (epoll, io_uring), cpu and tiers, natively" >&2
   on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/faults; \
-    $floods_env \$b/floods; $floods_env HTTPASM_TEST_IO=uring \$b/floods; \$b/cpu; \$b/tiers" || code=$?
+    $floods_env \$b/floods; $floods_env HTTPASM_TEST_IO=uring \$b/floods; \$b/dates; HTTPASM_TEST_IO=uring \$b/dates; \$b/cpu; \$b/tiers" || code=$?
   # The CPU detection on CPUs this machine is not: tests/native/cpu under SDE's models, each
   # with the x86-64 level it must reach exactly, from SSE3-only (p4p) to AVX-512 with SHA512
-  # (future), the AVX-512-less hybrids (adl, arl) included. Every branch of cpu.asm's
+  # (future), the AVX-512-less hybrids (adl, arl) included; then under the synthetic CPUs of
+  # tests/native/cpuid (README.md there), which a hypervisor's CPU model can offer and no
+  # real processor does: v2's leaf-1 features without LAHF, v3 without AVX2 or without LZCNT,
+  # AVX-512F without BW/DQ/VL, and a full v4 as their control. Every branch of cpu.asm's
   # detection meets a CPU that takes it, on every runner (SDE runs on AVX-512 hardware too).
-  echo "run-linux.sh: tests/native/cpu under Intel SDE's CPU models" >&2
+  echo "run-linux.sh: tests/native/cpu under Intel SDE's CPU models and HttpAsm's synthetic CPUs" >&2
   on_linux "$linux_env set -e; s=$sde; if [ ! -x \$s/sde64 ]; then mkdir -p \$s; tar -xJf '$(lpath "$tools")/$sde_archive' -C \$s --strip-components=1; fi; \
     for m in p4p:v1 pnr:v1 nhm:v2 wsm:v2 snb:v2 hsw:v3 bdw:v3 skx:v4 icl:v4 adl:v3 spr:v4 arl:v3 future:v4; do \
       \$s/sde64 -\${m%%:*} -- $bin/cpu \${m##*:} >/dev/null || { echo run-linux.sh: the CPU detection failed under SDE -\$m >&2; exit 1; }; \
-    done; echo run-linux.sh: the CPU detection matched on 13 SDE models" || { c=$?; [ "$code" -ne 0 ] || code=$c; }
+    done; echo run-linux.sh: the CPU detection matched on 13 SDE models; \
+    for d in v2-no-lahf:v1 v3-no-avx2:v2 v3-no-lzcnt:v2 v4-no-bw-dq-vl:v3 v4:v4; do \
+      \$s/sde64 -cpuid_in '$repo/tests/native/cpuid/'\${d%%:*}.def -- $bin/cpu \${d##*:} >/dev/null || { echo run-linux.sh: the CPU detection failed on the synthetic CPU \${d%%:*} >&2; exit 1; }; \
+    done; echo run-linux.sh: the CPU detection matched on 5 synthetic CPUs" || { c=$?; [ "$code" -ne 0 ] || code=$c; }
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep

@@ -167,6 +167,11 @@ httpasm_server_create:
     mov     dword [rax + worker.epfd], -1
     mov     dword [rax + worker.listen_fd], -1
     mov     dword [rax + worker.wake_fd], -1
+    ; A second no realtime clock reads, so the worker's first refresh_clock formats the Date
+    ; whatever the clock says. calloc's 0 here matched a clock at 1970-01-01T00:00:00Z (a
+    ; machine without an RTC, just booted): that second's responses carried .date's 29 zero
+    ; octets as their Date (tests/native/dates.c, 2026-11-26).
+    mov     qword [rax + worker.date_second], -1
     add     rax, worker_size
     dec     ecx
     jnz     .worker
