@@ -566,7 +566,20 @@ internal sealed class H2Connection : IDisposable
     /// <exception cref="IOException">The connection closed, or a GOAWAY came, first.</exception>
     public uint ExpectReset(int stream) => BinaryPrimitives.ReadUInt32BigEndian(Expect(RstStream, stream).Payload);
 
-    /// <summary>Reads a stream's response: HEADERS, then DATA until END_STREAM.</summary>
+    /// <summary>
+    /// Frames of other streams that <see cref="ReadResponse"/> read while it waited for its own
+    /// stream, each with the field block decoded when it was read, in arrival order per stream:
+    /// that stream's own <see cref="ReadResponse"/> takes them first. Without it, a test that reads
+    /// stream 3 and then stream 1 lost stream 1's answer whenever it came first, and failed with
+    /// "The server closed before stream 1's response ended" though the server had sent it
+    /// (Http2FrameTests.ShutsDownGracefully under CI's coverage build, 2026-11-26).
+    /// </summary>
+    /// <remarks>Only <see cref="ReadResponse"/> fills and drains it: <see cref="ReadFrame"/> and the
+    /// Expect* readers still see only frames not yet read, as before.</remarks>
+    private readonly Dictionary<int, Queue<(H2Frame Frame, IReadOnlyList<HpackField>? Decoded)>> pending = [];
+
+    /// <summary>Reads a stream's response: HEADERS, then DATA until END_STREAM. Frames of other
+    /// streams read on the way are kept for their own reads (<see cref="pending"/>).</summary>
     /// <param name="stream">The stream.</param>
     /// <returns>The response.</returns>
     /// <exception cref="IOException">The connection closed, or the stream was reset, first.</exception>
@@ -577,10 +590,34 @@ internal sealed class H2Connection : IDisposable
         IReadOnlyList<HpackField> fields = [];
         while (true)
         {
-            H2Frame frame = ReadFrame() ?? throw new IOException($"The server closed before stream {stream}'s response ended.");
-            if (frame.Stream != stream)
+            H2Frame frame;
+            IReadOnlyList<HpackField>? decoded;
+            if (pending.TryGetValue(stream, out var kept) && kept.Count > 0)
             {
-                continue;
+                (frame, decoded) = kept.Dequeue();          // read earlier, while another stream waited
+            }
+            else
+            {
+                frame = ReadFrame() ?? throw new IOException($"The server closed before stream {stream}'s response ended.");
+                decoded = frame.Type == Headers && Decoded.TryGetValue(frame.Stream, out var block) ? block : null;
+                if (frame.Stream != stream)
+                {
+                    // Another stream's frame: kept for that stream's own read. Responses to
+                    // concurrent streams may come in either order (a deferred answer can beat an
+                    // immediate one on a slow machine), and a test that reads them one stream at a
+                    // time must not lose the other's frames.
+                    if (frame.Stream != 0)
+                    {
+                        if (!pending.TryGetValue(frame.Stream, out var queue))
+                        {
+                            pending[frame.Stream] = queue = new Queue<(H2Frame, IReadOnlyList<HpackField>?)>();
+                        }
+
+                        queue.Enqueue((frame, decoded));
+                    }
+
+                    continue;
+                }
             }
 
             if (frame.Type == RstStream)
@@ -588,7 +625,7 @@ internal sealed class H2Connection : IDisposable
                 throw new IOException($"Stream {stream} reset: {BinaryPrimitives.ReadUInt32BigEndian(frame.Payload)}.");
             }
 
-            if (frame.Type == Headers && Decoded.TryGetValue(stream, out var decoded))
+            if (frame.Type == Headers && decoded is not null)
             {
                 int code = int.Parse(decoded.First(f => f.Name == ":status").Value, System.Globalization.CultureInfo.InvariantCulture);
                 if (code >= 200)

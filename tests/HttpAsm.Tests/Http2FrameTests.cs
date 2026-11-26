@@ -860,6 +860,29 @@ public sealed class Http2FrameTests
     }
 
     /// <summary>
+    /// The test client keeps the frames of another stream that arrive while it reads one
+    /// stream's response (H2Connection.ReadResponse), so concurrent streams can be read one at a
+    /// time in either order. Stream 1 is answered only once its body comes and stream 3 at once,
+    /// so stream 3's answer is on the wire first, yet reading stream 1 first and stream 3 after
+    /// gets both whole. Before, the client dropped such frames: ShutsDownGracefully failed under
+    /// CI's coverage build when its deferred stream's answer came first (2026-11-26).
+    /// </summary>
+    [Fact]
+    public void ReadsConcurrentStreamsInEitherOrder()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+        c.SendRequest(1, endStream: false, "POST", "/echo");       // answered once its body comes
+        c.SendRequest(3);                                           // answered at once: first on the wire
+        c.SendFrame(Data, EndStream, 1, "body"u8);
+
+        Assert.Equal("body", Encoding.ASCII.GetString(c.ReadResponse(1).Body));    // stream 3's frames kept
+        H2Response three = c.ReadResponse(3);
+        Assert.Equal((200, "ok"), (three.Status, Encoding.ASCII.GetString(three.Body)));
+    }
+
+    /// <summary>
     /// A graceful stop with a stream in progress: GOAWAY(NO_ERROR) with the last stream
     /// 2^31 - 1 first, so the client opens nothing new while requests already on their way are
     /// still served (one sent after the notice, its block using the dynamic table and its body
