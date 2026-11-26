@@ -305,6 +305,39 @@ public sealed class H1RequestTests
         Assert.Equal((-400, ParseError.TargetForm), (disguised.Result, disguised.Error));
     }
 
+    /// <summary>
+    /// An http(s) absolute-form's authority is the request's (Host is ignored), so it is held to
+    /// Host's grammar: semantics/authority.inc, the check Host and HTTP/2's :authority use.
+    /// </summary>
+    /// <param name="target">The target.</param>
+    /// <param name="accepted">Whether it parses.</param>
+    [Theory]
+    [InlineData("http://[::1]:8080/", true)]
+    [InlineData("https://[v1.fe80::a+b]/x", true)]
+    [InlineData("http://ex%41mple.com/", true)]
+    [InlineData("http://exa[mple.com/", false)]
+    [InlineData("http://[]/", false)]
+    [InlineData("http://[::1]x/", false)]
+    [InlineData("http://h:8x/", false)]
+    [InlineData("https://[%:]/", false)]
+    [Requirement("RFC9112-3.2.2-8", "RFC9110-4.2.1-2", "RFC9110-4.2.2-2")]
+    public void HoldsAbsoluteFormAuthoritiesToHostsGrammar(string target, bool accepted)
+    {
+        Platform.RequireLinuxX64();
+        ParsedRequest r = H1Parsing.Parse($"GET {target} HTTP/1.1\r\n{Host}\r\n");
+        if (accepted)
+        {
+            Assert.True(r.Result > 0, $"{target}: {r.Error}");
+        }
+        else
+        {
+            // "%:" is refused by the target's own scan (every "%" takes two HEXDIG) before the
+            // authority's turn; the others by the authority's grammar.
+            Assert.Equal(-400, r.Result);
+            Assert.True(r.Error is ParseError.TargetForm or ParseError.Target, $"{target}: {r.Error}");
+        }
+    }
+
     /// <summary>An http or https URI without a host is invalid.</summary>
     /// <param name="target">The target.</param>
     [Theory]
@@ -320,7 +353,12 @@ public sealed class H1RequestTests
         Assert.Equal(ParseError.TargetForm, r.Error);
     }
 
-    /// <summary>CONNECT takes exactly host:port; the authority-form serves nothing else; "*" serves OPTIONS only.</summary>
+    /// <summary>
+    /// CONNECT takes exactly host:port; the authority-form serves nothing else; "*" serves
+    /// OPTIONS only. The port is 1 to 65535 (leading zeros allowed) and the host follows Host's
+    /// grammar: the check is semantics/authority.inc, shared with HTTP/2's :authority since
+    /// tests/fuzz/h2_request found the two versions apart (2026-11-26).
+    /// </summary>
     /// <param name="line">The request-line.</param>
     /// <param name="accepted">Whether it parses.</param>
     [Theory]
@@ -331,6 +369,14 @@ public sealed class H1RequestTests
     [InlineData("CONNECT :443 HTTP/1.1", false)]
     [InlineData("CONNECT /path HTTP/1.1", false)]
     [InlineData("CONNECT user@example.com:443 HTTP/1.1", false)]
+    [InlineData("CONNECT example.com:65535 HTTP/1.1", true)]
+    [InlineData("CONNECT example.com:00443 HTTP/1.1", true)]
+    [InlineData("CONNECT example.com:0 HTTP/1.1", false)]
+    [InlineData("CONNECT example.com:65536 HTTP/1.1", false)]
+    [InlineData("CONNECT example.com:4430000 HTTP/1.1", false)]
+    [InlineData("CONNECT exa[mple.com:443 HTTP/1.1", false)]
+    [InlineData("CONNECT [::1]x:443 HTTP/1.1", false)]
+    [InlineData("CONNECT ex%41mple.com:443 HTTP/1.1", true)]
     [InlineData("OPTIONS * HTTP/1.1", true)]
     [InlineData("GET * HTTP/1.1", false)]
     [InlineData("OPTIONS *x HTTP/1.1", false)]
@@ -364,7 +410,11 @@ public sealed class H1RequestTests
         Assert.Equal("h.example", options.Authority);
     }
 
-    /// <summary>HTTP/1.1 needs exactly one Host with a valid value; HTTP/1.0 may omit it.</summary>
+    /// <summary>
+    /// HTTP/1.1 needs exactly one Host with a valid value; HTTP/1.0 may omit it. An IP-literal
+    /// holds an IPv6 address's octets (two colons at least) or an IPvFuture (RFC 3986 3.2.2),
+    /// nothing else: "[%:]" once passed (tests/fuzz/h2_request, 2026-11-26).
+    /// </summary>
     /// <param name="fields">The field lines.</param>
     /// <param name="version">The HTTP-version.</param>
     /// <param name="error">The refusal, or None.</param>
@@ -383,6 +433,17 @@ public sealed class H1RequestTests
     [InlineData("Host: a:8x\r\n", "HTTP/1.1", ParseError.HostInvalid)]
     [InlineData("Host: [::1\r\n", "HTTP/1.1", ParseError.HostInvalid)]
     [InlineData("Host: a%4\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [2001:db8::1]\r\n", "HTTP/1.1", ParseError.None)]
+    [InlineData("Host: [::ffff:192.0.2.1]:80\r\n", "HTTP/1.1", ParseError.None)]
+    [InlineData("Host: [v1.fe80::a+b]\r\n", "HTTP/1.1", ParseError.None)]
+    [InlineData("Host: [%:]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: []\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [1]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [::g]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [::1]x\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [v.x]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [v1.]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
+    [InlineData("Host: [v1.a/b]\r\n", "HTTP/1.1", ParseError.HostInvalid)]
     [Requirement("RFC9112-3.2-6", "RFC9110-7.2-3")]
     public void RequiresOneValidHost(string fields, string version, ParseError error)
     {

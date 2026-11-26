@@ -370,7 +370,9 @@ HTTP/2, the drivers, the client):
        documented grammar, state for state, whole, in reads and one octet at a time, then the
        trailer section; `hpack`, block sequences sharing a table, with every fully decoded
        block encoded again and decoded by a peer, whose table must stay entry for entry the
-       encoder's.
+       encoder's; `h2_request`, field lists through RFC 9113's request and trailer rules, with
+       everything accepted checked apart from the library (pseudo-fields, names, values, the
+       request record) and against HTTP/1.1's parser.
      - **The first campaigns:** `h1_request`, 10.7 million inputs in 60 s; `chunked` 3.6
        million; `h1_response` 7.8 million; `hpack` 19.5 million in 300 s. Planted failures
        (in a check, and in the chunked oracle) were found within seconds and printed in base64.
@@ -381,7 +383,15 @@ HTTP/2, the drivers, the client):
        - the field lookup folded every octet with `| 0x20`, which is exact only for tokens, but
          HPACK looks up names nobody has validated yet: the decoder gave `\x1apath` the id of
          `:path`, and the encoder would send `content\rlength` as the static table's
-         `content-length`. Only letters fold now.
+         `content-length`. Only letters fold now;
+       - HTTP/2 accepted authorities HTTP/1.1 refuses, which an HTTP/2 front could pass to an
+         HTTP/1.1 hop: CONNECT's `:authority` without a port (`example.c43`), `:authority` and
+         Host with any octets but CTLs and `@`, and `[%:]`, which only HTTP/1.1's target scan
+         caught. `h2_request` checks every accepted list against `httpasm_h1_parse_request`.
+         Now one text, `include/semantics/authority.inc`, checks HTTP/1.1's Host, CONNECT
+         target and http(s) absolute-form authority and HTTP/2's `:authority` and Host:
+         `uri-host [ ":" port ]` with IP-literals held to IPv6's and IPvFuture's octets, and
+         for CONNECT a port of 1 to 65535 (RFC 9110 9.3.6).
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
        test once fixed. CI runs each fuzzer for 30 s;
    - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,
@@ -394,6 +404,9 @@ HTTP/2, the drivers, the client):
 3. *Tests from every angle* for M1's rows: section 2's matrix for each proven row. Also the
    published attack corpora (request smuggling, HTTP/2 floods, HPACK bombs, slowloris on both
    versions), memory and connection exhaustion, and races between deferred answers and stops.
+   Known open item: an IP-literal's IPv6 structure (eight groups, one "::", the IPv4 tail's
+   dec-octets) is not checked yet, only its octets (`semantics/authority.inc`); RFC 3986's
+   grammar and its published test vectors close it.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,
    chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.

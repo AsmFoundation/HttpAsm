@@ -15,9 +15,11 @@
 ;   8.3.1  :method, :scheme and :path are present and not empty; :path is "*" only for OPTIONS
 ;          and otherwise starts with "/", with the URI octets and percent-encodings HTTP/1.1's
 ;          request-target allows (a :path HTTP/1.1 would refuse must not pass here, or the two
-;          could be played against each other); :authority has no userinfo, and a Host field
-;          must name the same authority;
-;   8.5    CONNECT carries :authority and neither :scheme nor :path.
+;          could be played against each other); :authority is uri-host [ ":" port ] by
+;          HTTP/1.1's Host grammar (semantics/authority.inc, the same text), so it has no
+;          userinfo; a Host field follows that grammar too, and must name the same authority;
+;   8.5    CONNECT carries :authority and neither :scheme nor :path; its :authority is the
+;          authority-form, with a port of 1 to 65535, as HTTP/1.1's CONNECT target is.
 ; Content-Length must be 1*DIGIT (repeated only with the same value); that it matches the DATA
 ; is the engine's check (8.1.1). Expect: 100-continue is flagged, any other expectation is 417.
 ; =============================================================================
@@ -148,7 +150,8 @@ value_is:
 ;   Each record's id is set again from its name (the caller's is not trusted).
 ;   Returns 0; or -HTTPASM_ERROR_* with request->error set: H2_PSEUDO, H2_MISSING,
 ;   H2_CONNECTION_FIELD, H2_AUTHORITY, FIELD_NAME, FIELD_VALUE, METHOD, TARGET, CONTENT_LENGTH,
-;   HOST_DUPLICATE (all malformed: PROTOCOL_ERROR on the stream), or EXPECT (answer 417).
+;   HOST_DUPLICATE, HOST_INVALID (all malformed: PROTOCOL_ERROR on the stream), or EXPECT
+;   (answer 417).
 ; -----------------------------------------------------------------------------
 RQ_PSEUDOS      equ 0       ; frame: how many pseudo-fields lead the array
 RQ_HOST         equ 8       ; frame: the Host record, or 0
@@ -300,6 +303,16 @@ httpasm_h2_request:
 .host:
     cmp     qword [rsp + RQ_HOST], 0
     jne     .host_duplicate
+    ; uri-host [ ":" port ], by HTTP/1.1's own Host grammar (semantics/authority.inc): a Host
+    ; an HTTP/1.1 hop would refuse must not pass here either. tests/fuzz/h2_request found this
+    ; open (2026-11-26): any value without CTLs passed. r8-r10 are free here (.origin loads
+    ; its own tables), as are rax, rcx, rdx and rsi.
+    mov     rsi, [r12 + httpasm_field.value]
+    mov     ecx, [r12 + httpasm_field.value_length]
+    lea     r10, [rsi + rcx]
+    lea     r8, [rel ha_char_class]
+    lea     r9, [rel ha_hex_value]
+    HA_URI_HOST rsi, r10, r8, r9, rax, eax, al, rdx, edx, .bad_host
     mov     [rsp + RQ_HOST], r12
     or      dword [rbx + httpasm_request.flags], HTTPASM_REQUEST_HOST
     jmp     .next
@@ -448,6 +461,22 @@ httpasm_h2_request:
     mov     al, '@'
     repne   scasb
     je      .bad_authority
+    ; uri-host [ ":" port ] by HTTP/1.1's Host grammar, and for CONNECT the authority-form's
+    ; port, 1 to 65535 (RFC 9113 8.5: CONNECT's :authority is the authority-form of RFC 9112
+    ; 3.2.3; RFC9110-9.3.6-4). The macros are HTTP/1.1's own (semantics/authority.inc), so an
+    ; authority one version refuses the other refuses too: tests/fuzz/h2_request found
+    ; "CONNECT" with ":authority: example.c43", no port, passing here and refused there.
+    mov     rsi, [rbx + httpasm_request.authority]
+    mov     ecx, [rbx + httpasm_request.authority_length]
+    mov     rdi, rsi                        ; the cursor
+    lea     r10, [rsi + rcx]                ; the end
+    lea     r8, [rel ha_char_class]
+    lea     r9, [rel ha_hex_value]
+    HA_URI_HOST rdi, r10, r8, r9, rax, eax, al, rdx, edx, .bad_authority
+    cmp     word [rbx + httpasm_request.method_id], HTTPASM_METHOD_CONNECT
+    jne     .authority_vs_host
+    HA_AUTHORITY_PORT rsi, r10, rdi, eax, edx, r9d, .bad_authority
+.authority_vs_host:
     mov     r12, [rsp + RQ_HOST]
     test    r12, r12
     jz      .done
@@ -508,6 +537,9 @@ httpasm_h2_request:
     jmp     .fail
 .host_duplicate:
     mov     eax, HTTPASM_ERROR_HOST_DUPLICATE
+    jmp     .fail
+.bad_host:
+    mov     eax, HTTPASM_ERROR_HOST_INVALID
     jmp     .fail
 .bad_length:
     mov     eax, HTTPASM_ERROR_CONTENT_LENGTH

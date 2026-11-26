@@ -62,5 +62,6 @@ extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi i
 %include "httpasm_abi.inc"
 %include "cpu.inc"
 %include "semantics/fields.inc"
+%include "semantics/authority.inc"
 
 %endif

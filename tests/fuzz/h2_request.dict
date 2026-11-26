@@ -1,0 +1,51 @@
+# h2_request.dict - libFuzzer's dictionary for tests/fuzz/h2_request.c (run.sh passes -dict=
+# when tests/fuzz/<name>.dict exists).
+#
+# The input is a field list (name length octet, name, 16-bit little-endian value length,
+# value), so names come with their length octet: one insertion makes a whole field name. The
+# words are the ones src/HttpAsm.Core/h2/h2_request.asm compares (RFC 9113 8.2-8.5).
+
+# Pseudo-fields, the request's four and others it must refuse.
+"\x07:method"
+"\x07:scheme"
+"\x0a:authority"
+"\x05:path"
+"\x07:status"
+"\x09:protocol"
+"\x07:METHOD"
+
+# Connection-specific and framing fields (RFC 9113 8.2.2), Host, Expect.
+"\x0aconnection"
+"\x0akeep-alive"
+"\x10proxy-connection"
+"\x11transfer-encoding"
+"\x07upgrade"
+"\x02te"
+"\x04host"
+"\x0econtent-length"
+"\x06expect"
+"\x06cookie"
+"\x04Host"
+
+# Values with their 16-bit length.
+"\x03\x00GET"
+"\x07\x00CONNECT"
+"\x07\x00OPTIONS"
+"\x04\x00HEAD"
+"\x05\x00https"
+"\x04\x00http"
+"\x01\x00*"
+"\x01\x00/"
+"\x08\x00trailers"
+"\x0c\x00100-continue"
+"\x0b\x00example.com"
+"\x0f\x00example.com:443"
+"\x01\x000"
+"\x14\x0018446744073709551616"
+"%2F"
+"%"
+"@"
+"?"
+"#"
+":443"
+"[::1]"

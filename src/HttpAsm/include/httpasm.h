@@ -121,7 +121,7 @@ typedef struct httpasm_request {
 #define HTTPASM_ERROR_TOO_MANY_FIELDS       14  /* 431 */
 #define HTTPASM_ERROR_HOST_MISSING          15  /* an HTTP/1.1 request without Host */
 #define HTTPASM_ERROR_HOST_DUPLICATE        16
-#define HTTPASM_ERROR_HOST_INVALID          17
+#define HTTPASM_ERROR_HOST_INVALID          17  /* Host is not uri-host [ ":" port ] (HTTP/1.1, HTTP/2) */
 #define HTTPASM_ERROR_CONTENT_LENGTH        18  /* not 1*DIGIT, or values that differ */
 #define HTTPASM_ERROR_TE_AND_CL             19  /* both Transfer-Encoding and Content-Length */
 #define HTTPASM_ERROR_TE_HTTP10             20  /* Transfer-Encoding in an HTTP/1.0 message */
@@ -146,8 +146,10 @@ typedef struct httpasm_request {
 #define HTTPASM_ERROR_H2_MISSING            35  /* :method, :scheme or :path (CONNECT: :authority)
                                                    missing or empty */
 #define HTTPASM_ERROR_H2_CONNECTION_FIELD   36  /* a connection-specific field, or TE but "trailers" */
-#define HTTPASM_ERROR_H2_AUTHORITY          37  /* :authority empty or with userinfo, or a Host
-                                                   naming another authority */
+#define HTTPASM_ERROR_H2_AUTHORITY          37  /* :authority empty, not uri-host [ ":" port ]
+                                                   (userinfo included), a CONNECT's without a
+                                                   port of 1-65535, or a Host naming another
+                                                   authority */
 
 /* What a server answers (48 octets), for httpasm_h1_write_response. flags is in and out. */
 typedef struct httpasm_response {

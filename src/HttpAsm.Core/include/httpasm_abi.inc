@@ -124,7 +124,7 @@ HTTPASM_ERROR_HPACK_LIMIT           equ 33  ; httpasm_hpack_init: a limit past H
 HTTPASM_ERROR_H2_PSEUDO             equ 34  ; a pseudo-field unknown, repeated, a response's, after a regular field, or in trailers
 HTTPASM_ERROR_H2_MISSING            equ 35  ; :method, :scheme or :path (CONNECT: :authority) missing or empty
 HTTPASM_ERROR_H2_CONNECTION_FIELD   equ 36  ; Connection, Keep-Alive, Proxy-Connection, Transfer-Encoding, Upgrade; TE other than "trailers"
-HTTPASM_ERROR_H2_AUTHORITY          equ 37  ; :authority empty or with userinfo, or Host naming another authority
+HTTPASM_ERROR_H2_AUTHORITY          equ 37  ; :authority empty, not uri-host [ ":" port ], a CONNECT's without a port of 1-65535, or Host naming another authority
 
 ; -----------------------------------------------------------------------------
 ; httpasm_response: what a server answers (48 octets), for httpasm_h1_write_response. flags is

@@ -690,7 +690,9 @@ public sealed class Http2FrameTests
     /// after them is answered). A malformed request head is answered 400 (with a date, as every
     /// 4xx) before the reset, which stays its stream's last frame (the 400 does not end the
     /// stream); a malformed body or trailer section is reset with no answer, as the request was
-    /// already accepted when it broke.
+    /// already accepted when it broke. :authority and Host follow HTTP/1.1's Host grammar, and
+    /// CONNECT's :authority needs a port of 1 to 65535, as HTTP/1.1's CONNECT target does:
+    /// tests/fuzz/h2_request found HTTP/2 accepting what HTTP/1.1 refused (2026-11-26).
     /// </summary>
     /// <param name="case">Which rule the request breaks.</param>
     [Theory]
@@ -710,6 +712,12 @@ public sealed class Http2FrameTests
     [InlineData("userinfo")]
     [InlineData("host-differs")]
     [InlineData("connect-with-path")]
+    [InlineData("connect-without-port")]
+    [InlineData("connect-port-zero")]
+    [InlineData("connect-port-too-large")]
+    [InlineData("authority-not-a-host")]
+    [InlineData("authority-open-literal")]
+    [InlineData("host-not-a-host")]
     [InlineData("content-length-short")]
     [InlineData("trailer-pseudo")]
     [InlineData("second-headers-open")]
@@ -718,7 +726,7 @@ public sealed class Http2FrameTests
         "RFC9113-8.3-3#2", "RFC9113-8.3-3#4", "RFC9113-8.3-4#1", "RFC9113-8.3-4#2", "RFC9113-8.3-5#1", "RFC9113-8.3-5#2",
         "RFC9113-8.3.1-3", "RFC9113-8.3.1-2.4.2#1", "RFC9113-8.3.1-2.4.2#2", "RFC9113-8.3.1-2.3.8", "RFC9113-8.3.1-2.3.3#2",
         "RFC9113-8.5-3.2", "RFC9113-8.1-8#1", "RFC9113-8.1-8#2", "RFC9113-8.3-3#3", "RFC9113-8.1-9", "RFC9113-8.2.1-6",
-        "RFC9113-8.1.1-4#1", "RFC9110-4.2.4-4")]
+        "RFC9113-8.1.1-4#1", "RFC9110-4.2.4-4", "RFC9110-9.3.6-4", "RFC9113-8.3.1-2.3.3#2")]
     public void RefusesMalformedRequests(string @case)
     {
         Platform.RequireLinuxX64();
@@ -744,6 +752,12 @@ public sealed class Http2FrameTests
             case "userinfo": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "GET"), (":scheme", "http"), (":path", "/"), (":authority", "u@h")])); break;
             case "host-differs": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([.. Base(), ("host", "other")])); break;
             case "connect-with-path": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "CONNECT"), (":path", "/"), (":authority", "h:1")])); break;
+            case "connect-without-port": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "CONNECT"), (":authority", "example.com")])); break;
+            case "connect-port-zero": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "CONNECT"), (":authority", "example.com:0")])); break;
+            case "connect-port-too-large": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "CONNECT"), (":authority", "example.com:65536")])); break;
+            case "authority-not-a-host": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "GET"), (":scheme", "http"), (":path", "/"), (":authority", "a b")])); break;
+            case "authority-open-literal": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "GET"), (":scheme", "http"), (":path", "/"), (":authority", "[::1")])); break;
+            case "host-not-a-host": c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block([(":method", "GET"), (":scheme", "http"), (":path", "/"), ("host", "a/b")])); break;
             case "content-length-short":
                 c.SendFrame(Headers, EndHeaders, 1, c.Block([.. Base("POST", "/echo"), ("content-length", "1")]));
                 c.SendFrame(Data, EndStream, 1, [1, 2]);

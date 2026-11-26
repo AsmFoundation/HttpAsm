@@ -387,77 +387,10 @@ ha_h1_fields:
     lea     r9, [rel ha_char_class]
     lea     r10, [rel ha_hex_value]
     mov     r11, r15                        ; the value's start, for the authority below
-    cmp     r15, r14
-    jae     .host_valid                     ; empty: allowed when the target has no authority
-    cmp     byte [r15], '['
-    jne     .host_name
-    ; IP-literal = "[" ( IPv6address / IPvFuture ) "]": its octets, then the closing bracket
-    inc     r15
-.host_literal:
-    cmp     r15, r14
-    jae     .host_invalid                   ; no "]"
-    movzx   eax, byte [r15]
-    inc     r15
-    cmp     al, ']'
-    je      .host_port_or_end
-    cmp     al, '['
-    je      .host_invalid
-    test    byte [r9 + rax], HA_CC_TARGET
-    jz      .host_invalid
-    cmp     al, '/'
-    je      .host_invalid
-    cmp     al, '?'
-    je      .host_invalid
-    cmp     al, '@'
-    je      .host_invalid
-    jmp     .host_literal
-.host_name:                                 ; reg-name or IPv4address, up to ":" or the end
-    cmp     r15, r14
-    jae     .host_valid
-    movzx   eax, byte [r15]
-    cmp     al, ':'
-    je      .host_port_or_end
-    test    byte [r9 + rax], HA_CC_TARGET
-    jz      .host_invalid
-    cmp     al, '/'
-    je      .host_invalid
-    cmp     al, '?'
-    je      .host_invalid
-    cmp     al, '@'
-    je      .host_invalid
-    cmp     al, '['
-    je      .host_invalid
-    cmp     al, ']'
-    je      .host_invalid
-    inc     r15
-    cmp     al, '%'
-    jne     .host_name
-    lea     rcx, [r15 + 2]                  ; pct-encoded: two HEXDIG inside the value
-    cmp     rcx, r14
-    ja      .host_invalid
-    movzx   ecx, byte [r15]
-    cmp     byte [r10 + rcx], 0xFF
-    je      .host_invalid
-    movzx   ecx, byte [r15 + 1]
-    cmp     byte [r10 + rcx], 0xFF
-    je      .host_invalid
-    add     r15, 2
-    jmp     .host_name
-.host_port_or_end:
-    cmp     r15, r14
-    jae     .host_valid
-    cmp     byte [r15], ':'
-    jne     .host_invalid
-    inc     r15
-.host_port:                                 ; port = *DIGIT
-    cmp     r15, r14
-    jae     .host_valid
-    movzx   eax, byte [r15]
-    sub     eax, '0'
-    cmp     eax, 9
-    ja      .host_invalid
-    inc     r15
-    jmp     .host_port
+    ; uri-host [ ":" port ], by the grammar HTTP/2's :authority and Host follow too
+    ; (semantics/authority.inc): an empty value passes, as HTTP/1.1 allows when the target
+    ; has no authority.
+    HA_URI_HOST r15, r14, r9, r10, rax, eax, al, rcx, ecx, .host_invalid
 .host_valid:
     ; Host names the authority, unless the request-target already did (absolute-form and
     ; authority-form: RFC 9112 3.2.2 and 3.2.3).
@@ -953,44 +886,28 @@ httpasm_h1_parse_request:
     inc     rdi
     dec     eax                             ; eax: the authority's octets left
     jnz     .userinfo
+    ; The rest of an http(s) authority: uri-host [ ":" port ] by Host's grammar (semantics/
+    ; authority.inc), since this authority, not Host's, is the request's (RFC 9112 3.2.2): it
+    ; must be held to the same rule. r8 is still ha_char_class; r9-r11 are free again.
+    mov     r10, [r14 + httpasm_request.authority]
+    mov     r11d, [r14 + httpasm_request.authority_length]
+    add     r11, r10
+    lea     r9, [rel ha_hex_value]
+    HA_URI_HOST r10, r11, r8, r9, rax, eax, al, rdx, edx, .bad_form
 .absolute_done:
     mov     byte [r14 + httpasm_request.target_form], HTTPASM_TARGET_ABSOLUTE
     jmp     .fields
 
 .form_authority:
-    ; CONNECT's target is uri-host ":" port and nothing else (RFC 9112 3.2.3): the last ":"
-    ; (an IPv6 literal holds others) is followed by 1*DIGIT; the host before it is not empty and
-    ; holds no "/", "?" or "@".
-    mov     edx, ecx
-.port_digit:
-    test    edx, edx
-    jz      .bad_form
-    dec     edx
-    movzx   eax, byte [rsi + rdx]
-    cmp     al, ':'
-    je      .port_found
-    sub     eax, '0'
-    cmp     eax, 9
-    ja      .bad_form
-    jmp     .port_digit
-.port_found:
-    lea     eax, [edx + 1]
-    cmp     eax, ecx
-    je      .bad_form                       ; ":" with no digits after it
-    test    edx, edx
-    jz      .bad_form                       ; no host
-    xor     eax, eax
-.authority_host:
-    movzx   r9d, byte [rsi + rax]
-    cmp     r9b, '/'
-    je      .bad_form
-    cmp     r9b, '?'
-    je      .bad_form
-    cmp     r9b, '@'
-    je      .bad_form
-    inc     eax
-    cmp     eax, edx
-    jb      .authority_host
+    ; CONNECT's target is uri-host ":" port and nothing else (RFC 9112 3.2.3): the host by the
+    ; grammar Host follows, then the port CONNECT requires, 1 to 65535 (RFC9110-9.3.6-4). The
+    ; macros are HTTP/2's too (semantics/authority.inc), so a CONNECT one version refuses the
+    ; other refuses as well. r8 and r9 still hold ha_char_class and ha_hex_value (the target's
+    ; scan above); rcx, the target's length, is kept for the record.
+    mov     r10, rsi                        ; the cursor
+    lea     r11, [rsi + rcx]                ; the target's end
+    HA_URI_HOST r10, r11, r8, r9, rax, eax, al, rdx, edx, .bad_form
+    HA_AUTHORITY_PORT rsi, r11, r10, eax, edx, r9d, .bad_form
     mov     byte [r14 + httpasm_request.target_form], HTTPASM_TARGET_AUTHORITY
     mov     [r14 + httpasm_request.authority], rsi
     mov     [r14 + httpasm_request.authority_length], ecx
