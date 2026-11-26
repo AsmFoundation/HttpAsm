@@ -660,6 +660,24 @@ HTTP/2, the drivers, the client):
      are not on the chain of line scans that sets its time. `tests/native/tiers` compares every
      tier on 279,050 names: every known one, in mixed case, with each octet replaced by near
      misses, against the guard page.
+   - **The one-pass request head** (2026-11-26). The classic flow finds the head's end first
+     (`ha_find_lf` line by line, every LF checked for its CR), then parses every line again: a
+     second pass, 16% of the browser request's instructions, with a loop exit to predict per
+     line. From v2 up, a head searched from its request-line (a message's first call) is read
+     once: the method and the request-target 16 octets a step (`ha_target_lo`, the target
+     class as a pshufb table, proven like tchar's), the HTTP-version and the target's form by
+     the classic code, and the field lines by `ha_h1_fields_v2`, which finds the empty line on
+     the way and applies the same rules (`H1_FIELD_RULES`, one source expanded in both
+     routines). Every read stays below min(len, max_head), the bound no acceptable head
+     crosses. The one-pass flow only ever accepts: a refusal, a cut head, a long method or a
+     step near a page's end restarts the classic flow, which names the outcome, so the two
+     flows cannot disagree (request.asm's `.one_pass` gives the argument). A resumed search
+     keeps the classic flow, which scans only the new octets. The browser request now parses
+     2.09x faster than at v1 and 1.70-1.72x faster than before (A/B, 3 processes, v1 unmoved),
+     and picohttpparser's lead fell from 1.79x to 1.03x. `tests/native/tiers` adds 340,298
+     parses: request-lines of every form and error, framing fields that pass and fail each
+     rule, small limits, heads resumed after a cut, and every prefix of one head in 16, all
+     against the guard page.
 
 *H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
 in CI); differential fuzzing has no untriaged difference; every row passes on every tier and

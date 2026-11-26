@@ -54,7 +54,10 @@ extern ha_x16_0f            ; 16 bytes of 0x0F: the low nibble, what pshufb's in
 extern ha_lane_window       ; 48 bytes (16 x 0x00, 16 x 0xFF, 16 x 0x00): lane masks by length
 extern ha_tchar_lo          ; 16 bytes: tchar by low nibble, for pshufb (tables.asm says how)
 extern ha_tchar_hi          ; 16 bytes: tchar by high nibble; an octet is a tchar when its two
-                            ; entries share a bit
+                            ; entries share a bit. Its entries are the row bits of rows 2-7, so
+                            ; it pairs with ha_target_lo as well
+extern ha_target_lo         ; 16 bytes: request-target octets but "%", by low nibble (pairs with
+                            ; ha_tchar_hi): what a vector target scan passes over
 %endif
 
 ; -----------------------------------------------------------------------------

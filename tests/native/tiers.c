@@ -258,9 +258,20 @@ static int field_id_tiers(long randoms)
     return 0;
 }
 
-/* ---- httpasm_h1_parse_request: its field lines are scanned by versions (ha_h1_fields) ------ */
+/* ---- httpasm_h1_parse_request: two flows and per-line versions --------------------------------
+ * From v2 up, a head searched from its request-line is parsed in one pass (request.asm's
+ * .one_pass and ha_h1_fields_v2), which accepts or hands the head to the classic flow (the head's
+ * end searched first, then ha_h1_fields, whose lines have v1 and v2 versions). v1 runs the
+ * classic flow alone, so comparing every tier with v1 proves both flows and both line versions
+ * equal on every input below: complete heads, every prefix of some, heads resumed after a cut,
+ * refusals of every kind, and small limits. */
 
 #define PARSE_FIELDS 64
+
+/* The limits every parse_at call passes: the default, max_fields aside (the records array), and
+ * varied by parse_variety (max_fields never above PARSE_FIELDS). */
+static const httpasm_h1_limits default_limits = { .max_fields = PARSE_FIELDS };
+static httpasm_h1_limits parse_limits = { .max_fields = PARSE_FIELDS };
 
 /* parse_result: everything one parse hands back: its return value, the scan position, the
  * request and every field record (whose pointers point into the one input every tier parses,
@@ -272,13 +283,19 @@ typedef struct parse_result {
     httpasm_field fields[PARSE_FIELDS];
 } parse_result;
 
-/* parse_at: parses buf[0..len) at the tier now set, into *out (zeroed first, so unset parts
- * compare equal). */
-static void parse_at(const uint8_t *buf, size_t len, parse_result *out)
+/* parse_at: parses buf[0..len) at the tier now set, with parse_limits, into *out (zeroed first,
+ * so unset parts compare equal), the search resuming at `scan` (0 for a message's first call). */
+static void parse_at_from(const uint8_t *buf, size_t len, size_t scan, parse_result *out)
 {
     memset(out, 0, sizeof *out);
-    httpasm_h1_limits limits = { .max_fields = PARSE_FIELDS };
-    out->ret = httpasm_h1_parse_request(buf, len, &out->scan, &limits, &out->request, out->fields);
+    out->scan = scan;
+    out->ret = httpasm_h1_parse_request(buf, len, &out->scan, &parse_limits, &out->request, out->fields);
+}
+
+/* parse_at: parse_at_from for a message's first call. */
+static void parse_at(const uint8_t *buf, size_t len, parse_result *out)
+{
+    parse_at_from(buf, len, 0, out);
 }
 
 /* parse_same: whether two parses agree on everything: the return, the scan position, every
@@ -427,6 +444,212 @@ static int parse_tiers(long randoms)
     return 0;
 }
 
+/* parse_report: prints a mismatch between a tier's parse and v1's (parse_check's form).
+ *   what  which call differed; t  the tier; features  its bits; actual, expected  the results;
+ *   buf, n  the input. */
+static void parse_report(const char *what, size_t t, uint64_t features, const parse_result *actual,
+                         const parse_result *expected, const uint8_t *buf, size_t n)
+{
+    fprintf(stderr, "httpasm_h1_parse_request (%s) at %s (features %#llx) differs from v1: returned %lld (error %u, %u fields, scan %zu), "
+                    "v1 %lld (error %u, %u fields, scan %zu); limits head %u target %u fields %u\n",
+            what, cap_names[t], (unsigned long long)features, (long long)actual->ret, actual->request.error,
+            actual->request.field_count, actual->scan, (long long)expected->ret, expected->request.error,
+            expected->request.field_count, expected->scan, parse_limits.max_head, parse_limits.max_target,
+            parse_limits.max_fields);
+    dump("head", buf, n);
+}
+
+/* parse_check_resumed: a head arriving in two reads, as a server sees one: its first `cut`
+ * octets (against the guard page: incomplete, or already refused), then all n octets, the second
+ * call resuming where the first left the search (at a new address, as a grown buffer may be; the
+ * offsets carry over). The resumed call takes the classic flow at every tier, its line versions
+ * per tier. Both calls must agree with v1's at every tier.
+ *   head, n  the whole head (n <= PAGE); cut  the first read's length (cut <= n).
+ * Returns 0 when every tier agrees; 1, after reporting, otherwise. Leaves the last tier set. */
+static int parse_check_resumed(const uint8_t *head, size_t n, size_t cut)
+{
+    static parse_result expected[2], actual[2];
+    for (size_t t = 0; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        parse_result *r = t == 0 ? expected : actual;
+        uint8_t *first = page_end - cut;
+        memcpy(first, head, cut);
+        parse_at(first, cut, &r[0]);
+        uint8_t *whole = page_end - n;
+        memcpy(whole, head, n);
+        parse_at_from(whole, n, r[0].ret == 0 ? r[0].scan : 0, &r[1]);
+        if (t == 0)
+            continue;
+        if (!parse_same(&expected[0], &actual[0])) {
+            parse_report("the first read", t, features, &actual[0], &expected[0], first, cut);
+            return 1;
+        }
+        if (!parse_same(&expected[1], &actual[1])) {
+            parse_report("the resumed read", t, features, &actual[1], &expected[1], whole, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* target_octet: a random octet a request-target may hold as it is (RFC 3986's unreserved,
+ * sub-delims, ":", "@", "/", "?"), never "%". */
+static uint8_t target_octet(void)
+{
+    static const char octets[] = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-._~!$&'()*+,;=:@/?[]";
+    unsigned r = (unsigned)(rng() % 100);
+    if (r < 70)
+        return (uint8_t)octets[rng() % 36];
+    return (uint8_t)octets[rng() % (sizeof octets - 1)];
+}
+
+/* request_line: appends a request-line to h (advancing *n), drawn so that every check of the
+ * request-line meets both of its outcomes: leading empty lines (RFC 9112 2.2); methods known,
+ * unknown, of 1-24 tchars (past one 16-octet step), empty, or with a non-tchar; one SP mostly,
+ * sometimes two, HTAB or none; targets in each form (origin up to 300 octets with
+ * percent-encodings, valid or not; asterisk; absolute http(s) with or without userinfo, port or
+ * host; authority for CONNECT or not), sometimes with an octet a target may not hold; versions
+ * 1.1, 1.0, a later minor, another major, or malformed; CRLF, or now and then a bare LF. */
+static void request_line(uint8_t *h, size_t *n)
+{
+    static const char *const methods[] = { "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "CONNECT", "PATCH",
+                                           "TRACE", "get", "M-SEARCH", "PROPFIND" };
+    static const char *const versions[] = { "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1",
+                                            "HTTP/1.0", "HTTP/1.9", "HTTP/2.0", "HTTP/1.", "http/1.1", "HTTP/1.1 ",
+                                            "HTTP/11", "HTTP/1.x" };
+    for (size_t k = rng() % 8 == 0 ? 1 + (size_t)(rng() % 3) : 0; k > 0; k--)
+        put(h, n, "\r\n");
+    unsigned r = (unsigned)(rng() % 100);
+    int connect = 0, options = 0;
+    if (r < 80) {
+        const char *m = methods[rng() % (sizeof methods / sizeof methods[0])];
+        connect = strcmp(m, "CONNECT") == 0;
+        options = strcmp(m, "OPTIONS") == 0;
+        put(h, n, m);
+    } else if (r < 96) {
+        for (size_t k = 1 + (size_t)(rng() % 24); k > 0; k--)
+            h[(*n)++] = tchar_pick();
+    } else if (r < 98) {
+        put(h, n, "GE\x01T");                           /* a non-tchar in the method */
+    }                                                   /* else no method at all */
+    r = (unsigned)(rng() % 100);
+    put(h, n, r < 94 ? " " : r < 96 ? "  " : r < 98 ? "\t" : "");
+    r = (unsigned)(rng() % 100);
+    if (connect && r < 70) {                            /* authority-form */
+        put(h, n, rng() % 4 ? "example.com" : "[::1]");
+        put(h, n, rng() % 5 ? ":443" : rng() % 2 ? ":" : ":99999");
+    } else if (r < 5 || (options && r < 30)) {          /* asterisk-form */
+        put(h, n, "*");
+    } else if (r < 15) {                                /* absolute-form */
+        put(h, n, rng() % 2 ? "http://" : "https://");
+        r = (unsigned)(rng() % 10);
+        put(h, n, r == 0 ? "" : r == 1 ? "user@example.com" : r == 2 ? ":80" : "example.com");
+        if (rng() % 3 == 0)
+            put(h, n, ":8080");
+        put(h, n, "/path?q=1");
+    } else {                                            /* origin-form */
+        h[(*n)++] = '/';
+        size_t length = (size_t)(rng() % (rng() % 4 == 0 ? 300 : 70));
+        for (size_t k = 0; k < length; k++) {
+            if (rng() % 30 == 0) {                      /* a percent-encoding, valid or not */
+                static const char hex[] = "0123456789abcdefABCDEF";
+                h[(*n)++] = '%';
+                h[(*n)++] = rng() % 20 ? (uint8_t)hex[rng() % 22] : (uint8_t)'G';
+                h[(*n)++] = rng() % 20 ? (uint8_t)hex[rng() % 22] : (uint8_t)' ';
+            } else {
+                h[(*n)++] = target_octet();
+            }
+        }
+        if (rng() % 40 == 0)                            /* an octet a target may not hold */
+            h[*n - (length > 0 ? 1 + rng() % (length < 8 ? length : 8) : 0)] = (uint8_t)"\"<>\\^`{|}#\x7f\x80\x01"[rng() % 13];
+    }
+    put(h, n, " ");
+    put(h, n, versions[rng() % (sizeof versions / sizeof versions[0])]);
+    put(h, n, rng() % 60 ? "\r\n" : "\n");
+}
+
+/* framing_line: appends one field line that a rule reads (Host, Content-Length,
+ * Transfer-Encoding, Connection, Expect, TE, Upgrade), in a random case, with a value that
+ * passes the rule or fails it: every branch of H1_FIELD_RULES, which request.asm expands twice
+ * (the classic flow's ha_h1_fields, which v1 runs, and the one-pass flow's ha_h1_fields_v2), so
+ * each line here reaches both. That includes HTAB as the OWS inside a list (each list rule skips
+ * OWS at its own places), and tokens of the length a rule compares that are not the word it
+ * looks for ("closx", "keep-alivx", "compress"). */
+static void framing_line(uint8_t *h, size_t *n)
+{
+    static const char *const lines[] = {
+        "Host: example.com", "host: example.com:8080", "Host: [::1]", "Host: a b", "Host:",
+        "Content-Length: 12", "content-length: 0", "Content-Length: 12, 12", "Content-Length: 1, 2",
+        "Content-Length: -1", "Content-Length: 99999999999999999999", "Content-Length:",
+        "Content-Length: 12,\t12", "Content-Length: 12\t,12",
+        "Transfer-Encoding: chunked", "transfer-encoding: gzip, chunked", "Transfer-Encoding: chunked, gzip",
+        "Transfer-Encoding: chunked;x=1", "Transfer-Encoding: \"q\"", "Transfer-Encoding: ,",
+        "Transfer-Encoding: gzip,\tchunked", "Transfer-Encoding: gzip\t,chunked", "Transfer-Encoding: chunked\t;x",
+        "Connection: close", "connection: keep-alive", "Connection: Upgrade, close", "Connection: x y",
+        "Connection: close,\tkeep-alive", "Connection: closx", "Connection: keep-alivx",
+        "Expect: 100-continue", "expect: 100-CONTINUE", "Expect: 200-ok", "Expect:",
+        "TE: trailers", "te: gzip, trailers", "TE: deflate", "TE: gzip,\ttrailers", "TE: compress",
+        "Upgrade: websocket", "UPGRADE: h2c",
+    };
+    put(h, n, lines[rng() % (sizeof lines / sizeof lines[0])]);
+    put(h, n, "\r\n");
+}
+
+/* parse_variety: `randoms` request heads drawn from every part of the grammar (request_line,
+ * framing_line, field_line; sometimes a bare LF or no end at all), each checked complete at a
+ * random distance from the guard page, with random limits now and then (a max_head at or near
+ * the head's length, a short max_target, few max_fields), resumed after a random cut, and, for
+ * one in 16, cut after every octet (each prefix against the guard page: the incomplete heads and
+ * the refusals the one-pass flow must hand to the classic flow). Returns 0 when every one agreed
+ * at every tier, 1 at the first that did not. */
+static int parse_variety(long randoms)
+{
+    static uint8_t h[PAGE];
+    static const size_t gaps[] = { 0, 1, 2, 15, 16, 17, 18, 33, 100 };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t n = 0;
+        request_line(h, &n);
+        size_t lines = (size_t)(rng() % 20);
+        for (size_t l = 0; l < lines && n < PAGE - 700; l++) {
+            unsigned r = (unsigned)(rng() % 10);
+            if (r < 3)
+                framing_line(h, &n);
+            else
+                field_line(h, &n);
+        }
+        unsigned end = (unsigned)(rng() % 100);
+        put(h, &n, end < 96 ? "\r\n" : end < 98 ? "\n" : "");
+
+        parse_limits = default_limits;
+        if (rng() % 5 == 0) {
+            static const uint32_t targets[] = { 0, 1, 3, 15, 16, 17, 64 };
+            static const uint32_t fields[] = { PARSE_FIELDS, 1, 2, 3, 5 };
+            int64_t heads[] = { 0, (int64_t)n - 1, (int64_t)n, (int64_t)n + 1, (int64_t)n / 2, 17, 40 };
+            int64_t head = heads[rng() % (sizeof heads / sizeof heads[0])];
+            parse_limits.max_head = head > 0 ? (uint32_t)head : 0;
+            parse_limits.max_target = targets[rng() % (sizeof targets / sizeof targets[0])];
+            parse_limits.max_fields = fields[rng() % (sizeof fields / sizeof fields[0])];
+        }
+        size_t gap = gaps[rng() % (sizeof gaps / sizeof gaps[0])];
+        if (parse_check(h, n, gap))
+            return 1;
+        if (parse_check_resumed(h, n, n == 0 ? 0 : (size_t)(rng() % n)))
+            return 1;
+        checked += 2;
+        if (i % 16 == 0) {
+            for (size_t cut = 1; cut < n; cut++) {
+                if (parse_check(h, cut, 0))
+                    return 1;
+                checked++;
+            }
+        }
+    }
+    parse_limits = default_limits;
+    printf("httpasm_h1_parse_request: %ld parses of varied heads, prefixes and resumed reads, every tier agrees with v1\n", checked);
+    return 0;
+}
+
 /* main: sets up the guard page, prints the tiers this CPU (or SDE) gives, and runs every
  * routine's comparison. Returns 0, 1 on a mismatch, or 2 on a usage or setup error. */
 int main(int argc, char **argv)
@@ -455,6 +678,8 @@ int main(int argc, char **argv)
         failed = field_id_tiers(randoms);
     if (!failed)
         failed = parse_tiers(randoms / 10);
+    if (!failed)
+        failed = parse_variety(randoms / 20);
 
     httpasm_cpu_limit(HTTPASM_CPU_ALL);
     (void)start_features;

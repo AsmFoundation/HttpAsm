@@ -42,6 +42,41 @@
 %endmacro
 
 ; -----------------------------------------------------------------------------
+; HA_NIBBLE_CLASSIFY data, t1, t2, lo, hi, nib, zero, mask
+;   One vector of 16 octets against a class held as two pshufb tables: mask = a bit per octet
+;   that is NOT in the class (bit i is octet i). The classes held this way (semantics/
+;   tables.asm, each pair proven for all 256 octets at assembly time): tchar (ha_tchar_lo with
+;   ha_tchar_hi) and the request-target octets a scan passes over (ha_target_lo with
+;   ha_tchar_hi).
+;
+;   data       an XMM register holding the octets; unchanged.
+;   t1, t2     XMM scratch registers.
+;   lo, hi     XMM registers holding the class's low-nibble and high-nibble tables; unchanged.
+;   nib        an XMM register holding ha_x16_0f; unchanged.
+;   zero       an XMM register holding zeros; unchanged.
+;   mask       a 32-bit register: the result. Writing it clears the upper half of its 64-bit
+;              register.
+;
+;   An octet is in the class exactly when lo[its low nibble] and hi[its high nibble] share a bit.
+;   The low lookup indexes with the octets as they are: pshufb reads an index's low 4 bits and
+;   gives 0 for an index with bit 7 set, which is the right answer, since no class held this way
+;   has an octet from 0x80 up. The high nibble needs psrlw and a mask (psrlw shifts 16-bit lanes,
+;   so the next octet's low bits come along). SSSE3 (pshufb): v2 and up only.
+; -----------------------------------------------------------------------------
+%macro HA_NIBBLE_CLASSIFY 8
+    movdqa  %2, %1
+    psrlw   %2, 4
+    pand    %2, %6                          ; each octet's high nibble
+    movdqa  %3, %5
+    pshufb  %3, %2                          ; hi[high]
+    movdqa  %2, %4
+    pshufb  %2, %1                          ; lo[low]; 0 for an octet from 0x80 up
+    pand    %2, %3                          ; nonzero exactly for an octet in the class
+    pcmpeqb %2, %7                          ; 0xFF where the octet is not in it
+    pmovmskb %8, %2
+%endmacro
+
+; -----------------------------------------------------------------------------
 ; HA_FIELD_VALUE_CLASSIFY data, tmp, eq, low, tab, del, mask
 ;   One vector of 16 octets: mask = a bit per octet that a field value may not hold, a CTL other
 ;   than HTAB (see HA_CC_VALUE in httpasm_core.inc). Bit i is octet i.

@@ -189,6 +189,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, the one-pass request head at v2.** With the lookup done, the
+browser request's profile showed what the field lines and the lookup could not: 16% of its
+instructions in the search for the head's end (`ha_find_lf`, called once per line), a pass that
+the field lines then repeat, each line with its own loop exit to predict. From v2 up a head that
+arrives whole is now read once (`ha_h1_fields_v2`, request.asm's `.one_pass`), the empty line
+found on the way; anything it would not accept goes back to the classic flow, so outcomes are
+unchanged (`tests/native/tiers`, 340,298 more parses at every tier).
+
+| Request head | Instructions, before -> after (best tier) | v1 / best, same build | picohttpparser's lead, before -> after |
+|---|---:|---:|---:|
+| small GET | 804 -> 670 | 0.70x | 2.15x -> 1.58x |
+| browser GET | 5,541 -> 3,239 | 0.48x | 1.79x -> 1.03x |
+| API POST | 3,030 -> 1,944 | 0.50x | 1.74x -> 1.15x |
+
+Against the commit before (f5ba99a, `bench.sh ab`, 3 processes, all agreeing), the best tier is
+1.70-1.72x faster on the browser head with v1 unmoved there (no difference), 1.50-1.51x on the
+API POST head and 1.36-1.38x on the small GET, where v1 moved 1.05-1.06x and 1.09-1.14x by
+placement. The response parser, which keeps the classic flow, shows no difference at either
+tier.
+
 **2026-11-26: phase H step 4, the field-name lookup at v2.** After the field lines, SDE's
 profile of the browser request put 20% of its instructions in `ha_field_lookup`, which compared
 a candidate name octet by octet (7 instructions an octet). At v2 it now builds the same key from

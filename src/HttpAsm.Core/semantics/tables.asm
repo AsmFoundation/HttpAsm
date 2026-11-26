@@ -16,6 +16,19 @@ default rel
 ; from, so the scalar and the vector token scans cannot disagree.
 %define HA_IS_TCHAR(c) (((c) >= 0x30 && (c) <= 0x39) || ((c) >= 0x41 && (c) <= 0x5A) || ((c) >= 0x61 && (c) <= 0x7A) || (c) == 0x21 || ((c) >= 0x23 && (c) <= 0x27) || (c) == 0x2A || (c) == 0x2B || (c) == 0x2D || (c) == 0x2E || (c) == 0x5E || (c) == 0x5F || (c) == 0x60 || (c) == 0x7C || (c) == 0x7E)
 
+; HA_IS_TARGET(c): whether octet c may stand as is in a request-target (HA_CC_TARGET in
+; httpasm_core.inc says why each is there). RFC 3986: unreserved = ALPHA / DIGIT / "-" / "." /
+; "_" / "~"; sub-delims = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="; pchar
+; adds ":" "@"; path and query add "/" "?"; pct-encoded starts with "%"; IP-literal uses "["
+; "]". In hex: -=2D .=2E _=5F ~=7E !=21 $=24 &=26 '=27 (=28 )=29 *=2A +=2B ,=2C ;=3B ==3D :=3A
+; @=40 /=2F ?=3F %=25 [=5B ]=5D. The one definition the class table and the nibble table
+; ha_target_lo are computed from, so the scalar and the vector target scans cannot disagree.
+%define HA_IS_TARGET(c) (((c) >= 0x30 && (c) <= 0x39) || ((c) >= 0x41 && (c) <= 0x5A) || ((c) >= 0x61 && (c) <= 0x7A) || (c) == 0x2D || (c) == 0x2E || (c) == 0x5F || (c) == 0x7E || (c) == 0x21 || (c) == 0x24 || ((c) >= 0x26 && (c) <= 0x2C) || (c) == 0x3B || (c) == 0x3D || (c) == 0x3A || (c) == 0x40 || (c) == 0x2F || (c) == 0x3F || (c) == 0x25 || (c) == 0x5B || (c) == 0x5D)
+
+; HA_IS_TARGET_RUN(c): a target octet that a vector scan passes over without a second look:
+; every target octet but "%", whose two HEXDIG the scan must check (RFC 3986 2.1).
+%define HA_IS_TARGET_RUN(c) (HA_IS_TARGET(c) && (c) != 0x25)
+
 section .rodata
 
 ; -----------------------------------------------------------------------------
@@ -48,12 +61,7 @@ ha_char_class:
     %if HA_IS_TCHAR(c)                              ; tchar (RFC9110-5.6.2-2), defined above
         %assign bits bits | HA_CC_TCHAR
     %endif
-    ; RFC 3986: unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"; sub-delims = "!" / "$" /
-    ; "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="; pchar adds ":" "@"; path and query
-    ; add "/" "?"; pct-encoded starts with "%"; IP-literal uses "[" "]". In hex:
-    ; -=2D .=2E _=5F ~=7E !=21 $=24 &=26 '=27 (=28 )=29 *=2A +=2B ,=2C ;=3B ==3D :=3A @=40
-    ; /=2F ?=3F %=25 [=5B ]=5D
-    %if (bits & (HA_CC_DIGIT | HA_CC_ALPHA)) || c == 0x2D || c == 0x2E || c == 0x5F || c == 0x7E || c == 0x21 || c == 0x24 || (c >= 0x26 && c <= 0x2C) || c == 0x3B || c == 0x3D || c == 0x3A || c == 0x40 || c == 0x2F || c == 0x3F || c == 0x25 || c == 0x5B || c == 0x5D
+    %if HA_IS_TARGET(c)                             ; a request-target octet (RFC 3986), above
         %assign bits bits | HA_CC_TARGET
     %endif
     db      bits
@@ -178,6 +186,56 @@ ha_tchar_hi:
     %endrep
     %if ((lo_bits & hi_bit) != 0) != (HA_IS_TCHAR(c) != 0)
         %error the tchar nibble tables disagree with HA_IS_TCHAR at octet c
+    %endif
+    %assign c c + 1
+%endrep
+
+; -----------------------------------------------------------------------------
+; ha_target_lo: HA_IS_TARGET_RUN as a pshufb table by low nibble, paired with ha_tchar_hi (the
+; row bit of rows 0x20-0x7F, the only rows that hold target octets): an octet passes a vector
+; target scan exactly when its two entries share a bit. A scan stops at every other octet: SP
+; (the target's end), "%" (a percent-encoding to check), anything a target may not hold. Checked
+; for all 256 octets below; a wrong table does not assemble.
+; -----------------------------------------------------------------------------
+align 16                            ; movdqa loads it
+global ha_target_lo:data hidden (ha_target_lo.end - ha_target_lo)
+ha_target_lo:
+%assign l 0
+%rep 16
+    %assign bits 0
+    %assign h 2
+    %rep 6
+        %if HA_IS_TARGET_RUN(h * 16 + l)
+            %assign bits bits | (1 << (h - 2))
+        %endif
+        %assign h h + 1
+    %endrep
+    db      bits
+    %assign l l + 1
+%endrep
+.end:
+
+; The proof, as for tchar: no target octet lies outside rows 2-7, and within them the tables
+; agree with HA_IS_TARGET_RUN octet for octet. (The table's own class bit, HA_CC_TARGET, comes
+; from HA_IS_TARGET above: one definition for both.)
+%assign c 0
+%rep 256
+    %assign h c >> 4
+    %assign l c & 15
+    %assign hi_bit 0
+    %if h >= 2 && h <= 7
+        %assign hi_bit 1 << (h - 2)
+    %endif
+    %assign lo_bits 0
+    %assign r 2
+    %rep 6
+        %if HA_IS_TARGET_RUN(r * 16 + l)
+            %assign lo_bits lo_bits | (1 << (r - 2))
+        %endif
+        %assign r r + 1
+    %endrep
+    %if ((lo_bits & hi_bit) != 0) != (HA_IS_TARGET_RUN(c) != 0)
+        %error the target nibble table disagrees with HA_IS_TARGET_RUN at octet c
     %endif
     %assign c c + 1
 %endrep
