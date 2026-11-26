@@ -18,6 +18,68 @@ default rel
 %include "httpasm_core.inc"
 %include "h1/h1.inc"
 
+; -----------------------------------------------------------------------------
+; CH_MOVE_DOWN: rdi[0..rax) = rsi[0..rax), with rdi <= rsi; the two may overlap (chunk data
+; moving down over the framing removed before it). rax >= 1, kept.
+;   The result is memmove's, exactly what the forward rep movsb it replaces gave: every piece is
+;   loaded before it is stored and the copy runs forward, so a destination below the source
+;   never overwrites a source octet still to be read. Below 16 octets: two loads of the size
+;   class (the second ending at the end), then two stores. 16 to 255: 16-octet steps forward,
+;   the last 16 loaded first and stored last. 256 and up: rep movsb, which is fast for long
+;   copies (ERMSB) and forward. Its start-up cost, tens of cycles, is what the short copies of
+;   small chunks no longer pay.
+;   Clobbers rcx, rdx, rsi, rdi, xmm0, xmm1 and the flags.
+; -----------------------------------------------------------------------------
+%macro CH_MOVE_DOWN 0
+    cmp     rax, 256
+    jae     %%long
+    cmp     rax, 16
+    jae     %%steps
+    cmp     eax, 8
+    jae     %%eight
+    cmp     eax, 4
+    jae     %%four
+    cmp     eax, 2
+    jae     %%two
+    movzx   ecx, byte [rsi]                 ; one octet
+    mov     [rdi], cl
+    jmp     %%done
+%%two:                                      ; 2-3 octets
+    movzx   ecx, word [rsi]
+    movzx   edx, word [rsi + rax - 2]
+    mov     [rdi], cx
+    mov     [rdi + rax - 2], dx
+    jmp     %%done
+%%four:                                     ; 4-7 octets
+    mov     ecx, [rsi]
+    mov     edx, [rsi + rax - 4]
+    mov     [rdi], ecx
+    mov     [rdi + rax - 4], edx
+    jmp     %%done
+%%eight:                                    ; 8-15 octets
+    mov     rcx, [rsi]
+    mov     rdx, [rsi + rax - 8]
+    mov     [rdi], rcx
+    mov     [rdi + rax - 8], rdx
+    jmp     %%done
+%%steps:                                    ; 16-255 octets
+    movdqu  xmm0, [rsi + rax - 16]          ; the last 16, before any store
+    xor     ecx, ecx
+%%step:
+    movdqu  xmm1, [rsi + rcx]
+    movdqu  [rdi + rcx], xmm1
+    add     rcx, 16
+    lea     rdx, [rcx + 16]
+    cmp     rdx, rax
+    jbe     %%step
+    movdqu  [rdi + rax - 16], xmm0          ; overlaps the last whole step when needed
+    jmp     %%done
+%%long:
+    mov     rcx, rax
+    rep     movsb                           ; forward: safe with the destination below
+%%done:
+%endmacro
+
 section .text
 
 ; -----------------------------------------------------------------------------
@@ -112,7 +174,13 @@ ha_h1_head_end:
 ;   HTTPASM_CHUNKED_ERROR and stays so). The decoder stops right after the last chunk's line
 ;   (state HTTPASM_CHUNKED_TRAILERS): the trailer section starts at in[consumed], for
 ;   httpasm_h1_parse_trailers. state->total counts the data octets of the whole body.
-;   In: rdi, rsi, rdx, rcx. Keeps rbx, rbp, r12-r15.
+;   In: rdi, rsi, rdx, rcx. Keeps rbx, rbp, r12-r15 (and, as any C function may, clobbers the
+;   other general registers and xmm0, xmm1: the data's moves).
+;   Two ways through, the same outcome for every input and every split into calls: a whole
+;   chunk at once from its first octet when it is plain and all here (.size_start: 2.6x faster
+;   on 16-octet chunks), and otherwise the state machine, octet by octet, which keeps its state
+;   between calls (the chunked fuzzer checks both against an oracle, whole, in reads and one
+;   octet at a time).
 ; -----------------------------------------------------------------------------
 global httpasm_h1_chunked_decode:function (httpasm_h1_chunked_decode.end - httpasm_h1_chunked_decode)
 align 16
@@ -139,7 +207,7 @@ httpasm_h1_chunked_decode:
     mov     eax, [rbx + httpasm_h1_chunked.state]
     movzx   ecx, byte [r12 + r15]
     cmp     eax, HTTPASM_CHUNKED_SIZE
-    je      .size
+    je      .size_start
     cmp     eax, HTTPASM_CHUNKED_DATA
     je      .data
     cmp     eax, HTTPASM_CHUNKED_EXTENSION
@@ -154,6 +222,82 @@ httpasm_h1_chunked_decode:
     je      .extension_bws
     jmp     .done                           ; TRAILERS: the trailer section is not ours
 
+; ---- A whole chunk at once. At a chunk's first octet (state SIZE, no digit read yet), when its
+; size line is plain (1-16 HEXDIG, a value below 2^63, CRLF at once) and, for data, the data and
+; its CRLF are all here: the size is read in registers, the data moved down with moves sized to
+; it, and the decoder stands at the next chunk's start, as the state machine would leave it.
+; Everything is checked before anything is written. Anything else - an extension, whitespace,
+; a numeral the state machine refuses, a line or a chunk not all here - goes to .size at the
+; chunk's first octet with nothing changed, and the state machine reads it octet by octet, so
+; the outcome (the octets, the counts, the state, an error) is the state machine's. A size line
+; that is whole while the data is not is taken here too: state DATA, as .size_lf leaves it.
+; Why: the state machine costs ~20 instructions an octet of framing (the state reloaded and
+; compared each octet), most of a small chunk's cost (benchmarks/README.md).
+.size_start:
+    cmp     dword [rbx + httpasm_h1_chunked.size_digits], 0
+    jne     .size                           ; inside a size line already: octet by octet
+    xor     eax, eax                        ; the chunk-size
+    xor     edx, edx                        ; its digits
+    mov     rsi, r15
+.whole_digit:
+    cmp     rsi, r13
+    jae     .whole_bail                     ; the line goes on past the input
+    movzx   ecx, byte [r12 + rsi]
+    movzx   ecx, byte [r8 + rcx]            ; ha_hex_value
+    cmp     ecx, 0xFF
+    je      .whole_digits
+    cmp     edx, 16
+    jae     .whole_bail                     ; past 64 bits of numeral: .size refuses it
+    mov     r9, rax
+    shr     r9, 59
+    jnz     .whole_bail                     ; one more digit would pass 2^63: .size refuses it
+    shl     rax, 4
+    or      rax, rcx
+    inc     edx
+    inc     rsi
+    jmp     .whole_digit
+.whole_digits:
+    test    edx, edx
+    jz      .whole_bail                     ; no digit: .size refuses it
+    lea     rcx, [rsi + 2]
+    cmp     rcx, r13
+    ja      .whole_bail                     ; the line's end not all here
+    cmp     word [r12 + rsi], 0x0A0D
+    jne     .whole_bail                     ; an extension, whitespace, or not CRLF
+    add     rsi, 2                          ; past the chunk-size line
+    test    rax, rax
+    jz      .whole_last                     ; last-chunk
+    mov     rcx, r13
+    sub     rcx, rsi                        ; the octets after the line
+    cmp     rcx, 2
+    jb      .whole_partial
+    sub     rcx, 2
+    cmp     rax, rcx
+    ja      .whole_partial                  ; the data or its CRLF still to come
+    lea     rcx, [rsi + rax]                ; the data's end
+    cmp     word [r12 + rcx], 0x0A0D
+    jne     .whole_bail                     ; the data's CRLF is wrong: the state machine refuses
+                                            ; it after moving the data, as it always has
+    ; The data, rax octets, down to the output's end (rbp is below the source: framing was
+    ; removed before it).
+    lea     r15, [rsi + rax + 2]            ; past the data's CRLF: the next chunk's start
+    lea     rdi, [r12 + rbp]
+    lea     rsi, [r12 + rsi]
+    add     [rbx + httpasm_h1_chunked.total], rax
+    add     rbp, rax
+    CH_MOVE_DOWN                            ; rdi, rsi, rax
+    jmp     .next
+.whole_partial:                             ; the size line is whole, the data is not
+    mov     [rbx + httpasm_h1_chunked.remaining], rax
+    mov     dword [rbx + httpasm_h1_chunked.state], HTTPASM_CHUNKED_DATA
+    mov     r15, rsi
+    jmp     .next
+.whole_last:                                ; as .size_lf after a zero size
+    mov     r15, rsi
+    mov     dword [rbx + httpasm_h1_chunked.state], HTTPASM_CHUNKED_TRAILERS
+    jmp     .done
+.whole_bail:
+    movzx   ecx, byte [r12 + r15]           ; .size's octet
 .size:                                      ; chunk-size = 1*HEXDIG
     movzx   edx, byte [r8 + rcx]
     cmp     edx, 0xFF

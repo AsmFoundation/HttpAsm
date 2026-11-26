@@ -699,6 +699,15 @@ HTTP/2, the drivers, the client):
      moves sized to each (no `rep movsb`, whose start-up cost was most of each short copy) and
      makes its decimal digits by multiplication. A 200 with six fields is written 1.17x faster.
      `tests/native/tiers` checks the token scan at every tier on 206,680 inputs against the RFC.
+   - **Chunk sizes** (2026-11-27). The chunked decoder is a state machine that keeps its
+     state between calls, octet by octet: about 20 instructions per octet of framing, most of a
+     small chunk's cost. At a chunk's first octet it now takes a whole chunk at once when the
+     size line is plain and the chunk is all here (the size in registers, the data moved down
+     by moves sized to it, both CRLFs checked before anything is written), and gives anything
+     else (extensions, whitespace, a numeral the state machine refuses, a chunk not all here)
+     back to the state machine at that octet, unchanged: 2.6x faster on 16-octet chunks, 1.04x
+     on 1 KiB ones (the copy dominates). Serves every tier; the chunked fuzzer's oracle checks
+     it whole, in reads and one octet at a time (4.5 million inputs, the corpus merged).
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's

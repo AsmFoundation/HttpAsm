@@ -189,6 +189,21 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: phase H step 4, chunk sizes: a whole chunk at once.** The chunked decoder read
+its framing octet by octet through a state machine kept in memory (the state reloaded and
+compared each octet): 184 instructions per 16-octet chunk. At a chunk's first octet it now
+takes a plain, complete chunk in registers and moves its data down with sized moves; anything
+else goes back to the state machine, untouched. It serves every tier, so the proof is the A/B
+against f3adabd (3 processes agreeing):
+
+| Case | Instructions, before -> after | Best tier | v1 |
+|---|---:|---:|---:|
+| 256 chunks of 16 octets | 47,219 -> 28,519 | 2.59-2.63x faster | 2.59-2.63x faster |
+| 16 chunks of 1,024 octets | 35,667 -> 34,487 | 1.04x faster | 1.04x faster |
+
+(SDE counts `rep movsb` by octet, so the large chunks' copies dominate their counts.) The host
+carried other work during the A/B (53-56% CPU); the paired verdicts in all three processes held.
+
 **2026-11-27: phase H step 4, whole-token checks at v2 and the response writer's copies.** SDE's
 profile of writing a 200 with six fields (2,366 instructions) put half in `ha_check_fields`: each
 field name checked octet by octet (`HA_TOKEN_SCAN`, 5 instructions an octet). The writer also
