@@ -892,6 +892,13 @@ ha_conn_drive:
 ;   only through a closing response (C_CLOSE_AFTER): the caller flushes, and the flush closes.
 ;   Callers use ha_conn_drive, which handles both.
 ; -----------------------------------------------------------------------------
+; The frame: [rsp] the chunked decoder's produced count, [rsp + 8] the trailer count, [rsp + 16]
+; a limits record (16), then:
+P_NO_ROOM       equ 32      ; 1 while the trailers parse into P_SPARE_FIELD (the array is full)
+P_SPARE_FIELD   equ 40      ; one httpasm_field (32): a trailer section's destination when the
+                            ; array has no room left (.trailers says why)
+P_FRAME         equ 72      ; six pushes + 72 + the return address: rsp 16-byte aligned for calls
+
 global ha_conn_process:function hidden (ha_conn_process.end - ha_conn_process)
 align 16
 ha_conn_process:
@@ -901,7 +908,7 @@ ha_conn_process:
     push    r13
     push    r14
     push    r15
-    sub     rsp, 40                         ; produced/count scratch + a limits record (16)
+    sub     rsp, P_FRAME
     mov     rbx, rdi
     mov     r12, [rbx + conn.worker]
     mov     r13, [r12 + worker.server]
@@ -1124,7 +1131,13 @@ ha_conn_process:
     jmp     .need_more
 
 .trailers:
-    ; Trailer fields go after the header fields, in the room the array has left.
+    ; Trailer fields go after the header fields, in the room the array has left. With none
+    ; left they go to the frame's one record instead (P_SPARE_FIELD), and a section that holds
+    ; a field is refused with 431 once parsed. The limit cannot say "no field" (0 asks for the
+    ; default), and the limit 1 with the array's end as the destination - what this did until
+    ; 2026-11-26 - wrote a record 32 octets past the array's allocation: a request with
+    ; max_fields header fields, a chunked body and one trailer corrupted the heap ("free():
+    ; invalid next size", an abort; found by the coverage gate's walk of the unrun markers).
     mov     eax, [r13 + server.limits + httpasm_h1_limits.max_head]
     mov     [rsp + 16 + httpasm_h1_limits.max_head], eax
     mov     dword [rsp + 16 + httpasm_h1_limits.max_target], 0
@@ -1134,9 +1147,15 @@ ha_conn_process:
     jnz     .capacity
     mov     eax, HA_H1_DEFAULT_MAX_FIELDS
 .capacity:
+    mov     r8d, [rbx + conn.request + httpasm_request.field_count]
+    shl     r8, 5
+    add     r8, [rbx + conn.fields]         ; the records after the header's
+    mov     dword [rsp + P_NO_ROOM], 0
     sub     eax, [rbx + conn.request + httpasm_request.field_count]
     jnz     .room
-    mov     eax, 1                          ; none left: a section with a field will be a 431
+    lea     r8, [rsp + P_SPARE_FIELD]       ; none left: the frame's record, never the array's end
+    mov     dword [rsp + P_NO_ROOM], 1
+    mov     eax, 1
 .room:
     mov     [rsp + 16 + httpasm_h1_limits.max_fields], eax
     mov     rdi, [rbx + conn.rbuf]
@@ -1145,15 +1164,19 @@ ha_conn_process:
     sub     rsi, [rbx + conn.body_end]
     lea     rdx, [rbx + conn.scan_from]
     lea     rcx, [rsp + 16]
-    mov     r8d, [rbx + conn.request + httpasm_request.field_count]
-    shl     r8, 5
-    add     r8, [rbx + conn.fields]
     lea     r9, [rsp + 8]                   ; count
     call    httpasm_h1_parse_trailers
     test    rax, rax
     jz      .need_more
     js      .head_refused
     mov     ecx, [rsp + 8]
+    test    ecx, ecx
+    jz      .trailers_fit                   ; an empty section fits whatever the room
+    cmp     dword [rsp + P_NO_ROOM], 0
+    je      .trailers_fit
+    mov     rax, -431                       ; a field the array has no room for (RFC 6585 5)
+    jmp     .head_refused
+.trailers_fit:
     mov     [rbx + conn.exchange + exchange.trailer_count], ecx
     add     rax, [rbx + conn.body_end]
     mov     [rbx + conn.message_end], rax
@@ -1245,7 +1268,7 @@ ha_conn_process:
 .pressure:
     mov     eax, 1
 .return:
-    add     rsp, 40
+    add     rsp, P_FRAME
     pop     r15
     pop     r14
     pop     r13

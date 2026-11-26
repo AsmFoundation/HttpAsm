@@ -402,6 +402,49 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// max_fields bounds a request's header and trailer fields together: trailers take the
+    /// records the header left. With the header at the limit, a trailer section that holds a
+    /// field is 431 and an empty one is fine; below it, trailers fit up to the limit and one
+    /// more is 431. The first row once corrupted the server's heap: with no record left the
+    /// trailer parser got the limit 1 and the array's end as its destination, and wrote the
+    /// record 32 octets past the array's allocation ("free(): invalid next size", an abort;
+    /// found walking the coverage gate's unrun markers, 2026-11-26). The default limit (128)
+    /// is held the same way.
+    /// </summary>
+    /// <param name="headerFields">Header fields beside Host and Transfer-Encoding.</param>
+    /// <param name="trailers">Trailer fields.</param>
+    /// <param name="defaultLimit">The default max_fields (128) instead of 4.</param>
+    /// <param name="status">The status expected.</param>
+    [Theory]
+    [InlineData(2, 1, false, 431)]
+    [InlineData(2, 0, false, 200)]
+    [InlineData(1, 1, false, 200)]
+    [InlineData(1, 2, false, 431)]
+    [InlineData(0, 2, false, 200)]
+    [InlineData(126, 1, true, 431)]
+    [InlineData(126, 0, true, 200)]
+    [InlineData(125, 1, true, 200)]
+    [Requirement("RFC9110-5.4-2", "RFC9112-7.1.2-2")]
+    public void BoundsHeaderAndTrailerFieldsTogether(int headerFields, int trailers, bool defaultLimit, int status)
+    {
+        Platform.RequireLinuxX64();
+        int seen = -1;
+        using var server = new TestServer(x =>
+        {
+            seen = x.Trailers.Count;
+            x.Respond(200);
+        }, limits: defaultLimit ? default : new H1Limits { MaxFields = 4 });
+        using var c = new RawConnection(server.Port);
+
+        string header = string.Concat(Enumerable.Range(0, headerFields).Select(i => $"X-H{i}: {i}\r\n"));
+        string trailer = string.Concat(Enumerable.Range(0, trailers).Select(i => $"X-T{i}: {i}\r\n"));
+        c.Send($"POST / HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n{header}\r\n3\r\nabc\r\n0\r\n{trailer}\r\n");
+
+        Assert.Equal(status, c.ReadResponse().Status);
+        Assert.Equal(status == 200 ? trailers : -1, seen);
+    }
+
+    /// <summary>
     /// HEAD is answered with GET's fields (Content-Length of the body it would have had) and no
     /// body: the next response on the connection starts right after the head. GET and HEAD,
     /// the two methods every general-purpose server must support, both work on any handler.

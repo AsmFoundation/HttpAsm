@@ -47,6 +47,14 @@ HA_CLIENT_BUFFER    equ 16384   ; the input to start with (it grows as a respons
 HA_CLIENT_OUTPUT    equ 4096    ; the request head's buffer to start with
 HA_CLIENT_FIELDS    equ 256     ; response field records: the head's, then the trailers'
 
+; A response head is parsed under the default limits (HA_H1_DEFAULT_MAX_FIELDS fields), so the
+; trailers always find room after the head's records. httpasm_client_send's no-room branch
+; stays safe should that ever change (it parses into a record of its frame and refuses), but
+; is unreachable while this holds, as tests/coverage/unreachable.tsv says.
+%if HA_CLIENT_FIELDS <= HA_H1_DEFAULT_MAX_FIELDS
+  %error "HA_CLIENT_FIELDS must exceed HA_H1_DEFAULT_MAX_FIELDS: trailers need room after a full head"
+%endif
+
 struc client
     .rbuf:              resq 1
     .rcap:              resq 1
@@ -401,7 +409,9 @@ S_COUNT     equ 216     ; trailer fields
 S_LIMITS    equ 224     ; httpasm_h1_limits for the trailers (16)
 S_BODY_END  equ 240     ; the end of the body decoded so far
 S_PEEK      equ 248     ; one octet for the peek that finds unsolicited octets before a send
-S_FRAME     equ 264     ; six pushes + 264: aligned
+S_NO_ROOM   equ 256     ; 1 while the trailers parse into S_SPARE_FIELD (no record left)
+S_SPARE_FIELD equ 264   ; one httpasm_field (32): the trailers' destination with no room left
+S_FRAME     equ 296     ; six pushes + 296 + the return address: aligned
 
 global httpasm_client_send:function (httpasm_client_send.end - httpasm_client_send)
 align 16
@@ -706,15 +716,21 @@ httpasm_client_send:
     jz      .reset
     jmp     .io_error_rax
 .trailers:
-    ; The trailer section, into the records after the head's fields.
+    ; The trailer section, into the records after the head's fields. With none left (never,
+    ; while HA_CLIENT_FIELDS exceeds the head's limit: see its %if) it would go to the frame's
+    ; one record, and a section with a field is refused (-431): the limit cannot say "no
+    ; field", and the limit 1 with the array's end as the destination writes a record past the
+    ; allocation, as the server's trailers did until 2026-11-26 (connection.asm's .trailers).
     mov     qword [rsp + S_SCAN], 0
     mov     dword [rsp + S_LIMITS + httpasm_h1_limits.max_head], 0
     mov     dword [rsp + S_LIMITS + httpasm_h1_limits.max_target], 0
     mov     dword [rsp + S_LIMITS + httpasm_h1_limits.reserved], 0
+    mov     dword [rsp + S_NO_ROOM], 0
     mov     eax, HA_CLIENT_FIELDS
     sub     eax, [r15 + httpasm_client_response.head + httpasm_response_head.field_count]
     jnz     .trailer_room
-    mov     eax, 1                          ; none left: a section with a field fails (431)
+    mov     dword [rsp + S_NO_ROOM], 1
+    mov     eax, 1
 .trailer_room:
     mov     [rsp + S_LIMITS + httpasm_h1_limits.max_fields], eax
 .trailer_parse:
@@ -727,6 +743,10 @@ httpasm_client_send:
     mov     r8d, [r15 + httpasm_client_response.head + httpasm_response_head.field_count]
     shl     r8, 5
     add     r8, [rbx + client.fields]
+    cmp     dword [rsp + S_NO_ROOM], 0
+    je      .trailer_destination
+    lea     r8, [rsp + S_SPARE_FIELD]       ; no room: the frame's record, never the array's end
+.trailer_destination:
     lea     r9, [rsp + S_COUNT]
     call    httpasm_h1_parse_trailers
     test    rax, rax
@@ -738,6 +758,13 @@ httpasm_client_send:
     jz      .reset
     jmp     .io_error_rax
 .trailers_parsed:
+    cmp     dword [rsp + S_COUNT], 0
+    je      .trailers_fit                   ; an empty section fits whatever the room
+    cmp     dword [rsp + S_NO_ROOM], 0
+    je      .trailers_fit
+    mov     rax, -431                       ; a field the records have no room for
+    jmp     .bad_response
+.trailers_fit:
     add     rax, [rsp + S_BODY_END]
     mov     [rbx + client.consumed], rax
     mov     eax, [rsp + S_COUNT]
