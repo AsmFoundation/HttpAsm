@@ -479,8 +479,13 @@ HTTP/2, the drivers, the client):
      reading of CPUID and XGETBV, natively and under 13 of SDE's CPU models (from SSE3-only to
      AVX-512 with SHA512), each with the x86-64 level it must reach. All 22 models SDE offers
      matched when first run.
+   - **Error paths:** `tests/native/faults` fails each allocation of a whole server's life in
+     turn, by interposing malloc, calloc and realloc. It also fails 16 system calls, one each,
+     through seccomp. Every case runs in a child that must end by itself: no crash, no hang.
+     On the first run, 49 children ended by themselves. 23 of them saw the failure reported by
+     an API (create, start, the client's connect or send), and 26 finished whole. None crashed
+     or hung.
    - **Still to do:**
-     - the drivers' error paths (allocation and system-call failures);
      - the published attack corpora;
      - then `unreachable.tsv` and the gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and

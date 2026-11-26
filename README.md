@@ -97,6 +97,8 @@ or listed with its RFC reason in `tests/fuzz/*.triage`.
 - **runs each tier twice:** on epoll, the default, then with every server asking for io_uring
   (`HTTPASM_TEST_IO=uring`). Where io_uring is known to work (WSL, a Linux host, CI), a server
   that asks for it and falls back to epoll fails the run;
+- **runs `tests/native/faults`:** every allocation of a whole server's life failed in turn, and
+  16 system calls, each in a child that must end by itself (no crash, no hang);
 - **runs `tests/native/signals`:** 2,000 client connects under a 100 µs timer signal, all of
   which must connect;
 - **runs `tests/native/tiers`:** every multi-version routine at every tier, against an oracle
