@@ -3,8 +3,9 @@
  * tier (v1 to v4), on inputs sized around the vector widths (docs/DESIGN.md section 3, "CPU
  * tiers": a tier's version is kept only where it measures faster than the baseline, beyond the
  * A/A control's gap). A routine joins this suite when it gets a version above v1; a whole
- * routine whose versions sit inside it (httpasm_h1_parse_request) joins with the rivals suite's
- * inputs, so each tier is judged against the one below on realistic octets.
+ * routine whose versions sit inside it (httpasm_h1_parse_request, httpasm_h1_parse_response,
+ * httpasm_hpack_decode) joins with the rivals suite's inputs, so each tier is judged against the
+ * one below on realistic octets.
  *
  * Inputs are built once, deterministically, so two runs (or two machines) measure the same
  * octets.
@@ -51,6 +52,23 @@ static void add_h1_request(const char *input, const char *head)
     bench_add(&c);
 }
 
+/* add_h1_response: the tiers case of httpasm_h1_parse_response on the response head (bench.h's
+ * bench_response, the rivals suite's input): the response parser's versions (from v2 its one-pass
+ * flow and the field lines' 16-octet steps) each against the tier below on the same octets. */
+static void add_h1_response(void)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "h1_parse_response";
+    c.input = "typical response head";
+    c.data = bench_response(&c.length);
+    c.octets = c.length;
+    c.ours = bench_h1_response;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* add_hpack_decode: the tiers case of httpasm_hpack_decode on the rivals suite's block (bench.h):
  * the Huffman decoder's versions (v1's automaton, v2's table decoder) each against the tier below.
  * Left out, with a word on stderr, when the block cannot be made. */
@@ -81,6 +99,7 @@ void bench_suite_tiers(void)
     add_h1_request("small GET", bench_small_request);
     add_h1_request("browser GET", bench_browser_request);
     add_h1_request("API POST", bench_api_request);
+    add_h1_response();
     add_hpack_decode();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);

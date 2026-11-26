@@ -7,50 +7,15 @@
  * gains a version above v1 also joins the tiers suite.
  *
  * The HTTP/1.1 request heads are the rivals suite's (suite_rivals.c measures them beside
- * picohttpparser and llhttp), so they are not repeated here. Every input is fixed text, so two
- * runs, two builds or two machines measure the same octets.
+ * picohttpparser and llhttp), so they are not repeated here. The response head is the rivals
+ * suite's too (bench_response), and stays here under its first name, h1_parse_response, so the
+ * measurements recorded under it go on. Every input is fixed text, so two runs, two builds or two
+ * machines measure the same octets.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "bench.h"
-
-#define MAX_FIELDS 64
-
-/* ---- HTTP/1.1 response heads (the client's side). */
-
-static const char response_head[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Date: Thu, 26 Nov 2026 16:30:00 GMT\r\n"
-    "Content-Type: text/html; charset=utf-8\r\n"
-    "Content-Length: 48213\r\n"
-    "Cache-Control: private, max-age=0, must-revalidate\r\n"
-    "ETag: \"5f3a9c2e8b1d4f6a0e5c9b2d7a4f1e8c\"\r\n"
-    "Last-Modified: Wed, 25 Nov 2026 09:12:44 GMT\r\n"
-    "Vary: Accept-Encoding, Cookie\r\n"
-    "Set-Cookie: session=7f3a9c2e8b1d4f6a0e5c9b2d7a4f1e8c; Path=/; Secure; HttpOnly; SameSite=Lax\r\n"
-    "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload\r\n"
-    "X-Content-Type-Options: nosniff\r\n"
-    "Server: example\r\n"
-    "\r\n";
-static uint8_t response_buffer[sizeof response_head];
-
-/* parse_response: httpasm_h1_parse_response on the response head, `calls` times. The buffer is
- * writable (an obs-fold would be blanked in place); this head has none, so every call parses
- * the same octets. */
-static void parse_response(const bench_build *b, const bench_case *c, long calls)
-{
-    static httpasm_field fields[MAX_FIELDS];
-    httpasm_h1_limits limits = { .max_fields = MAX_FIELDS };
-    size_t total = 0;
-    for (long i = 0; i < calls; i++) {
-        httpasm_response_head head;
-        size_t scan = 0;
-        total += (size_t)b->api.httpasm_h1_parse_response((uint8_t *)c->data, c->length, &scan, &limits, HTTPASM_METHOD_GET, &head,
-                                                          fields);
-    }
-    bench_sink = total;
-}
 
 /* ---- Chunked bodies: decoded in place, so each call first restores the pristine encoding (the
  * copy is part of every contender's sample alike: it dilutes a ratio, never biases one). */
@@ -238,8 +203,9 @@ static void add(const char *name, const char *input, const void *data, size_t le
 /* bench_suite_parsers: registers the suite's cases (bench.h). */
 void bench_suite_parsers(void)
 {
-    memcpy(response_buffer, response_head, sizeof response_head - 1);
-    add("h1_parse_response", "typical response head", response_buffer, sizeof response_head - 1, sizeof response_head - 1, parse_response);
+    size_t response_length;
+    const uint8_t *response = bench_response(&response_length);
+    add("h1_parse_response", "typical response head", response, response_length, response_length, bench_h1_response);
 
     size_t small = encode_chunked(256, 16), large = 0;
     snprintf(chunked_labels[0], sizeof chunked_labels[0], "256 chunks of 16 octets");

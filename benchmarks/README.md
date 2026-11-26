@@ -19,13 +19,15 @@ round, in one process pinned to one CPU, in a new random order each round. Three
 
 - **`tiers`:** each multi-version routine at v1, v2, v3 and v4, on inputs around the vector
   widths. A routine joins when it gets a version above v1; today that is
-  `httpasm_field_value_scan`.
+  `httpasm_field_value_scan`, and the whole routines whose versions sit inside them: the
+  request parser (the rivals suite's three heads), the response parser and the HPACK decoder.
 - **`parsers`:** the library's whole routines on realistic inputs, at the best tier the CPU has
   and at v1. The routines: response heads, chunked bodies (small and large chunks), field-name
   lookup, token validation, response writing, HPACK encoding, and HTTP/2's request rules. These
   are the hot paths of phase H step 4.
 - **`rivals`:** the HTTP/1.1 request parser beside picohttpparser (h2o) and llhttp (Node.js) on
-  three request heads, and the HPACK decoder beside nghttp2. The rivals are the sources
+  three request heads, the response parser beside picohttpparser's and llhttp's on a typical
+  response head, and the HPACK decoder beside nghttp2. The rivals are the sources
   `tests/tools.sh` pins, compiled with `-O3 -march=native`, their best (picohttpparser's and
   llhttp's SSE4.2 paths need it). Mind what each one does: picohttpparser splits a head into
   lines and checks almost nothing else; llhttp checks the grammar; HttpAsm also applies RFC
@@ -188,6 +190,27 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 `HELLO_IO_A` and `HELLO_IO_B` choose each build's backend (`epoll`, the default, or `uring`).
 
 ## Results
+
+**2026-11-27: phase H step 4, the one-pass response head.** The client's parser kept the classic
+flow: the head's end searched line by line (`ha_h1_head_end`), then the status-line, then every
+field line read again. From v2 up a head searched from its start is now read once, as requests
+are: the status-line's fixed octets, the reason-phrase 16 octets a step, the field lines by
+`ha_h1_fields_v2` in a response mode (its own rule table: the framing rules only). Anything it
+would not accept, an obs-fold to rewrite included, goes back to the classic flow untouched.
+The response head (now `bench_response`, shared by three suites) is timed beside picohttpparser's
+`phr_parse_response` and llhttp's response mode (`rivals/h1_response`) and at every tier
+(`tiers/h1_parse_response`):
+
+| Contender | Instructions | Median ns (41-61 rounds) | |
+|---|---:|---:|---|
+| HttpAsm v1 (classic flow) | 5,123 | 405 | |
+| HttpAsm v2, v3, v4 (one pass) | 2,081 | 185.6 | 2.16x over v1 [2.11-2.23] |
+| picohttpparser dd573d8 | 1,701 | 184.6 | 1.009x HttpAsm's best: noise |
+| llhttp 9.4.4 | 3,904 | 401.4 | HttpAsm 2.16x faster |
+
+Against 3118fc7 (`bench.sh ab`, 3 processes): the best tier 1.60-1.62x faster (proven), v1 not
+proven (1.02-1.09x, the processes disagree). The request heads, whose field lines now load their
+rule table from the stack, show no difference at the best tier (0.98-1.01x on all three heads).
 
 **2026-11-27: phase H step 4, HPACK's Huffman encoding.** `hp_string_encode` measured a string's
 code first (a table load and an add per octet, the adds in one chain) and then wrote it an octet

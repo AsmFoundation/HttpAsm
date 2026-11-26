@@ -403,14 +403,16 @@ static int parse_same(const parse_result *a, const parse_result *b)
     return memcmp(a->fields, b->fields, n * sizeof a->fields[0]) == 0;
 }
 
-/* parse_check: one head at every tier, ending `gap` octets before the guard page (the octets
+/* parse_check_from: one head at every tier, ending `gap` octets before the guard page (the octets
  * between are part of buf: the start of a body, as the caller would hand them over), so a version
  * that reads past the head into the unmapped page dies with SIGSEGV. Every tier must agree with
  * v1, which the .NET suite proves against the RFC.
- *   head, n  the head (n <= PAGE - gap); gap  the octets after it, before the guard page.
+ *   head, n  the head (n <= PAGE - gap); gap  the octets after it, before the guard page;
+ *   scan     the *scan_from handed in: 0 for a message's first call, or one past the data (a
+ *            stale value, which the parser ignores: from v2 up the one-pass flow then runs).
  * Returns 0 when every tier agrees; 1, after reporting the tier and the head, otherwise. Leaves
  * the last tier set. */
-static int parse_check(const uint8_t *head, size_t n, size_t gap)
+static int parse_check_from(const uint8_t *head, size_t n, size_t gap, size_t scan)
 {
     static parse_result expected, actual;
     uint8_t *buf = page_end - n - gap;
@@ -418,20 +420,26 @@ static int parse_check(const uint8_t *head, size_t n, size_t gap)
     for (size_t i = 0; i < gap; i++)
         buf[n + i] = (uint8_t)rng();                   /* whatever follows a head */
     httpasm_cpu_limit(caps[0]);
-    parse_at(buf, n + gap, &expected);
+    parse_at_from(buf, n + gap, scan, &expected);
     for (size_t t = 1; t < TIERS; t++) {
         uint64_t features = httpasm_cpu_limit(caps[t]);
-        parse_at(buf, n + gap, &actual);
+        parse_at_from(buf, n + gap, scan, &actual);
         if (!parse_same(&expected, &actual)) {
             fprintf(stderr, "httpasm_h1_parse_request at %s (features %#llx) differs from v1: returned %lld (error %u, %u fields), "
-                            "v1 %lld (error %u, %u fields); the head ends %zu octets before the guard page\n",
+                            "v1 %lld (error %u, %u fields); the head ends %zu octets before the guard page, the search resumed at %zu\n",
                     cap_names[t], (unsigned long long)features, (long long)actual.ret, actual.request.error, actual.request.field_count,
-                    (long long)expected.ret, expected.request.error, expected.request.field_count, gap);
+                    (long long)expected.ret, expected.request.error, expected.request.field_count, gap, scan);
             dump("head", buf, n);
             return 1;
         }
     }
     return 0;
+}
+
+/* parse_check: parse_check_from for a message's first call (*scan_from 0). */
+static int parse_check(const uint8_t *head, size_t n, size_t gap)
+{
+    return parse_check_from(head, n, gap, 0);
 }
 
 /* put: appends text to a head being built. h, n: the head and its length so far (advanced);
@@ -727,6 +735,11 @@ static int parse_variety(long randoms)
         if (parse_check_resumed(h, n, n == 0 ? 0 : (size_t)(rng() % n)))
             return 1;
         checked += 2;
+        if (i % 8 == 0) {                               /* a stale *scan_from past the data */
+            if (parse_check_from(h, n, gap, n + gap + 1 + (size_t)(rng() % 64)))
+                return 1;
+            checked++;
+        }
         if (i % 16 == 0) {
             for (size_t cut = 1; cut < n; cut++) {
                 if (parse_check(h, cut, 0))
@@ -737,6 +750,307 @@ static int parse_variety(long randoms)
     }
     parse_limits = default_limits;
     printf("httpasm_h1_parse_request: %ld parses of varied heads, prefixes and resumed reads, every tier agrees with v1\n", checked);
+    return 0;
+}
+
+/* ---- httpasm_h1_parse_response: the client's two flows ---------------------------------------
+ * From v2 up, a head searched from its start is parsed in one pass (response.asm's .one_pass and
+ * ha_h1_fields_v2 in the response mode), which accepts or hands the head to the classic flow (the
+ * head's end searched first, then the status-line, then ha_h1_fields). v1 runs the classic flow
+ * alone, so comparing every tier with v1 proves both flows equal, as for requests. One difference
+ * shapes the checks: this parser writes its buffer (the classic flow replaces an obs-fold with
+ * SP in place), so every tier parses its own fresh copy of the input at the same address, and the
+ * octets each leaves behind must equal v1's too. */
+
+/* response_result: everything one response parse hands back: its return value, the scan
+ * position, the head record and every field record (pointers into the one address every tier
+ * parses at, so equal results have equal pointers). */
+typedef struct response_result {
+    int64_t ret;
+    size_t scan;
+    httpasm_response_head head;
+    httpasm_field fields[PARSE_FIELDS];
+} response_result;
+
+/* The request's method every response parse passes (HTTPASM_METHOD_*): the framing reads it
+ * (HEAD: no body; CONNECT: a 2xx opens a tunnel). Drawn per head by response_variety. */
+static uint32_t response_method = HTTPASM_METHOD_GET;
+
+/* response_at_from: parses buf[0..len) at the tier now set, with parse_limits and
+ * response_method, into *out (zeroed first, so unset parts compare equal), the search resuming at
+ * `scan` (0 for a response's first call). Writes buf as the parser does. */
+static void response_at_from(uint8_t *buf, size_t len, size_t scan, response_result *out)
+{
+    memset(out, 0, sizeof *out);
+    out->scan = scan;
+    out->ret = httpasm_h1_parse_response(buf, len, &out->scan, &parse_limits, response_method, &out->head, out->fields);
+}
+
+/* response_same: whether two parses agree on everything: the return, the scan position, every
+ * field of the head but its fields pointer (each parse has its own array), and the records the
+ * head counts. Returns 1 when they agree, 0 otherwise. */
+static int response_same(const response_result *a, const response_result *b)
+{
+    if (a->ret != b->ret || a->scan != b->scan)
+        return 0;
+    httpasm_response_head ha = a->head, hb = b->head;
+    ha.fields = hb.fields = NULL;
+    if (memcmp(&ha, &hb, sizeof ha) != 0)
+        return 0;
+    uint32_t n = a->head.field_count < PARSE_FIELDS ? a->head.field_count : PARSE_FIELDS;
+    return memcmp(a->fields, b->fields, n * sizeof a->fields[0]) == 0;
+}
+
+/* response_report: prints a mismatch between a tier's response parse and v1's.
+ *   what  which call differed; t  the tier; features  its bits; actual, expected  the results;
+ *   buf, n  the input as it was handed over (before the parse wrote it). */
+static void response_report(const char *what, size_t t, uint64_t features, const response_result *actual,
+                            const response_result *expected, const uint8_t *buf, size_t n)
+{
+    fprintf(stderr, "httpasm_h1_parse_response (%s) at %s (features %#llx) differs from v1: returned %lld (error %u, %u fields, "
+                    "flags %#x, scan %zu), v1 %lld (error %u, %u fields, flags %#x, scan %zu); method %u, limits head %u fields %u\n",
+            what, cap_names[t], (unsigned long long)features, (long long)actual->ret, actual->head.error, actual->head.field_count,
+            actual->head.flags, actual->scan, (long long)expected->ret, expected->head.error, expected->head.field_count,
+            expected->head.flags, expected->scan, response_method, parse_limits.max_head, parse_limits.max_fields);
+    dump("head", buf, n);
+}
+
+/* response_check_from: one input at every tier, ending `gap` octets before the guard page (the
+ * octets between are part of buf: the start of a body, as the client would hand them over), so a
+ * version that reads past the head into the unmapped page dies with SIGSEGV. Each tier parses a
+ * fresh copy at the same address; its result and the octets it leaves in buf must equal v1's.
+ *   head, n  the input (n + gap <= PAGE); gap  the octets after it, before the guard page;
+ *   scan     the *scan_from handed in: 0 for a response's first call, or one past the data (a
+ *            stale value, which the parser ignores: from v2 up the one-pass flow then runs).
+ * Returns 0 when every tier agrees; 1, after reporting the tier and the input, otherwise. Leaves
+ * the last tier set. */
+static int response_check_from(const uint8_t *head, size_t n, size_t gap, size_t scan)
+{
+    static response_result expected, actual;
+    static uint8_t input[PAGE], after[PAGE];
+    uint8_t *buf = page_end - n - gap;
+    memcpy(input, head, n);
+    for (size_t i = 0; i < gap; i++)
+        input[n + i] = (uint8_t)rng();                  /* whatever follows a head */
+    for (size_t t = 0; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        memcpy(buf, input, n + gap);                    /* the parse may have rewritten the last copy */
+        response_at_from(buf, n + gap, scan, t == 0 ? &expected : &actual);
+        if (t == 0) {
+            memcpy(after, buf, n + gap);
+            continue;
+        }
+        if (!response_same(&expected, &actual) || memcmp(after, buf, n + gap) != 0) {
+            response_report(memcmp(after, buf, n + gap) != 0 ? "the octets left in buf" : "the result", t, features, &actual,
+                            &expected, input, n + gap);
+            fprintf(stderr, "the search resumed at %zu\n", scan);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* response_check: response_check_from for a response's first call (*scan_from 0). */
+static int response_check(const uint8_t *head, size_t n, size_t gap)
+{
+    return response_check_from(head, n, gap, 0);
+}
+
+/* response_check_resumed: a head arriving in two reads, as a client sees one: its first `cut`
+ * octets (against the guard page: incomplete, or already refused), then all n octets, the second
+ * call resuming where the first left the search (at a new address, as a grown buffer may be; the
+ * offsets carry over). The resumed call takes the classic flow at every tier. Both calls, and the
+ * octets each leaves in its buffer, must agree with v1's at every tier.
+ *   head, n  the whole head (n <= PAGE); cut  the first read's length (cut <= n).
+ * Returns 0 when every tier agrees; 1, after reporting, otherwise. Leaves the last tier set. */
+static int response_check_resumed(const uint8_t *head, size_t n, size_t cut)
+{
+    static response_result expected[2], actual[2];
+    static uint8_t after[2][PAGE];
+    for (size_t t = 0; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        response_result *r = t == 0 ? expected : actual;
+        int first_octets = 0, whole_octets = 0;         /* whether this tier left other octets than v1 */
+        uint8_t *first = page_end - cut;
+        memcpy(first, head, cut);
+        response_at_from(first, cut, 0, &r[0]);
+        if (t == 0)
+            memcpy(after[0], first, cut);
+        else
+            first_octets = memcmp(after[0], first, cut) != 0;
+        uint8_t *whole = page_end - n;
+        memcpy(whole, head, n);
+        response_at_from(whole, n, r[0].ret == 0 ? r[0].scan : 0, &r[1]);
+        if (t == 0)
+            memcpy(after[1], whole, n);
+        else
+            whole_octets = memcmp(after[1], whole, n) != 0;
+        if (t == 0)
+            continue;
+        if (!response_same(&expected[0], &actual[0]) || first_octets) {
+            response_report("the first read", t, features, &actual[0], &expected[0], head, cut);
+            return 1;
+        }
+        if (!response_same(&expected[1], &actual[1]) || whole_octets) {
+            response_report("the resumed read", t, features, &actual[1], &expected[1], head, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* reason_octet: a random octet a reason-phrase may hold (RFC 9112 4: HTAB, SP, VCHAR,
+ * obs-text): mostly letters and SP, now and then HTAB, punctuation or obs-text. */
+static uint8_t reason_octet(void)
+{
+    unsigned r = (unsigned)(rng() % 100);
+    if (r < 70)
+        return (uint8_t)(r < 12 ? ' ' : 'a' + rng() % 26);
+    if (r < 75)
+        return '\t';
+    if (r < 90)
+        return (uint8_t)(0x21 + rng() % 94);            /* any VCHAR */
+    return (uint8_t)(0x80 + rng() % 128);               /* obs-text */
+}
+
+/* status_line: appends a status-line to h (advancing *n), drawn so that every check of the
+ * status-line meets both of its outcomes: versions 1.1, 1.0, a later minor, another major, or
+ * malformed; status codes of every framing class (1xx, 2xx, 204, 304, 000-099, past 599) and
+ * malformed ones (a letter, two or four digits); one SP each, sometimes none or two; reasons
+ * empty, short or up to 300 octets (past several 16-octet steps), sometimes with a CTL, DEL or
+ * a bare CR inside; CRLF, or now and then a bare LF. */
+static void status_line(uint8_t *h, size_t *n)
+{
+    static const char *const versions[] = { "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1",
+                                            "HTTP/1.0", "HTTP/1.0", "HTTP/1.9", "HTTP/2.0", "HTTP/0.9", "HTTP/1.",
+                                            "http/1.1", "HTTP/11", "HTTP/1.x", "HTTP 1.1", "HTTPS/1.1" };
+    static const char *const codes[] = { "200", "200", "200", "200", "201", "204", "206", "301", "304", "404", "500",
+                                         "100", "101", "103", "199", "099", "000", "600", "999", "2x0", "20", "2000" };
+    put(h, n, versions[rng() % (sizeof versions / sizeof versions[0])]);
+    unsigned r = (unsigned)(rng() % 100);
+    put(h, n, r < 96 ? " " : r < 98 ? "  " : "");
+    put(h, n, codes[rng() % (sizeof codes / sizeof codes[0])]);
+    r = (unsigned)(rng() % 100);
+    if (r < 3) {                                        /* no SP after the code (RFC 9112 4: it is required) */
+        put(h, n, rng() % 60 ? "\r\n" : "\n");
+        return;
+    }
+    put(h, n, r < 5 ? "\t" : " ");
+    r = (unsigned)(rng() % 100);
+    size_t length = r < 15 ? 0 : r < 70 ? 1 + (size_t)(rng() % 20) : (size_t)(rng() % 300);
+    size_t start = *n;
+    for (size_t k = 0; k < length; k++)
+        h[(*n)++] = reason_octet();
+    if (length > 0 && rng() % 25 == 0) {                /* a CTL inside the reason */
+        static const uint8_t ctls[] = { 0x00, 0x01, 0x0B, 0x1F, 0x7F, 0x0D, 0x0D, 0x0A };
+        h[start + rng() % length] = ctls[rng() % sizeof ctls];
+    }
+    put(h, n, rng() % 60 ? "\r\n" : "\n");
+}
+
+/* response_framing_line: appends one field line that a response's rules read (Content-Length,
+ * Transfer-Encoding, Connection) or that only a request's rules read (Host, Expect, TE, Upgrade:
+ * plain fields in a response, so a value a request would refuse passes here), in a random case,
+ * with a value that passes its rule or fails it; now and then an obs-fold line continuing it.
+ * Every branch of H1_FIELD_RULES that a response reaches, in both expansions (ha_h1_fields, which
+ * v1 runs, and ha_h1_fields_v2 in the response mode). */
+static void response_framing_line(uint8_t *h, size_t *n)
+{
+    static const char *const lines[] = {
+        "Content-Length: 12", "content-length: 0", "Content-Length: 12, 12", "Content-Length: 1, 2",
+        "Content-Length: -1", "Content-Length: 99999999999999999999", "Content-Length:", "Content-Length: 12,\t12",
+        "Transfer-Encoding: chunked", "transfer-encoding: gzip, chunked", "Transfer-Encoding: chunked, gzip",
+        "Transfer-Encoding: gzip", "Transfer-Encoding: chunked;x=1", "Transfer-Encoding: \"q\"", "Transfer-Encoding: ,",
+        "Transfer-Encoding: gzip,\tchunked",
+        "Connection: close", "connection: keep-alive", "Connection: Upgrade, close", "Connection: x y",
+        "Connection: close,\tkeep-alive", "Connection: closx", "Connection: keep-alivx",
+        "Host: a b", "Expect: 200-ok", "TE: deflate", "Upgrade: websocket", "Set-Cookie: a=b; Path=/",
+    };
+    put(h, n, lines[rng() % (sizeof lines / sizeof lines[0])]);
+    put(h, n, "\r\n");
+    if (rng() % 20 == 0)                                /* an obs-fold continuing that line */
+        put(h, n, rng() % 2 ? " more\r\n" : "\t\tmore, chunked\r\n");
+}
+
+/* response_variety: `randoms` response heads drawn from every part of the grammar (status_line,
+ * response_framing_line, field_line with its obs-fold lines; sometimes a bare LF or no end at all),
+ * for a request method drawn among GET, HEAD, CONNECT and POST, each checked complete at a random
+ * distance from the guard page, with random limits now and then (a max_head at or near the head's
+ * length, few max_fields), resumed after a random cut, and, for one in 16, cut after every octet
+ * (each prefix against the guard page). Before them, every reason-phrase length 0-70 at the
+ * distances where its 16-octet steps meet the guard page. Returns 0 when every one agreed at every
+ * tier, 1 at the first that did not. */
+static int response_variety(long randoms)
+{
+    static uint8_t h[PAGE];
+    static const size_t gaps[] = { 0, 1, 2, 15, 16, 17, 18, 33, 100 };
+    static const size_t edges[] = { 0, 1, 15, 16, 17 }; /* a reason's last steps against the guard page */
+    static const uint32_t methods[] = { HTTPASM_METHOD_GET, HTTPASM_METHOD_GET, HTTPASM_METHOD_HEAD,
+                                        HTTPASM_METHOD_CONNECT, HTTPASM_METHOD_POST };
+    long checked = 0;
+    parse_limits = default_limits;
+    response_method = HTTPASM_METHOD_GET;
+    for (size_t reason = 0; reason <= 70; reason++) {
+        for (int fields = 0; fields < 2; fields++) {
+            size_t n = 0;
+            put(h, &n, "HTTP/1.1 200 ");
+            for (size_t k = 0; k < reason; k++)
+                h[n++] = (uint8_t)('A' + k % 26);
+            put(h, &n, fields ? "\r\nContent-Length: 5\r\n\r\n" : "\r\n\r\n");
+            for (size_t g = 0; g < sizeof edges / sizeof edges[0]; g++) {
+                if (response_check(h, n, edges[g]))
+                    return 1;
+                checked++;
+            }
+        }
+    }
+    for (long i = 0; i < randoms; i++) {
+        size_t n = 0;
+        status_line(h, &n);
+        size_t lines = (size_t)(rng() % 20);
+        for (size_t l = 0; l < lines && n < PAGE - 700; l++) {
+            unsigned r = (unsigned)(rng() % 10);
+            if (r < 3)
+                response_framing_line(h, &n);
+            else
+                field_line(h, &n);
+        }
+        unsigned end = (unsigned)(rng() % 100);
+        put(h, &n, end < 96 ? "\r\n" : end < 98 ? "\n" : "");
+        if (rng() % 4 == 0)                             /* the start of the next message, or of a body */
+            put(h, &n, rng() % 2 ? "HTTP/1.1 200 OK\r\n" : "hello");
+
+        response_method = methods[rng() % (sizeof methods / sizeof methods[0])];
+        parse_limits = default_limits;
+        if (rng() % 5 == 0) {
+            static const uint32_t fields[] = { PARSE_FIELDS, 1, 2, 3, 5 };
+            int64_t heads[] = { 0, (int64_t)n - 1, (int64_t)n, (int64_t)n + 1, (int64_t)n / 2, 17, 40 };
+            int64_t head = heads[rng() % (sizeof heads / sizeof heads[0])];
+            parse_limits.max_head = head > 0 ? (uint32_t)head : 0;
+            parse_limits.max_fields = fields[rng() % (sizeof fields / sizeof fields[0])];
+        }
+        size_t gap = gaps[rng() % (sizeof gaps / sizeof gaps[0])];
+        if (response_check(h, n, gap))
+            return 1;
+        if (response_check_resumed(h, n, n == 0 ? 0 : (size_t)(rng() % n)))
+            return 1;
+        checked += 2;
+        if (i % 8 == 0) {                               /* a stale *scan_from past the data */
+            if (response_check_from(h, n, gap, n + gap + 1 + (size_t)(rng() % 64)))
+                return 1;
+            checked++;
+        }
+        if (i % 16 == 0) {
+            for (size_t cut = 1; cut < n; cut++) {
+                if (response_check(h, cut, 0))
+                    return 1;
+                checked++;
+            }
+        }
+    }
+    parse_limits = default_limits;
+    response_method = HTTPASM_METHOD_GET;
+    printf("httpasm_h1_parse_response: %ld parses of varied heads, prefixes and resumed reads, every tier agrees with v1\n", checked);
     return 0;
 }
 
@@ -986,6 +1300,8 @@ int main(int argc, char **argv)
         failed = parse_tiers(randoms / 10);
     if (!failed)
         failed = parse_variety(randoms / 20);
+    if (!failed)
+        failed = response_variety(randoms / 20);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

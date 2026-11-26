@@ -208,14 +208,39 @@ internal static unsafe class H1Messages
     /// <returns>What the parser reported.</returns>
     private static ParsedResponse ParseResponse(string text, H1Limits limits, int method, out string joined)
     {
+        nuint scanFrom = 0;
+        return ParseResponse(text, limits, method, ref scanFrom, out joined);
+    }
+
+    /// <summary>
+    /// Parses a response head with the search for its end resuming where <paramref name="scanFrom"/>
+    /// says: 0 for a response's first call; any other value is what a caller carried over (or kept
+    /// by mistake: one past the data is ignored, and the search starts over).
+    /// </summary>
+    /// <param name="text">The octets, as Latin-1 text.</param>
+    /// <param name="scanFrom">The resume point handed in; receives the one the parser left (0 after a head or a refusal).</param>
+    /// <param name="method">The request's method id (GET by default).</param>
+    /// <returns>What the parser reported.</returns>
+    public static ParsedResponse ParseResponseFrom(string text, ref nuint scanFrom, int method = 1) =>
+        ParseResponse(text, new H1Limits { MaxFields = 64 }, method, ref scanFrom, out _);
+
+    /// <summary>Parses a response head, the search for its end resuming at a given point.</summary>
+    /// <param name="text">The octets, as Latin-1 text.</param>
+    /// <param name="limits">The limits (MaxFields at most 64: the field array's size).</param>
+    /// <param name="method">The request's method id.</param>
+    /// <param name="scanFrom">The resume point handed in; receives the one the parser left.</param>
+    /// <param name="joined">Receives the buffer after parsing (obs-fold is joined in place).</param>
+    /// <returns>What the parser reported.</returns>
+    private static ParsedResponse ParseResponse(string text, H1Limits limits, int method, ref nuint scanFrom, out string joined)
+    {
         byte[] buffer = Encoding.Latin1.GetBytes(text);
         var fields = new HttpField[64];
-        nuint scanFrom = 0;
         ResponseHead head;
         fixed (byte* p = buffer)
         fixed (HttpField* f = fields)
+        fixed (nuint* s = &scanFrom)                // a ref may point into a movable object: pinned for the call
         {
-            long result = Native.H1ParseResponse(p, (nuint)buffer.Length, &scanFrom, &limits, (uint)method, &head, f);
+            long result = Native.H1ParseResponse(p, (nuint)buffer.Length, s, &limits, (uint)method, &head, f);
             var parsed = new List<ParsedField>();
             for (int i = 0; i < head.FieldCount; i++)
             {

@@ -714,6 +714,20 @@ HTTP/2, the drivers, the client):
      back to the state machine at that octet, unchanged: 2.6x faster on 16-octet chunks, 1.04x
      on 1 KiB ones (the copy dominates). Serves every tier; the chunked fuzzer's oracle checks
      it whole, in reads and one octet at a time (4.5 million inputs, the corpus merged).
+   - **The one-pass response head** (2026-11-27), the client's side of the same change. From
+     v2 up, a response head searched from its start is read once: the status-line's 13 fixed
+     octets by the classic checks, the reason-phrase 16 octets a step to its CR, and the field
+     lines by `ha_h1_fields_v2` in the response mode (a second rule table, `h1_response_rule`:
+     only the framing rules). The response parser rewrites an obs-fold in place, which only the
+     classic flow does: the one-pass flow hands such a head back untouched, as it hands back a
+     refusal, a cut head or a step near a page's end, so the two flows cannot disagree
+     (response.asm's `.one_pass`). A typical 200 with twelve fields parses 2.16x faster than
+     at v1 (186 ns) and 1.60-1.62x faster than before (A/B, 3 processes); picohttpparser's lead
+     of 1.6x is gone (1.009x, noise), and llhttp takes 2.16x as long. `tests/native/tiers` adds
+     330,147 response parses at every tier, each tier on a fresh copy of the input with the
+     octets each parse leaves in the buffer compared too (the obs-fold rewrite), and a stale
+     resume point past the data (now documented in `httpasm.h`: ignored, the search starts
+     over), which the coverage gate found untested.
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's

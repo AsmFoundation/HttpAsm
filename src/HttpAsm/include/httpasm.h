@@ -332,7 +332,10 @@ const uint8_t *httpasm_field_name(uint32_t id, size_t *length);
  *        are filled, with pointers into buf; *scan_from is reset to 0.
  *   0    the head is incomplete: call again with more octets appended (the buffer may move; the
  *        offsets may not). *scan_from remembers where the search for the head's end resumes;
- *        set it to 0 before each new message.
+ *        set it to 0 before each new message. A *scan_from past len (a value left over from a
+ *        longer buffer) is ignored and the search starts over, so a stale one costs a rescan,
+ *        never a missed line; one at or below len is trusted: octets before it are not searched
+ *        again.
  *   < 0  -status (400, 414, 417, 431, 501 or 505): answer with that status and close the
  *        connection. request->error names the rule. *scan_from is reset to 0.
  * limits may be NULL (every default); fields must hold limits->max_fields records (default 128).
@@ -361,9 +364,10 @@ int64_t httpasm_h1_parse_trailers(uint8_t *buf, size_t len, size_t *scan_from,
 
 /* The client's side: one response head. request_method is the request's HTTPASM_METHOD_* (HEAD
  * and CONNECT decide the framing). buf is writable: an obs-fold is replaced with SP in place, as
- * RFC 9112 5.2 requires of a user agent. Returns the head's length, 0 incomplete, -400 (close
- * and discard; head->error names the rule) or -431. A 1xx comes back with
- * HTTPASM_RESPONSE_HEAD_NO_BODY; read the final response after it. */
+ * RFC 9112 5.2 requires of a user agent. Returns the head's length, 0 incomplete (*scan_from as
+ * for httpasm_h1_parse_request, a stale one past len included), -400 (close and discard;
+ * head->error names the rule) or -431. A 1xx comes back with HTTPASM_RESPONSE_HEAD_NO_BODY; read
+ * the final response after it. */
 int64_t httpasm_h1_parse_response(uint8_t *buf, size_t len, size_t *scan_from,
                                   const httpasm_h1_limits *limits, uint32_t request_method,
                                   httpasm_response_head *head, httpasm_field *fields);

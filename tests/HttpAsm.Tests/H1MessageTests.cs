@@ -273,6 +273,30 @@ public sealed class H1MessageTests
     }
 
     /// <summary>
+    /// A resume point past the data (a client that kept a stale scan_from for a new, shorter
+    /// buffer) is ignored: the search starts at the head's first octet, and the head parses as
+    /// from 0, from v2 up by the one-pass flow (response.asm's entry). Incomplete, it asks for
+    /// more with a resume point inside the data again.
+    /// </summary>
+    [Fact]
+    public void ReadsAResponseFromAStaleResumePoint()
+    {
+        Platform.RequireLinuxX64();
+        string head = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n";
+        nuint scanFrom = (nuint)head.Length + 100;
+        ParsedResponse r = H1Messages.ParseResponseFrom(head + "hello", ref scanFrom);
+        Assert.Equal(head.Length, r.Result);
+        Assert.Equal(0u, (uint)scanFrom);
+        Assert.Equal(200, r.Status);
+        Assert.Equal(5ul, r.ContentLength);
+
+        string part = head[..20];
+        scanFrom = (nuint)head.Length;                              // past the 20 octets handed over
+        Assert.Equal(0, H1Messages.ParseResponseFrom(part, ref scanFrom).Result);
+        Assert.Equal((nuint)part.Length, scanFrom);
+    }
+
+    /// <summary>
     /// The writers send only what HttpAsm's own readers accept (tests/fuzz/h1_write found both
     /// gaps, 2026-11-26). A Content-Length past 2^63 - 1 is refused by both writers, as the
     /// parsers refuse it (RFC9110-8.6-10 makes recipients guard against such numerals). A

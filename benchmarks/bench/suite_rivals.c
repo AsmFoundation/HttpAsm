@@ -6,6 +6,8 @@
  *   HTTP/1.1 request heads: httpasm_h1_parse_request; picohttpparser's phr_parse_request (h2o);
  *   llhttp (Node.js), with callbacks that keep every span, which is what a server needs and
  *   what the other two hand back anyway.
+ *   HTTP/1.1 response heads (the client's side): httpasm_h1_parse_response; picohttpparser's
+ *   phr_parse_response; llhttp in its response mode, every span kept the same way.
  *   HPACK header blocks: httpasm_hpack_decode; nghttp2's nghttp2_hd_inflate_hd3.
  *
  * HttpAsm runs at its best tier and at v1; the rivals are the sources tests/tools.sh pins (the
@@ -149,6 +151,103 @@ const char bench_api_request[] =
     "X-Request-Id: 4b8e2c6a-91f3-4d7e-b5a0-2f6c8d1e9a37\r\n"
     "Idempotency-Key: 0f9c1b2a-3d4e-5f60-7182-93a4b5c6d7e8\r\n"
     "\r\n";
+
+/* ---- HTTP/1.1 response heads (the client's side). */
+
+/* The response head (bench.h): a typical 200 for a page, twelve fields. Fixed octets. */
+static const char response_head[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Date: Thu, 26 Nov 2026 16:30:00 GMT\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "Content-Length: 48213\r\n"
+    "Cache-Control: private, max-age=0, must-revalidate\r\n"
+    "ETag: \"5f3a9c2e8b1d4f6a0e5c9b2d7a4f1e8c\"\r\n"
+    "Last-Modified: Wed, 25 Nov 2026 09:12:44 GMT\r\n"
+    "Vary: Accept-Encoding, Cookie\r\n"
+    "Set-Cookie: session=7f3a9c2e8b1d4f6a0e5c9b2d7a4f1e8c; Path=/; Secure; HttpOnly; SameSite=Lax\r\n"
+    "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload\r\n"
+    "X-Content-Type-Options: nosniff\r\n"
+    "Server: example\r\n"
+    "\r\n";
+
+/* bench_response: the writable copy of the response head (bench.h), made on the first call: the
+ * parser may write its buffer, and a string literal may sit in read-only memory.
+ *   length  out: the head's length. Returns the copy. */
+uint8_t *bench_response(size_t *length)
+{
+    static uint8_t copy[sizeof response_head];
+    static int made;
+    if (!made) {
+        memcpy(copy, response_head, sizeof response_head);
+        made = 1;
+    }
+    *length = sizeof response_head - 1;
+    return copy;
+}
+
+/* bench_h1_response: httpasm_h1_parse_response on the case's head, `calls` times (bench.h: the
+ * parsers and tiers suites run it too). The head holds no obs-fold, so no call writes it and
+ * every call parses the same octets. */
+void bench_h1_response(const bench_build *b, const bench_case *c, long calls)
+{
+    static httpasm_field fields[MAX_FIELDS];
+    httpasm_h1_limits limits = { .max_fields = MAX_FIELDS };
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        httpasm_response_head head;
+        size_t scan = 0;
+        total += (size_t)b->api.httpasm_h1_parse_response((uint8_t *)c->data, c->length, &scan, &limits, HTTPASM_METHOD_GET, &head,
+                                                          fields);
+    }
+    bench_sink = total;
+}
+
+/* pico_h1_response: picohttpparser's phr_parse_response on the case's head, `calls` times. */
+static void pico_h1_response(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    struct phr_header headers[MAX_FIELDS];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        const char *reason;
+        size_t reason_length, count = MAX_FIELDS;
+        int minor, status;
+        total += (size_t)phr_parse_response((const char *)c->data, c->length, &minor, &status, &reason, &reason_length, headers, &count,
+                                            0);
+    }
+    bench_sink = total;
+}
+
+/* llhttp_h1_response: llhttp in its response mode on the case's head, `calls` times, every span
+ * (the reason, each name and value) kept; it pauses at the head's end (headers_done), before the
+ * body the head announces. */
+static void llhttp_h1_response(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    static llhttp_settings_t settings;
+    static int ready;
+    if (!ready) {
+        llhttp_settings_init(&settings);
+        settings.on_status = keep;
+        settings.on_header_field = keep;
+        settings.on_header_value = keep;
+        settings.on_headers_complete = headers_done;
+        ready = 1;
+    }
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        llhttp_t parser;
+        spans.count = 0;
+        llhttp_init(&parser, HTTP_RESPONSE, &settings);
+        total += (size_t)llhttp_execute(&parser, (const char *)c->data, c->length) + spans.count;
+    }
+    bench_sink = total;
+}
+
+static const bench_rival h1_response_rivals[] = {
+    { "picohttpparser dd573d8", pico_h1_response },
+    { "llhttp 9.4.4", llhttp_h1_response },
+};
 
 /* ---- HPACK header blocks: each contender decodes the block `calls` times; the block indexes
  * nothing, so no table ever changes and every call does the same work. */
@@ -296,6 +395,10 @@ void bench_suite_rivals(void)
     add("h1_request", "small GET", bench_small_request, sizeof bench_small_request - 1, bench_h1_request, h1_rivals, n);
     add("h1_request", "browser GET", bench_browser_request, sizeof bench_browser_request - 1, bench_h1_request, h1_rivals, n);
     add("h1_request", "API POST", bench_api_request, sizeof bench_api_request - 1, bench_h1_request, h1_rivals, n);
+    size_t response_length;
+    const uint8_t *response = bench_response(&response_length);
+    add("h1_response", "typical response head", response, response_length, bench_h1_response, h1_response_rivals,
+        sizeof h1_response_rivals / sizeof h1_response_rivals[0]);
     const uint8_t *hpack_block;
     size_t hpack_length;
     if (bench_hpack_block(&hpack_block, &hpack_length) != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {

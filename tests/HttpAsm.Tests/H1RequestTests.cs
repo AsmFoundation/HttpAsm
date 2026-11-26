@@ -78,6 +78,28 @@ public sealed class H1RequestTests
         Assert.Equal(Abi.RequestContentLength, r.Flags & Abi.RequestContentLength);
     }
 
+    /// <summary>
+    /// A resume point past the data (a server that kept a stale scan_from for a new, shorter
+    /// buffer) is ignored: the search starts at the request-line, and the head parses as from 0,
+    /// from v2 up by the one-pass flow. Incomplete, it asks for more with a resume point inside
+    /// the data again.
+    /// </summary>
+    [Fact]
+    public void ParsesAHeadFromAStaleResumePoint()
+    {
+        Platform.RequireLinuxX64();
+        byte[] head = Encoding.Latin1.GetBytes("GET /a HTTP/1.1\r\n" + Host + "\r\n");
+        nuint scanFrom = (nuint)head.Length + 100;
+        ParsedRequest r = H1Parsing.Parse(head, head.Length, ref scanFrom);
+        Assert.Equal(head.Length, r.Result);
+        Assert.Equal(0u, (uint)scanFrom);
+        Assert.Equal("/a", r.Target);
+
+        scanFrom = (nuint)head.Length;                              // past the 12 octets handed over
+        Assert.Equal(0, H1Parsing.Parse(head, 12, ref scanFrom).Result);
+        Assert.Equal(12u, (uint)scanFrom);
+    }
+
     /// <summary>Empty lines before the request-line are skipped (and counted in the head's length).</summary>
     [Fact]
     [Requirement("RFC9112-2.2-6")]

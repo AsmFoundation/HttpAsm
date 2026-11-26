@@ -166,6 +166,19 @@ extern const char bench_api_request[];
  * either suite: bench_case.ours. */
 void bench_h1_request(const bench_build *b, const bench_case *c, long calls);
 
+/* bench_response: the response head every suite parses (suite_rivals.c: a typical 200 for a
+ * page, twelve fields), as a writable copy made on the first call: httpasm_h1_parse_response may
+ * write its buffer (an obs-fold is blanked in place; this head has none, so every call parses the
+ * same octets). The rivals suite times it beside picohttpparser and llhttp, the parsers suite at
+ * the best tier and v1, the tiers suite at every tier.
+ *   length  out: the head's length. Returns the copy. */
+uint8_t *bench_response(size_t *length);
+
+/* bench_h1_response: httpasm_h1_parse_response on the case's head, `calls` times, each a
+ * response's first call (scan_from 0) to a GET, into a 64-record field array (suite_rivals.c).
+ * A batch for any suite: bench_case.ours. */
+void bench_h1_response(const bench_build *b, const bench_case *c, long calls);
+
 /* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
  * nothing, built by the first build's encoder on the first call and shared by every suite
  * (suite_rivals.c), so the tiers suite times the decoder's versions on the rivals' octets.

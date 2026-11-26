@@ -758,14 +758,27 @@ h1_request_rule:
     times HA_FIELD_UPGRADE - HA_FIELD_TE - 1 db 0
     db      H1_RULE_UPGRADE
     times HA_FIELD_COUNT - HA_FIELD_UPGRADE db 0  ; ids up to HA_FIELD_COUNT: COUNT + 1 entries
+
+; h1_response_rule: the same for ha_h1_fields' response mode, whose rules are the framing ones
+; only (Content-Length, Transfer-Encoding, Connection), built the same way.
+h1_response_rule:
+    times HA_FIELD_CONTENT_LENGTH db 0
+    db      H1_RULE_CONTENT_LENGTH
+    times HA_FIELD_TRANSFER_ENCODING - HA_FIELD_CONTENT_LENGTH - 1 db 0
+    db      H1_RULE_TRANSFER_ENCODING
+    times HA_FIELD_CONNECTION - HA_FIELD_TRANSFER_ENCODING - 1 db 0
+    db      H1_RULE_CONNECTION
+    times HA_FIELD_COUNT - HA_FIELD_CONNECTION db 0
 section .text
 
 ; -----------------------------------------------------------------------------
-; ha_h1_fields_v2: a request head's field lines and the empty line that ends it, in one pass
-; (v2 and up: the one-pass flow of httpasm_h1_parse_request).
-;   In:  rdi = h1ctx, as for ha_h1_fields with .mode = HA_H1_REQUEST, except that .head_end is
-;        the bound B: an offset no octet of a head the caller can accept reaches (min(len,
-;        max_head)), every octet below it the caller's. rsi = the first field line's offset.
+; ha_h1_fields_v2: a head's field lines and the empty line that ends it, in one pass (v2 and up:
+; the one-pass flows of httpasm_h1_parse_request and httpasm_h1_parse_response).
+;   In:  rdi = h1ctx, as for ha_h1_fields with .mode = HA_H1_REQUEST or HA_H1_RESPONSE (its
+;        rules by h1_request_rule or h1_response_rule), except that .head_end is the bound B: an
+;        offset no octet of a head the caller can accept reaches (min(len, max_head)), every
+;        octet below it the caller's. rsi = the first field line's offset. A response's obs-fold
+;        (which ha_h1_fields rewrites in place) is not taken here: the classic flow does it.
 ;   Out: eax = 0: every field line up to the empty line parsed exactly as ha_h1_fields parses
 ;        it (the records, their ids, .count, and the rules' findings in .seen, .content_length
 ;        and the request), and .head_end = the offset just past the empty line's CRLF.
@@ -800,8 +813,13 @@ ha_h1_fields_v2:
     push    r13
     push    r14
     push    r15
-    sub     rsp, 8                          ; 16-byte aligned for ha_field_lookup
+    sub     rsp, 8                          ; 16-byte aligned for ha_field_lookup; [rsp]: the rules
     mov     r12, rdi                        ; the context
+    lea     rax, [rel h1_request_rule]
+    lea     rcx, [rel h1_response_rule]
+    cmp     dword [r12 + h1ctx.mode], HA_H1_RESPONSE
+    cmove   rax, rcx
+    mov     [rsp], rax                      ; the mode's rule table (the rules clobber r9-r11)
     mov     rbx, [r12 + h1ctx.buf]
     lea     r13, [rbx + rsi]                ; the line, as a pointer from here on
     mov     rbp, [r12 + h1ctx.head_end]
@@ -905,8 +923,9 @@ ha_h1_fields_v2:
     mov     [r14 + httpasm_field.id], ax
     inc     dword [r12 + h1ctx.count]
 
-    ; The request mode's rules, by id (h1_request_rule: ha_h1_fields' dispatch as a table).
-    lea     rcx, [rel h1_request_rule]
+    ; The mode's rules, by id (h1_request_rule, h1_response_rule: ha_h1_fields' dispatch as a
+    ; table; a response's table names only the framing rules, so the request's never run).
+    mov     rcx, [rsp]
     movzx   ecx, byte [rcx + rax]
     test    ecx, ecx
     jz      .line                           ; most fields have none
