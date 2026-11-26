@@ -203,6 +203,16 @@ public sealed class H1MessageTests
     [InlineData("HTTP/1.1 100 Continue\r\n\r\n", "GET", 0x28u)]
     [InlineData("HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x18u)]
     [InlineData("HTTP/1.1 407 Proxy Auth\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x21u)]
+    // Found by tests/fuzz/h1_response (2026-11-26): every 2xx to CONNECT is a tunnel, 204 and
+    // unregistered 2xx codes included; an invalid code below 100 is framed as a 5xx's, never
+    // a tunnel; 1xx and 304 to CONNECT stay bodiless, and the connection stays HTTP.
+    [InlineData("HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x18u)]
+    [InlineData("HTTP/1.1 299 \r\nTransfer-Encoding: chunked\r\n\r\n", "CONNECT", 0x18u)]
+    [InlineData("HTTP/1.1 099 Odd\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x21u)]
+    [InlineData("HTTP/1.1 000 Odd\r\n\r\n", "CONNECT", 0x04u)]
+    [InlineData("HTTP/1.1 304 Not Modified\r\n\r\n", "CONNECT", 0x28u)]
+    [InlineData("HTTP/1.1 101 Switching Protocols\r\n\r\n", "CONNECT", 0x28u)]
+    [InlineData("HTTP/1.1 300 Multiple Choices\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x21u)]
     [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", "GET", 0x22u)]
     [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", "GET", 0x04u)]
     [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", "GET", 0x21u)]
@@ -210,7 +220,7 @@ public sealed class H1MessageTests
     [InlineData("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n", "GET", 0x01u)]
     [InlineData("HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n", "GET", 0x01u)]
     [InlineData("HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 1\r\n\r\n", "GET", 0x21u)]
-    [Requirement("RFC9112-6.3-2.2", "RFC9112-9.3-6", "RFC9110-9.3.6-12#2")]
+    [Requirement("RFC9112-6.3-2.2", "RFC9112-9.3-6", "RFC9110-9.3.6-12#2", "RFC9110-15-6")]
     public void ReadsTheResponsesFraming(string head, string method, uint flags)
     {
         Platform.RequireLinuxX64();

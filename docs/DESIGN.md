@@ -362,10 +362,26 @@ HTTP/2, the drivers, the client):
      - **What each fuzzer checks,** with clang's libFuzzer, AddressSanitizer and
        UndefinedBehaviorSanitizer: every input at every CPU tier, with identical results; the
        input against an inaccessible page, so a read past it crashes; the result's documented
-       forms; every pointer returned lies inside the input; and a parse that resumes after a
-       prefix equals the one-shot parse.
-     - **The first campaigns:** `h1_request`, 60 s, 10.7 million inputs at 175,000 a second, no
-       finding; a planted failure was found within seconds and printed in base64.
+       forms; every pointer returned lies inside the input; and the input arriving in two to
+       five reads, cut where its hash says (a cut taken from its first octet fell near 28% of
+       nearly every request), gives the one-shot result.
+     - **The fuzzers:** `h1_request`; `h1_response` (also RFC 9112 6.3's framing outcome for
+       the status and method); `chunked`, against an oracle written from the decoder's
+       documented grammar, state for state, whole, in reads and one octet at a time, then the
+       trailer section; `hpack`, block sequences sharing a table, with every fully decoded
+       block encoded again and decoded by a peer, whose table must stay entry for entry the
+       encoder's.
+     - **The first campaigns:** `h1_request`, 10.7 million inputs in 60 s; `chunked` 3.6
+       million; `h1_response` 7.8 million; `hpack` 19.5 million in 300 s. Planted failures
+       (in a check, and in the chunked oracle) were found within seconds and printed in base64.
+     - **What they found** (each fixed, with a regression test and seed):
+       - the response parser framed a 204 to CONNECT as a plain 204 and a 099 to CONNECT as a
+         tunnel; every 2xx to CONNECT is a tunnel (RFC 9110 9.3.6), and an invalid code below
+         100 is framed as a 5xx's (RFC 9110 15);
+       - the field lookup folded every octet with `| 0x20`, which is exact only for tokens, but
+         HPACK looks up names nobody has validated yet: the decoder gave `\x1apath` the id of
+         `:path`, and the encoder would send `content\rlength` as the static table's
+         `content-length`. Only letters fold now.
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
        test once fixed. CI runs each fuzzer for 30 s;
    - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,

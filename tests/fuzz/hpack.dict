@@ -1,0 +1,47 @@
+# hpack.dict - libFuzzer's dictionary for tests/fuzz/hpack.c (run.sh passes -dict= when
+# tests/fuzz/<name>.dict exists).
+#
+# HPACK (RFC 7541) octets the decoder (src/HttpAsm.Core/hpack/hpack.asm) branches on: the
+# representations' first octets, integers at their prefix limits and past 2^32, Huffman codes
+# (EOS, padding), and the names the field lookup and the encoder's static matches know.
+
+# Representations (RFC 7541 6): indexed, incremental with a new name, without indexing, never
+# indexed, a size update (0, 4096, and past the limit).
+"\x80"
+"\x82"
+"\xbe"
+"\xff\x00"
+"\x40"
+"\x00"
+"\x10"
+"\x20"
+"\x3f\xe1\x1f"
+"\x3f\xe1\xff\x03"
+
+# Integers (RFC 7541 5.1): a full prefix, five continuation octets, past 2^32-1.
+"\x7f\x80\x80\x80\x80\x0f"
+"\x7f\xff\xff\xff\xff\x0f"
+"\x7f\xff\xff\xff\xff\x7f"
+"\x7f\x80\x80\x80\x80\x80\x00"
+
+# Huffman strings (RFC 7541 5.2): the flag, EOS (30 ones), padding.
+"\x81\xff"
+"\x84\xff\xff\xff\xff"
+"\x83\xff\xff\xfc"
+"\x8c\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff"
+
+# Names the static table and the field lookup know.
+"\x0econtent-length"
+"\x11transfer-encoding"
+"\x0aconnection"
+"\x02te"
+"\x04host"
+"\x0dauthorization"
+"\x06cookie"
+"\x0a:authority"
+"\x07:method"
+"\x05:path"
+"\x07:scheme"
+"\x07:status"
+"content-length"
+"set-cookie"

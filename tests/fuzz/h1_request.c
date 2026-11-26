@@ -9,9 +9,9 @@
  *     every field name is a token and every field value holds only octets a value may hold,
  *     checked again through the library's own C ABI (httpasm_token_length,
  *     httpasm_field_value_scan); the version is 1.0 or 1.1; head_length is the result;
- *   - resumption: parsing a prefix (cut where the input's first octet says) and then the whole
- *     input with the scan_from the prefix left gives exactly the one-shot result, as a
- *     connection's partial reads would;
+ *   - resumption: the input arriving in two to five reads (cut where its hash says, fuzz.h),
+ *     each parse resuming from the scan_from the last left, gives exactly the one-shot result,
+ *     as a connection's partial reads would;
  *   - the same result, octet for octet and pointer for pointer, at every tier.
  * A broken requirement aborts with its reason (FUZZ_CHECK), which libFuzzer reports as a crash.
  */
@@ -100,21 +100,27 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     static parse first, now, split;
     if (size > FUZZ_MAX)
         return 0;
+    uint64_t hash = fuzz_hash(data, size);
     for (size_t t = 0; t < FUZZ_TIERS; t++) {
         httpasm_cpu_limit(fuzz_caps[t]);
         uint8_t *buf = fuzz_place(data, size);
         parse_once(&now, buf, size, 0);
         check_parse(&now, buf, size);
 
-        /* Resumption: a prefix, then the whole input from where the prefix left off. The cut
-         * comes from the input itself, so libFuzzer can explore it. */
-        if (size >= 2) {
-            size_t cut = 1 + (size_t)data[0] * (size - 1) / 256;
-            parse_once(&split, buf, cut, 0);
+        /* Resumption: the input arrives in up to four reads (cut where the input's hash says),
+         * each parse resuming from the scan_from the last one left, as a connection's partial
+         * reads would; the first complete answer, or the whole input's, must be the one-shot
+         * result. */
+        size_t cuts[4], count = fuzz_cuts(hash, size, cuts, 4), k = 0;
+        if (count != 0) {
+            parse_once(&split, buf, cuts[0], 0);
+            for (k = 1; split.result == 0 && k < count; k++)
+                parse_once(&split, buf, cuts[k], 1);
             if (split.result == 0)
                 parse_once(&split, buf, size, 1);
             check_parse(&split, buf, size);
-            FUZZ_CHECK(same_parse(&now, &split), "cut at %zu: %lld then %lld whole", cut, (long long)split.result, (long long)now.result);
+            FUZZ_CHECK(same_parse(&now, &split), "in %zu reads (first cut at %zu): %lld, whole: %lld", count + 1, cuts[0],
+                       (long long)split.result, (long long)now.result);
         }
 
         if (t == 0)

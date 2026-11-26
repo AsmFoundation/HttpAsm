@@ -97,8 +97,18 @@ jobs:
       - name: Coverage - every block and branch edge of libhttpasm.so under every test (report only, to the job summary)
         env:
           HTTPASM_RUNNER: native
+        # The runs' output goes to coverage.md with the report, so a failure prints what failed
+        # (xunit's [FAIL] blocks, and the end of the file) before the step ends: without it, a
+        # failing run in the Coverage build showed nothing but its exit status.
         run: |
-          bash tests/coverage/run.sh --report-only > coverage.md
+          status=0
+          bash tests/coverage/run.sh --report-only > coverage.md || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the coverage run failed with $status"
+            grep -n -E '\[FAIL\]' -A 25 coverage.md | head -300 || true
+            tail -60 coverage.md
+            exit "$status"
+          fi
           { echo "### Coverage of libhttpasm.so"; echo; sed -n '/^Coverage of/,/^Not run/p' coverage.md | sed '$d'; tail -1 coverage.md; } >> "$GITHUB_STEP_SUMMARY"
           tail -1 coverage.md
 

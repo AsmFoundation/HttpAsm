@@ -71,4 +71,36 @@ static inline int fuzz_within(const uint8_t *p, size_t n, const uint8_t *base, s
     return p >= base && n <= size && (size_t)(p - base) <= size - n;
 }
 
+/* fuzz_hash: FNV-1a (64-bit) over an input. It stands in for the choices an input does not
+ * spell out, such as where its reads are cut: taking them from the input's first octet instead
+ * pinned them to a few places (a request's first octet is nearly always a method's capital
+ * letter, so every cut fell near 28% of the input), while a hash moves them with every
+ * mutation, so millions of inputs cut at every offset. */
+static inline uint64_t fuzz_hash(const uint8_t *data, size_t n)
+{
+    uint64_t h = 0xcbf29ce484222325u;
+    for (size_t i = 0; i < n; i++)
+        h = (h ^ data[i]) * 0x100000001b3u;
+    return h;
+}
+
+/* fuzz_cuts: where an input of n octets is cut into the reads a connection would see: 1 to max
+ * strictly increasing offsets in [1, n), drawn from the hash (a 64-bit LCG over it, so the same
+ * input always cuts the same way and a crash reproduces). Returns how many were written to
+ * cuts (0 when n < 2: nothing to cut). max must be at least 1. */
+static inline size_t fuzz_cuts(uint64_t hash, size_t n, size_t *cuts, size_t max)
+{
+    if (n < 2)
+        return 0;
+    size_t want = 1 + (size_t)(hash % max), k = 0, at = 0;
+    while (k < want && at + 1 < n) {
+        hash = hash * 6364136223846793005u + 1442695040888963407u;
+        /* The next cut lies in [at + 1, n - 1]: after the previous one, before the end. */
+        size_t cut = at + 1 + (size_t)((hash >> 17) % (n - 1 - at));
+        cuts[k++] = cut;
+        at = cut;
+    }
+    return k;
+}
+
 #endif

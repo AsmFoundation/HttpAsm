@@ -16,17 +16,20 @@ section .text
 
 ; -----------------------------------------------------------------------------
 ; ha_field_lookup: the known-field id of a field name.
-;   In:  rdi = name, rsi = its length. The name must already be validated (a token for
-;        HTTP/1.1; HTTP/2's and HTTP/3's name rules): the case-folding compare relies on it.
-;   Out: eax = HA_FIELD_* id, 0 when the name is not a known field. The compare ignores ASCII
-;        case, as field names do (RFC 9110 5.1).
+;   In:  rdi = name, rsi = its length: any octets. HPACK's decoder and encoder look up names
+;        nobody has validated yet, so the answer must be exact for every octet string.
+;   Out: eax = HA_FIELD_* id, 0 when the name is not a known field. The compare ignores the
+;        case of ASCII letters, as field names do (RFC 9110 5.1), and of nothing else.
 ;   Clobbers rcx, rdx, r8 and the flags. Reads rdi[0..rsi) only.
 ;
 ;   The key packs the first two and last two octets (folded with | 0x20) and the length; the
 ;   generated multiplier sends every known name to its own slot of 256 (specs/generate.cs).
-;   One multiply and one table load find the only candidate; a compare confirms it. Folding
-;   with | 0x20 lower-cases letters and leaves the other characters of known names alone
-;   ("-", ":" and digits already have bit 5 set).
+;   One multiply and one table load find the only candidate; a compare confirms it. The key's
+;   | 0x20 only picks the candidate, so it may fold too much; the compare folds letters only.
+;   Folding every octet with | 0x20 there, as it once did, made CR match "-", 0x1A match ":"
+;   and 0x10-0x19 match digits: HPACK's decoder gave "\x1apath" the id of :path, and its
+;   encoder sent "content\rlength" as the static table's content-length (tests/fuzz/hpack,
+;   2026-11-26). Token names never hold those octets, which is why HTTP/1.1 never showed it.
 ; -----------------------------------------------------------------------------
 global ha_field_lookup:function hidden (ha_field_lookup.end - ha_field_lookup)
 align 16
@@ -66,11 +69,17 @@ ha_field_lookup:
     lea     rcx, [rel ha_field_text]
     add     rdx, rcx
     xor     ecx, ecx
-.compare:                                   ; octet by octet, case folded (the names are short)
-    movzx   r8d, byte [rdi + rcx]
+.compare:                                   ; octet by octet (the names are short): equal, or
+    movzx   r8d, byte [rdi + rcx]           ; the upper-case form of the known name's letter
+    cmp     r8b, [rdx + rcx]
+    je      .same                           ; the common case: already lower case, or "-", ":"
     or      r8d, 0x20
     cmp     r8b, [rdx + rcx]
     jne     .none
+    sub     r8d, 'a'                        ; it folded to the known octet: only a letter may
+    cmp     r8d, 'z' - 'a'                  ; (CR | 0x20 is "-", 0x1A | 0x20 is ":")
+    ja      .none
+.same:
     inc     rcx
     cmp     rcx, rsi
     jb      .compare
@@ -241,7 +250,9 @@ ha_find_lf:
 global httpasm_field_id:function (httpasm_field_id.end - httpasm_field_id)
 align 16
 httpasm_field_id:
-    ; A token first: the lookup's case-folding compare is exact only for token octets.
+    ; A token first: the C ABI promises 0 for a name that is not a token (pseudo-fields
+    ; included), whatever the lookup would match. (The lookup itself is exact for any octets
+    ; since 2026-11-26; this check once also guarded its folding.)
     HA_TOKEN_SCAN rdi, rsi, rax, rcx, rdx
     cmp     rax, rsi
     jne     .not_token

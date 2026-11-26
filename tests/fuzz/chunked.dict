@@ -1,0 +1,36 @@
+# chunked.dict - libFuzzer's dictionary for tests/fuzz/chunked.c (run.sh passes -dict= when
+# tests/fuzz/<name>.dict exists).
+#
+# The words the chunked decoder (src/HttpAsm.Core/h1/chunked.asm) and the trailer parser turn
+# on (RFC 9112 7.1): line ends, the extension's separators, the last chunk, and chunk sizes at
+# the decoder's limits (16 digits; 2^63, the first refused value).
+
+"\x0d\x0a"
+"\x0d\x0a\x0d\x0a"
+"\x0a"
+"\x0d"
+";"
+" "
+"\x09"
+"="
+"\x22"
+"0\x0d\x0a\x0d\x0a"
+"0\x0d\x0a"
+"; "
+" ;"
+"ffffffffffffffff"
+"FFFFFFFFFFFFFFFF"
+"7fffffffffffffff"
+"8000000000000000"
+"0000000000000000"
+"07ffffffffffffff"
+"10000000000000000"
+
+# Trailer fields: a few the field lookup knows, and the separators of a field line.
+": "
+"Expires"
+"Content-Length"
+"Transfer-Encoding"
+"Trailer"
+"Host"
+"\x0d\x0a "

@@ -420,6 +420,47 @@ public sealed partial class HpackTests
         }
     }
 
+    /// <summary>
+    /// A name that matches a known one only when every octet is folded with | 0x20 is not that
+    /// field: the decoder gives it id 0, and the encoder sends its own octets, never the static
+    /// table's name. tests/fuzz/hpack found the decoder giving "\x1apatH" the id of :path
+    /// (2026-11-26); its encoder would have sent "content\rlength", a field nobody reads, as
+    /// content-length, which frames a message. The cases: 0x1A | 0x20 is ":", CR | 0x20 is
+    /// "-"; and letters still fold, as RFC 9110 5.1 says: "Content-LENGTH" is content-length.
+    /// </summary>
+    /// <param name="name">The name, as Latin-1 text.</param>
+    /// <param name="known">The known field it is, or null for none.</param>
+    [Theory]
+    [InlineData("\u001apath", null)]
+    [InlineData("\u001aauthority", null)]
+    [InlineData("content\rlength", null)]
+    [InlineData("x-frame\roptions", null)]
+    [InlineData("transfer\rencoding", null)]
+    [InlineData("Content-LENGTH", "content-length")]
+    [InlineData(":PATH", ":path")]
+    [Requirement("RFC9110-5.1-6#1")]
+    public void MatchesKnownNamesByTheirLettersOnly(string name, string? known)
+    {
+        Platform.RequireLinuxX64();
+        int id = known is null ? 0 : KnownId(known);
+        byte[] octets = Encoding.Latin1.GetBytes(name);
+        byte[] block = [0x00, (byte)octets.Length, .. octets, 0x01, (byte)'v'];   // a literal, new name, not indexed
+        using var decoder = new HpackTable(4096);
+        HpackDecoded decoded = decoder.Decode(block);
+        Assert.Equal(0, decoded.Result);
+        Assert.Equal(name, decoded.Fields[0].Name);
+        Assert.Equal(id, decoded.Fields[0].Id);
+
+        // Encoded and decoded again: an unknown name keeps its octets; a known one may come
+        // back with lower-case letters (sent by the static table's index), never as another.
+        using var encoder = new HpackTable(4096);
+        using var peer = new HpackTable(4096);
+        HpackDecoded back = peer.Decode(encoder.Encode([new HpackField(name, "v")]));
+        Assert.Equal(0, back.Result);
+        Assert.Equal(known ?? name, back.Fields[0].Name);
+        Assert.Equal(id, back.Fields[0].Id);
+    }
+
     /// <summary>A code table row of RFC 7541 Appendix B: "(  0)  |11111111|11000   1ff8  [13]".</summary>
     [GeneratedRegex(@"\(\s*(\d+)\)\s+\|[01|]+\s+([0-9a-f]+)\s+\[\s*(\d+)\]")]
     private static partial Regex HuffmanRow();

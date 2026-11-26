@@ -9,9 +9,10 @@
 ; The body's framing, by RFC 9112 section 6.3, which needs the request's method:
 ;   1. HEAD, and every 1xx, 204 and 304: no body (RFC 9112 6.3 item 1). A code outside
 ;      100-599 is invalid and framed as a 5xx's (RFC9110-15-6): 000-099 too are final answers
-;      with a body, not interim ones.
-;   2. A 2xx to CONNECT: the connection becomes a tunnel; Content-Length and Transfer-Encoding
-;      are ignored (RFC9112-6.3-2.2).
+;      with a body, not interim ones, and never open a tunnel.
+;   2. A 2xx to CONNECT, 204 included (RFC 9110 9.3.6: "Any 2xx"): the connection becomes a
+;      tunnel after the head (TUNNEL with NO_BODY); Content-Length and Transfer-Encoding are
+;      ignored (RFC9112-6.3-2.2). Checked before item 1's 204, which would otherwise hide it.
 ;   3. Transfer-Encoding: chunked as the final coding means chunked. Any other final coding
 ;      means the body runs until the server closes (item 4). In an HTTP/1.0 response the
 ;      framing is faulty (RFC9112-6.1-16): refused.
@@ -184,18 +185,24 @@ httpasm_h1_parse_response:
     cmp     edx, HTTPASM_METHOD_HEAD
     je      .no_body
     cmp     ecx, 100
-    jb      .not_interim                    ; 000-099: an invalid code, framed as a 5xx's (RFC9110-15-6)
+    jb      .framed_body                    ; 000-099: an invalid code, framed as a 5xx's (RFC9110-15-6):
+                                            ; a body, and never a tunnel, whatever the method
     cmp     ecx, 200
     jb      .no_body                        ; 1xx (known or not: RFC9110-15-4) has no content
-.not_interim:
+    ; Every 2xx to CONNECT makes a tunnel, 204 included (RFC9110-9.3.6: "Any 2xx"), so this
+    ; comes before 204's own rule: a 204 ends at its empty line either way (TUNNEL comes with
+    ; NO_BODY), but read as a plain 204 the octets after it would be taken for the next
+    ; response instead of the tunnel's. tests/fuzz/h1_response found the order wrong
+    ; (2026-11-26): a 204 to CONNECT was no tunnel, and a 099 to CONNECT was one.
+    cmp     ecx, 300
+    jae     .not_successful
+    cmp     edx, HTTPASM_METHOD_CONNECT
+    je      .tunnel
+.not_successful:
     cmp     ecx, 204
     je      .no_body
     cmp     ecx, 304
     je      .no_body
-    cmp     edx, HTTPASM_METHOD_CONNECT
-    jne     .framed_body
-    cmp     ecx, 300
-    jb      .tunnel
 .framed_body:
     test    eax, HA_SEEN_TE
     jz      .no_transfer_encoding
