@@ -22,6 +22,7 @@ internal sealed unsafe class Exchange
         Method = Encoding.Latin1.GetString(r->Method, (int)r->MethodLength);
         Target = Encoding.Latin1.GetString(r->Target, (int)r->TargetLength);
         Authority = r->Authority == null ? null : Encoding.Latin1.GetString(r->Authority, (int)r->AuthorityLength);
+        Scheme = r->Scheme == null ? null : Encoding.Latin1.GetString(r->Scheme, (int)r->SchemeLength);
         Version = r->Version;
         Flags = r->Flags;
         var fields = new List<ParsedField>();
@@ -47,6 +48,9 @@ internal sealed unsafe class Exchange
 
     /// <summary>The authority, or null.</summary>
     public string? Authority { get; }
+
+    /// <summary>An absolute-form target's scheme (HTTP/2: :scheme), or null.</summary>
+    public string? Scheme { get; }
 
     /// <summary>10 or 11.</summary>
     public int Version { get; }

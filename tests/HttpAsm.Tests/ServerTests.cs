@@ -1252,6 +1252,47 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// A body larger than the connection's first 16 KiB of input moves the input when it grows,
+    /// and every part of the request the handler sees moves with it: the method and target
+    /// always, the authority and the scheme when present (an absolute-form target names both),
+    /// and nothing that is absent (an HTTP/1.0 request without Host has no authority). The
+    /// body is 300,000 octets, sent in pieces so the input grows several times.
+    /// </summary>
+    /// <param name="request">The request's head.</param>
+    /// <param name="target">The target the handler must see.</param>
+    /// <param name="authority">The authority (null: none).</param>
+    /// <param name="scheme">The scheme (null: none).</param>
+    [Theory]
+    [InlineData("POST /upload?x=1 HTTP/1.0\r\nContent-Length: 300000\r\n\r\n", "/upload?x=1", null, null)]
+    [InlineData("POST http://example.com:8080/upload HTTP/1.1\r\nHost: example.com:8080\r\nContent-Length: 300000\r\n\r\n",
+        "http://example.com:8080/upload", "example.com:8080", "http")]
+    [InlineData("POST /plain HTTP/1.1\r\nHost: h\r\nContent-Length: 300000\r\n\r\n", "/plain", "h", null)]
+    public void KeepsTheRequestWholeWhenItsInputMoves(string request, string target, string? authority, string? scheme)
+    {
+        Platform.RequireLinuxX64();
+        Exchange? seen = null;
+        using var server = new TestServer(x =>
+        {
+            seen = x;
+            x.Respond(200, x.Body.Length.ToString(CultureInfo.InvariantCulture));
+        });
+        using var c = new RawConnection(server.Port);
+
+        byte[] body = RandomBytes(300_000);
+        c.Send(request);
+        for (int at = 0; at < body.Length; at += 50_000)
+        {
+            Thread.Sleep(5);                                        // separate reads: the input grows in steps
+            c.Send(body.AsSpan(at, 50_000));
+        }
+
+        Assert.Equal("300000", c.ReadResponse().Text);
+        Assert.NotNull(seen);
+        Assert.Equal(("POST", target, authority, scheme), (seen!.Method, seen.Target, seen.Authority, seen.Scheme));
+        Assert.True(body.AsSpan().SequenceEqual(seen.Body));
+    }
+
+    /// <summary>
     /// A server stopping finishes the requests in progress: one whose body is still arriving
     /// when the stop begins is not closed as idle (only connections between requests are), and
     /// its answer goes out once the body is whole.

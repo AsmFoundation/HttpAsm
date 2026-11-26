@@ -2226,12 +2226,17 @@ h2_keep_tail:
 .field:
     test    ecx, ecx
     jz      .done
+; A pointer into the scratch space moves to the same place in the tail block; one outside it
+; (the static table's text) is kept. One unsigned comparison tells both sides apart: below the
+; space the subtraction wraps past any space_used. It was two (jb, then jae), one branch per
+; side, and which side the static table lies on depends only on where the library and the
+; worker's heap happen to be mapped: no test can choose that, and the coverage gate must see
+; the same branches run in every process (each address layout ran one and never the other).
 %macro REBASE_TAIL 1
     mov     rax, [rdx + %1]
     sub     rax, [rbx + httpasm_hpack_output.space]
-    jb      %%keep
     cmp     rax, [rbx + httpasm_hpack_output.space_used]
-    jae     %%keep
+    jae     %%keep                          ; outside the space, on either side: kept
     add     rax, rbp
     mov     [rdx + %1], rax
 %%keep:
