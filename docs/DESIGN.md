@@ -678,6 +678,10 @@ HTTP/2, the drivers, the client):
      parses: request-lines of every form and error, framing fields that pass and fail each
      rule, small limits, heads resumed after a cut, and every prefix of one head in 16, all
      against the guard page.
+   - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
+     VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
+     build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's
+     end to the next line's start, which wider steps do not shorten. v3 runs v2's code.
 
 *H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
 in CI); differential fuzzing has no untriaged difference; every row passes on every tier and

@@ -189,6 +189,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, AVX2 for the one-pass request head: measured, not kept.** The
+tiers suite now times `httpasm_h1_parse_request` on the rivals suite's three heads at every tier
+(`tiers/h1_parse_request/*`), so a version above v2 is judged against v2 in one build. A v3
+version of the one-pass field lines (32-octet AVX2 steps for names and values, from the same
+source as v2's by a width parameter, with a VEX-encoded field lookup so no SSE instruction met a
+dirty upper half) ran 13.5-13.7% fewer instructions on the two larger heads and was no faster:
+
+| Request head | Instructions, v2 -> v3 | v2, v3 (median ns, same build, 61 rounds) | v3 over v1 / v2 over v1 |
+|---|---:|---:|---:|
+| small GET | 674 -> 677 | 47.7, 48.6 | 1.35x / 1.37x |
+| browser GET | 3,273 -> 2,825 | 295.7, 301.4 | 2.00x / 2.07x |
+| API POST | 1,960 -> 1,696 | 153.1, 154.6 | 2.00x / 2.02x |
+
+The A/A control stayed within 2% while the machine carried other work (34% CPU on the host). A
+head's time is the chain from one line's end to the next line's start, which wider steps do not
+shorten, and a 32-octet load splits a cache line twice as often as a 16-octet one, on that same
+chain. So v3 runs v2's code (cpu.inc: a tier is kept only when it measures faster), and the
+attempt stays described here rather than kept in the tree. A gain for these heads has to come from
+the chain itself.
+
 **2026-11-26: phase H step 4, the one-pass request head at v2.** With the lookup done, the
 browser request's profile showed what the field lines and the lookup could not: 16% of its
 instructions in the search for the head's end (`ha_find_lf`, called once per line), a pass that

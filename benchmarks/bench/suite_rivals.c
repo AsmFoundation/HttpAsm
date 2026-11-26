@@ -29,8 +29,9 @@
 
 /* ---- HTTP/1.1 request heads. */
 
-/* httpasm_h1: httpasm_h1_parse_request on the case's head, `calls` times. */
-static void httpasm_h1(const bench_build *b, const bench_case *c, long calls)
+/* bench_h1_request: httpasm_h1_parse_request on the case's head, `calls` times (bench.h: the
+ * tiers suite runs it too). */
+void bench_h1_request(const bench_build *b, const bench_case *c, long calls)
 {
     static httpasm_field fields[MAX_FIELDS];
     httpasm_h1_limits limits = { .max_fields = MAX_FIELDS };
@@ -117,8 +118,8 @@ static const bench_rival h1_rivals[] = {
 
 /* The inputs: a minimal request, a browser's navigation request, an API call with a bearer
  * token. Realistic shapes, fixed octets. */
-static const char small_request[] = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-static const char browser_request[] =
+const char bench_small_request[] = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+const char bench_browser_request[] =
     "GET /articles/2026/11/assembly-http-parsers?ref=home&utm_source=feed HTTP/1.1\r\n"
     "Host: www.example.com\r\n"
     "Connection: keep-alive\r\n"
@@ -137,7 +138,7 @@ static const char browser_request[] =
     "Accept-Language: en-US,en;q=0.9,he;q=0.8\r\n"
     "Cookie: session=7f3a9c2e8b1d4f6a0e5c9b2d7a4f1e8c; theme=dark; consent=1; _ga=GA1.1.1234567890.1764115200\r\n"
     "\r\n";
-static const char api_request[] =
+const char bench_api_request[] =
     "POST /api/v2/orders/12345/items HTTP/1.1\r\n"
     "Host: api.example.com\r\n"
     "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNzY0MTE1MjAw"
@@ -284,9 +285,9 @@ static void add(const char *name, const char *input, const void *data, size_t le
 void bench_suite_rivals(void)
 {
     size_t n = sizeof h1_rivals / sizeof h1_rivals[0];
-    add("h1_request", "small GET", small_request, sizeof small_request - 1, httpasm_h1, h1_rivals, n);
-    add("h1_request", "browser GET", browser_request, sizeof browser_request - 1, httpasm_h1, h1_rivals, n);
-    add("h1_request", "API POST", api_request, sizeof api_request - 1, httpasm_h1, h1_rivals, n);
+    add("h1_request", "small GET", bench_small_request, sizeof bench_small_request - 1, bench_h1_request, h1_rivals, n);
+    add("h1_request", "browser GET", bench_browser_request, sizeof bench_browser_request - 1, bench_h1_request, h1_rivals, n);
+    add("h1_request", "API POST", bench_api_request, sizeof bench_api_request - 1, bench_h1_request, h1_rivals, n);
     if (make_block() != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {
         fprintf(stderr, "bench: rivals: no HPACK block or nghttp2 decoder: the HPACK case is left out\n");
         return;

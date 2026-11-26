@@ -153,6 +153,19 @@ extern volatile size_t bench_sink;
  * loaded before the suites register. NULL when there is none (--list without builds). */
 const bench_build *bench_first_build(void);
 
+/* The request heads the rivals suite parses (suite_rivals.c: a minimal request, a browser's
+ * navigation request, an API call with a bearer token), NUL-terminated. The tiers suite times
+ * httpasm_h1_parse_request on the same octets at every tier, where a version above v2 must prove
+ * itself against v2, which the rivals suite's best-and-v1 rows cannot show. */
+extern const char bench_small_request[];
+extern const char bench_browser_request[];
+extern const char bench_api_request[];
+
+/* bench_h1_request: httpasm_h1_parse_request on the case's head, `calls` times, each a
+ * message's first call (scan_from 0), into a 64-record field array (suite_rivals.c). A batch for
+ * either suite: bench_case.ours. */
+void bench_h1_request(const bench_build *b, const bench_case *c, long calls);
+
 /* The suites' registration functions, called by bench.c's main in this order. A suite whose
  * setup fails registers nothing and says why on stderr. */
 void bench_suite_tiers(void);

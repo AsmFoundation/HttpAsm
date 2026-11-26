@@ -2,7 +2,9 @@
  * suite_tiers.c - the tiers suite: every multi-version routine of libhttpasm.so at every CPU
  * tier (v1 to v4), on inputs sized around the vector widths (docs/DESIGN.md section 3, "CPU
  * tiers": a tier's version is kept only where it measures faster than the baseline, beyond the
- * A/A control's gap). A routine joins this suite when it gets a version above v1.
+ * A/A control's gap). A routine joins this suite when it gets a version above v1; a whole
+ * routine whose versions sit inside it (httpasm_h1_parse_request) joins with the rivals suite's
+ * inputs, so each tier is judged against the one below on realistic octets.
  *
  * Inputs are built once, deterministically, so two runs (or two machines) measure the same
  * octets.
@@ -30,9 +32,31 @@ static void field_value_scan(const bench_build *b, const bench_case *c, long cal
 static const size_t field_lengths[] = { 8, 15, 16, 31, 32, 63, 64, 100, 256, 1024, 4096 };
 static char field_labels[sizeof field_lengths / sizeof field_lengths[0]][24];
 
+/* add_h1_request: one tiers case for httpasm_h1_parse_request on a whole head (bench.h's heads,
+ * the rivals suite's inputs): the request parser's versions (from v2 the one-pass flow, from v3
+ * its 32-octet steps) each against the tier below on the same octets.
+ *   input  the head's label; head  the head, NUL-terminated. */
+static void add_h1_request(const char *input, const char *head)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "h1_parse_request";
+    c.input = input;
+    c.data = (const uint8_t *)head;
+    c.length = strlen(head);
+    c.octets = c.length;
+    c.ours = bench_h1_request;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* bench_suite_tiers: registers the suite's cases (bench.h). */
 void bench_suite_tiers(void)
 {
+    add_h1_request("small GET", bench_small_request);
+    add_h1_request("browser GET", bench_browser_request);
+    add_h1_request("API POST", bench_api_request);
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {
