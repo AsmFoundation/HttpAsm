@@ -280,7 +280,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                    "llhttp: Content-Length %d (%llu), HttpAsm flags 0x%x (%llu)", length, (unsigned long long)ll.content_length, q.flags,
                    (unsigned long long)q.content_length);
     } else if ((r > 0) != (ll.verdict > 0) && !(r < 0 && ll.verdict == 0) && !(r == 0 && ll.verdict < 0)) {
-        difference("llhttp", ours, theirs, data, size);
+        /* llhttp takes any request whose method is PRI for the start of HTTP/2's connection
+         * preface and waits for its "SM" line, whatever the target and version (CI's campaign
+         * found "PRI / HTTP/1.0" CRLF CRLF, 2026-11-26). That gets a class of its own, so the
+         * general one, HttpAsm accepting a head llhttp still waits on (two parsers disagreeing
+         * where a head ends: a smuggling sign), stays an alarm. */
+        int pri = r > 0 && ll.verdict == 0 && q.method_length == 3 && memcmp(q.method, "PRI", 3) == 0;
+        difference("llhttp", ours, pri ? "incomplete-after-PRI" : theirs, data, size);
     }
 
     /* picohttpparser. */
