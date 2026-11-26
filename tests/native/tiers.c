@@ -924,6 +924,32 @@ static int hpack_tiers(long randoms)
             checked++;
         }
     }
+    /* Strings that end exactly on a code in the middle of a group of lookups, followed in the
+     * block by octets whose bits index a long code or a short one: "&" is 8 bits (11111000) and
+     * no code fits the 4 bits after it, so each lookup takes one; n of them fill n octets
+     * exactly. With 0xFF after them, the lookup after the last reads twelve ones, a long code:
+     * the no-op step that hands an ended string to the single-symbol path, which must stop at
+     * once. Every count 1-9 (a group is four lookups), each followed by nothing, 0xFF or 0x00. */
+    static const uint8_t after[][4] = { { 0xFF, 0xFF, 0xFF, 0xFF }, { 0x00, 0x00, 0x00, 0x00 } };
+    for (size_t count = 1; count <= 9; count++) {
+        for (size_t tail = 0; tail <= 2; tail++) {
+            static uint8_t ampersands[16];
+            memset(ampersands, 0xF8, count);
+            size_t n = 0;
+            block[n++] = 0x00;
+            n = hp_put_string(block, n, (const uint8_t *)"x", 1, 0);
+            n = hp_put_string(block, n, ampersands, count, 1);
+            if (tail > 0) {
+                memcpy(block + n, after[tail - 1], 4);    /* the next field's octets, as it were */
+                n += 4;
+            }
+            for (size_t r = 0; r < sizeof rooms / sizeof rooms[0]; r++) {
+                if (hpack_check(block, n, rooms[r]))
+                    return 1;
+                checked++;
+            }
+        }
+    }
     printf("httpasm_hpack_decode: %ld decodes of Huffman strings, every tier agrees with v1\n", checked);
     return 0;
 }
