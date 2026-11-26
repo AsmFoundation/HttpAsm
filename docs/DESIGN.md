@@ -678,6 +678,18 @@ HTTP/2, the drivers, the client):
      parses: request-lines of every form and error, framing fields that pass and fail each
      rule, small limits, heads resumed after a cut, and every prefix of one head in 16, all
      against the guard page.
+   - **HPACK's Huffman decoding** (2026-11-26). An HTTP/2 server decodes a header block on
+     every request, and a browser request's block cost 2.3 us, 60% of it in the Huffman
+     automaton: two dependent table loads per octet, about 10 cycles per symbol. From v2 up a
+     table decoder takes the next 12 bits at a time from a 64-bit window: one lookup in
+     `ha_huff_pair` (generated, 16 KiB) gives up to two symbols, their bits and their count;
+     the bits sit in the dword's low byte, so the load feeds the window's shift directly; codes
+     past 12 bits go to the canonical tables (`ha_huff_limit`, `_offset`, `_sorted`; the
+     generator checks the code is canonical), and a string's last bits to `ha_huff_first_bits`
+     (its last symbol and its padding, without a search). Errors, padding and the room are v1's
+     exactly: `tests/native/tiers` compares every tier on 233,032 decodes of valid and arbitrary
+     Huffman strings against the guard page, with the room from none to plenty. The block
+     decodes 1.49x faster than at v1, and nghttp2 is now 2.2x slower than HttpAsm.
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's

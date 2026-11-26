@@ -650,6 +650,194 @@ static int parse_variety(long randoms)
     return 0;
 }
 
+/* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
+ * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
+ * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
+ * string's last octets and the room's last octets). They must agree on everything a decode hands
+ * back: the return, the output's counts, and every field's name and value, octet for octet and
+ * offset for offset in the space. */
+
+#define HP_FIELDS 8
+#define HP_SPACE 4096
+
+/* hpack_result: one decode's output: the return value, the output record, the field records, and
+ * the space their strings point into (compared through the fields only: what lies in the space
+ * past a string's end is the decoder's scratch, which versions may leave differently). */
+typedef struct hpack_result {
+    int64_t ret;
+    httpasm_hpack_output out;
+    httpasm_field fields[HP_FIELDS];
+    uint8_t space[HP_SPACE];
+} hpack_result;
+
+/* hpack_decode_at: decodes block[0..n) at the tier now set, with a fresh decoder table (a
+ * malformed block leaves its table unusable) and `room` octets of space, into *r. */
+static void hpack_decode_at(const uint8_t *block, size_t n, size_t room, hpack_result *r)
+{
+    static uint8_t table[16384];
+    memset(r, 0, sizeof *r);
+    if (httpasm_hpack_init(table, sizeof table, 4096, 0) != 0) {
+        r->ret = 999;                                   /* never: 4096 fits 16 KiB */
+        return;
+    }
+    r->out.fields = r->fields;
+    r->out.space = r->space;
+    r->out.space_size = room;
+    r->out.max_fields = HP_FIELDS;
+    r->ret = httpasm_hpack_decode((httpasm_hpack *)table, block, n, &r->out);
+}
+
+/* hpack_same: whether two decodes agree: the return, the counts, and each written field's
+ * lengths, id, flags, octets, and its strings' offsets in the space (a string from the static
+ * table points into the library: compared by content). Returns 1 when they agree. */
+static int hpack_same(const hpack_result *a, const hpack_result *b)
+{
+    if (a->ret != b->ret || a->out.count != b->out.count || a->out.space_used != b->out.space_used ||
+        a->out.list_size != b->out.list_size)
+        return 0;
+    for (uint32_t i = 0; i < a->out.count && i < HP_FIELDS; i++) {
+        const httpasm_field *x = &a->fields[i], *y = &b->fields[i];
+        if (x->name_length != y->name_length || x->value_length != y->value_length || x->id != y->id ||
+            x->flags != y->flags)
+            return 0;
+        if (memcmp(x->name, y->name, x->name_length) != 0 || memcmp(x->value, y->value, x->value_length) != 0)
+            return 0;
+        int x_in = x->value >= a->space && x->value < a->space + HP_SPACE;
+        int y_in = y->value >= b->space && y->value < b->space + HP_SPACE;
+        if (x_in != y_in || (x_in && x->value - a->space != y->value - b->space))
+            return 0;
+    }
+    return 1;
+}
+
+/* hpack_check: one block at every tier, against the guard page (its last octet is the page's
+ * last, so a refill reading past a string's end, which here is the block's, faults), with `room`
+ * octets of space. Every tier must agree with v1, which the .NET suite proves against RFC 7541's
+ * examples. Returns 0 when every tier agrees; 1, after reporting, otherwise. */
+static int hpack_check(const uint8_t *block, size_t n, size_t room)
+{
+    static hpack_result expected, actual;
+    uint8_t *p = page_end - n;
+    memcpy(p, block, n);
+    httpasm_cpu_limit(caps[0]);
+    hpack_decode_at(p, n, room, &expected);
+    for (size_t t = 1; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        hpack_decode_at(p, n, room, &actual);
+        if (!hpack_same(&expected, &actual)) {
+            fprintf(stderr, "httpasm_hpack_decode at %s (features %#llx) differs from v1: returned %lld (%u fields, %zu used), "
+                            "v1 %lld (%u fields, %zu used); %zu octets of space\n",
+                    cap_names[t], (unsigned long long)features, (long long)actual.ret, actual.out.count, actual.out.space_used,
+                    (long long)expected.ret, expected.out.count, expected.out.space_used, room);
+            dump("block", p, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* hp_put_string: appends a string literal (RFC 7541 5.2): H, the length as a 7-bit-prefix
+ * integer (5.1), the octets as given (Huffman-coded or not, as `huffman` claims). Returns the
+ * block's new length. */
+static size_t hp_put_string(uint8_t *b, size_t n, const uint8_t *s, size_t length, int huffman)
+{
+    uint8_t h = huffman ? 0x80 : 0x00;
+    if (length < 127) {
+        b[n++] = (uint8_t)(h | length);
+    } else {
+        b[n++] = (uint8_t)(h | 127);
+        size_t rest = length - 127;
+        while (rest >= 128) {
+            b[n++] = (uint8_t)(rest | 128);
+            rest >>= 7;
+        }
+        b[n++] = (uint8_t)rest;
+    }
+    memcpy(b + n, s, length);
+    return n + length;
+}
+
+/* hp_text: fills s[0..n) with octets drawn mostly from header text (letters, digits, the
+ * punctuation of URLs and lists) and, at the rate `rare` in 64, from every octet value: the rare
+ * ones (control octets, 0x80-0xFF, "\\<>{}^~|") have the long codes (13-30 bits). */
+static void hp_text(uint8_t *s, size_t n, unsigned rare)
+{
+    static const char common[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:;=, %?&";
+    for (size_t i = 0; i < n; i++)
+        s[i] = rng() % 64 < rare ? (uint8_t)rng() : (uint8_t)common[rng() % (sizeof common - 1)];
+}
+
+/* hpack_tiers: header blocks of Huffman strings, each decoded at every tier with the space
+ * drawn from none (measured only: the counting loop), a little (the room runs out inside a
+ * string: the slow loop's stores) and plenty (the fast loop's stores):
+ *   - valid strings: random header text, rare octets at rates 0-16 in 64, coded by the
+ *     library's own encoder (Huffman when it is shorter), 1-4 fields of 0-300 octets;
+ *   - arbitrary strings: random octets marked as Huffman (any bit string: symbols, long codes,
+ *     EOS, padding too long or not all ones), 0-40 octets, alone or after a valid field, with
+ *     every octet of padding tried on a valid one (its last octet replaced by each value).
+ * Returns 0 when every block agreed at every tier, 1 at the first that did not. */
+static int hpack_tiers(long randoms)
+{
+    static uint8_t encoder[16384], block[PAGE], text[2][320];
+    static const size_t rooms[] = { 0, 1, 7, 15, 16, 17, 31, 64, 300, HP_SPACE };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t n = 0;
+        if (rng() % 3 != 0) {                           /* valid strings, by the library's encoder */
+            if (httpasm_hpack_init(encoder, sizeof encoder, 4096, HTTPASM_HPACK_HUFFMAN) != 0)
+                return 1;
+            httpasm_field fields[4];
+            size_t count = 1 + (size_t)(rng() % 4);
+            unsigned rare = (unsigned)(rng() % 17);
+            for (size_t k = 0; k < count; k++) {
+                memset(&fields[k], 0, sizeof fields[k]);
+                size_t name = 1 + (size_t)(rng() % 20), value = (size_t)(rng() % (rng() % 4 == 0 ? 300 : 60));
+                hp_text(text[0], name, 0);
+                for (size_t c = 0; c < name; c++)       /* HTTP/2 names are lower case */
+                    text[0][c] = (uint8_t)(text[0][c] >= 'A' && text[0][c] <= 'Z' ? text[0][c] + 32 : text[0][c]);
+                hp_text(text[1], value, rare);
+                fields[k].name = (const uint8_t *)memcpy(malloc(name), text[0], name);
+                fields[k].name_length = (uint32_t)name;
+                fields[k].value = (const uint8_t *)memcpy(malloc(value + 1), text[1], value);
+                fields[k].value_length = (uint32_t)value;
+                fields[k].flags = HTTPASM_FIELD_FLAG_NO_INDEX;
+            }
+            int64_t length = httpasm_hpack_encode((httpasm_hpack *)encoder, fields, (uint32_t)count, block, sizeof block);
+            for (size_t k = 0; k < count; k++) {
+                free((void *)fields[k].name);
+                free((void *)fields[k].value);
+            }
+            if (length <= 0)
+                return 1;
+            n = (size_t)length;
+            if (rng() % 4 == 0 && n > 0)                /* the last octet's padding, any value */
+                block[n - 1] = (uint8_t)rng();
+        } else {                                        /* arbitrary octets claimed to be Huffman */
+            if (rng() % 2) {
+                hp_text(text[0], 5, 0);
+                block[n++] = 0x00;                      /* a literal field, a new name (6.2.2) */
+                n = hp_put_string(block, n, (const uint8_t *)"name", 4, 0);
+                n = hp_put_string(block, n, text[0], 5, 0);
+            }
+            size_t length = (size_t)(rng() % 41);
+            for (size_t k = 0; k < length; k++)
+                text[1][k] = (uint8_t)(rng() % 4 == 0 ? 0xFF : rng());
+            block[n++] = 0x00;
+            n = hp_put_string(block, n, (const uint8_t *)"x-huffman", 9, 0);
+            n = hp_put_string(block, n, text[1], length, 1);
+        }
+        for (size_t r = 0; r < sizeof rooms / sizeof rooms[0]; r++) {
+            if (rng() % 3 != 0 && r != 0 && r + 1 != sizeof rooms / sizeof rooms[0])
+                continue;                               /* none and plenty always; the rest at random */
+            if (hpack_check(block, n, rooms[r]))
+                return 1;
+            checked++;
+        }
+    }
+    printf("httpasm_hpack_decode: %ld decodes of Huffman strings, every tier agrees with v1\n", checked);
+    return 0;
+}
+
 /* main: sets up the guard page, prints the tiers this CPU (or SDE) gives, and runs every
  * routine's comparison. Returns 0, 1 on a mismatch, or 2 on a usage or setup error. */
 int main(int argc, char **argv)
@@ -680,6 +868,8 @@ int main(int argc, char **argv)
         failed = parse_tiers(randoms / 10);
     if (!failed)
         failed = parse_variety(randoms / 20);
+    if (!failed)
+        failed = hpack_tiers(randoms / 4);
 
     httpasm_cpu_limit(HTTPASM_CPU_ALL);
     (void)start_features;

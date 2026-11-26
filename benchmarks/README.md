@@ -189,6 +189,27 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, HPACK's Huffman decoding at v2.** An HTTP/2 server decodes a header
+block on every request; the browser request's block (18 fields, 563 octets, 515 of them in
+Huffman strings) took 2.3 us at v1, 60% of it in the Huffman automaton: two dependent table loads
+per octet, about 10 cycles per symbol. From v2 up a table decoder takes 12 bits at a time
+(`hpack.asm` `.huffman_v2`): one lookup gives up to two symbols; codes longer than 12 bits go to
+the canonical tables; a string's last bits to a table of first-code lengths.
+
+| Measure | v1 | v2 | |
+|---|---:|---:|---|
+| instructions per block | 19,544 | 11,424 | -42% |
+| median time, same build (61 rounds) | 2,306 ns | 1,537 ns | 1.50x |
+| A/B against 8836fdd (3 processes) | no difference | 1.47-1.48x faster | |
+| nghttp2 1.71.0, same run | 3,434 ns | | HttpAsm 2.23x faster (1.48x before) |
+
+The first layout put the two symbols in the dword's low bytes and the bit count in byte 2: 1.33x.
+With the bit count in the low byte, the loaded dword feeds the window's shift directly, and the
+same decoder with 386 more instructions per block ran 1.49x: each lookup's latency chain is the
+whole cost, as with the request head. The first version of the string's end also searched the
+canonical tables twice per string (the last symbol, then the padding); `ha_huff_first_bits`
+settles both from the last lookup, 659 instructions fewer per block.
+
 **2026-11-26: phase H step 4, AVX2 for the one-pass request head: measured, not kept.** The
 tiers suite now times `httpasm_h1_parse_request` on the rivals suite's three heads at every tier
 (`tiers/h1_parse_request/*`), so a version above v2 is judged against v2 in one build. A v3

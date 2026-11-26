@@ -6,8 +6,10 @@
 ; Decoder (httpasm_hpack_decode): one complete header block (an HTTP/2 HEADERS frame's fragment
 ; with its CONTINUATIONs) into httpasm_field records, in block order (RFC7541-2.1-p1#2):
 ;   - integers with N-bit prefixes, at most 5 continuation octets and 2^32-1 (RFC7541-5.1-p15);
-;   - strings raw or Huffman-coded, decoded 4 bits per step through the generated automaton
-;     (generated/huffman.inc), with RFC 7541 5.2's padding and EOS rules;
+;   - strings raw or Huffman-coded, with RFC 7541 5.2's padding and EOS rules: at v1 4 bits per
+;     step through the generated automaton (generated/huffman.inc); from v2 up by a table
+;     decoder, up to two symbols per lookup of the next 12 bits (hp_string's .huffman_v2: the
+;     same octets, length and errors, 1.49x faster on a browser request's block);
 ;   - indexed fields (index 0 and indices past both tables are errors), literals with
 ;     incremental indexing, without indexing and never indexed (the last keeps
 ;     HTTPASM_FIELD_FLAG_NEVER_INDEXED on its record, so a forwarder can keep it so);
@@ -393,11 +395,20 @@ hp_int:
 ;   it; or rax = -HTTPASM_ERROR_HPACK_* (truncated, an integer past the limits, a Huffman
 ;   string with EOS or bad padding: RFC7541-5.2-p10#1..3).
 ;   Clobbers rcx, rdx, rsi, rdi, r8-r11 and the flags. Keeps rbx, rbp, r13-r15.
+;   Memory: reads the block only, never at or past r13 (v2's 8-octet reads may pass the string's
+;   end, never the block's). Writes rdi[0..r9) only, but within that room it may write octets
+;   past the decoded length (v2's two-symbol stores): every caller hands either free space or
+;   exactly the decoded length, so nothing it keeps is there.
 ;
-;   The Huffman automaton takes a nibble per step (generate.cs Emit.Huffman): a step can finish
-;   at most one symbol (no code is shorter than 5 bits), never EOS, and its ACCEPT bit says
-;   whether the string may end there: on a symbol boundary, or within 7 bits of all ones (the
-;   start of EOS's code).
+;   Two versions of a Huffman string (HA_CPU_PICK1 at .huffman), the same octets, length and
+;   errors for every input (tests/native/tiers):
+;     v1  the automaton takes a nibble per step (generate.cs Emit.Huffman): a step can finish at
+;         most one symbol (no code is shorter than 5 bits), never EOS, and its ACCEPT bit says
+;         whether the string may end there: on a symbol boundary, or within 7 bits of all ones
+;         (the start of EOS's code). Each step's table load waits for the one before: two per
+;         octet, about 10 cycles per symbol.
+;     v2  a table decoder (.huffman_v2, described there): one lookup per 12 bits, up to two
+;         symbols, about half the latency per symbol.
 ; -----------------------------------------------------------------------------
 align 16
 hp_string:
@@ -428,6 +439,7 @@ hp_string:
     lea     r11, [r12 + rax]                ; the string's end
     mov     r10, rdi                        ; the output's start
     add     r9, rdi                         ; the output's room ends here
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .huffman_v2
     xor     edx, edx                        ; the automaton's state
     mov     r8d, HA_HUFF_ACCEPT             ; an empty string is valid
     lea     rsi, [rel ha_huff_decode]
@@ -482,6 +494,205 @@ hp_string:
 .truncated:
     mov     rax, -HTTPASM_ERROR_HPACK_TRUNCATED
     ret
+
+; ---- v2: the table decoder (the same octets, length and errors as the automaton above).
+;
+; The string is a big-endian bit stream; r14 counts its bits not yet decoded. A window (rdx)
+; holds the next bits at its top: each group reads the 8 octets that hold the next bit (inside
+; the block, which may go past the string; at the block's end, the octets left, zero-filled), so
+; the window has at least 57 valid bits or every bit to the block's end. Four lookups follow,
+; each of the next 12 bits in ha_huff_pair (generated: up to two symbols, their bits, their
+; count): when the entry's bits lie within the string, the lookup shifts the window by them (the
+; dword's low byte: the load feeds the shift directly), stores the two symbols (a lone symbol's
+; neighbour is overwritten by the next lookup, or lies past the string's end in the caller's room)
+; and advances the output by the count. Four lookups take at most 48 bits, within the window's 57.
+;
+; A first code longer than 12 bits has the dword 0: it stores nothing lasting and moves nothing,
+; so the lookups after it repeat it, and the check after the four (bits 0) hands the string to
+; .h2_single at that code. So does an output with less than 16 octets of room (one symbol at a
+; time, written while they fit; with no room at all the lookups only count, .h2_count).
+; .h2_single decodes one symbol by the canonical tables (ha_huff_limit, ha_huff_offset,
+; ha_huff_sorted: the first length whose top bits fall below its limit), bounded by the bits
+; left. An entry whose bits pass the string's end goes to .h2_partial: the string's last bits,
+; its last symbol and its padding, settled with ha_huff_first_bits without a search. Bits left
+; that no code fits are padding: at most 7 bits, all ones, or the string is refused, as the
+; automaton refuses it (RFC7541-5.2-p10); EOS decoded within the string is refused too. The
+; decoder keeps the automaton's contract: the same octets in the room, the same length, the same
+; errors (tests/native/tiers compares them on every kind of string).
+;
+; Registers: r12 the string, r11 its end, r13 the block's end (hp_string's caller: reads stay
+; below it), r14 the string's bits left, r15 its bits in all (r14 and r15 saved here), rdx the
+; window, rsi ha_huff_pair, rdi the output, r9 the room's end, r10 the output's start.
+
+; H2_WINDOW: rdx = the window at the string's next bit (bit r15 - r14). Clobbers rax, rcx, r8.
+%macro H2_WINDOW 0
+    mov     rax, r15
+    sub     rax, r14                        ; the bits read
+    shr     rax, 3                          ; the octet that holds the next bit
+    lea     r8, [r12 + rax + 8]
+    cmp     r8, r13
+    ja      %%tail
+    mov     rdx, [r12 + rax]                ; 8 octets inside the block
+    bswap   rdx
+    jmp     %%shift
+%%tail:                                     ; 1-7 octets to the block's end, zero-filled
+    lea     r8, [r12 + rax]
+    xor     edx, edx
+    mov     ecx, 56
+%%octet:
+    movzx   eax, byte [r8]
+    shl     rax, cl
+    or      rdx, rax
+    inc     r8
+    sub     ecx, 8
+    cmp     r8, r13
+    jb      %%octet
+%%shift:
+    mov     rcx, r15
+    sub     rcx, r14
+    and     ecx, 7
+    shl     rdx, cl                         ; the next bit at bit 63
+%endmacro
+
+.huffman_v2:
+    push    r14
+    push    r15
+    lea     rsi, [rel ha_huff_pair]
+    mov     r14, r11
+    sub     r14, r12
+    shl     r14, 3                          ; the string's bits, all left
+    mov     r15, r14
+.h2_group:
+    test    r14, r14
+    jz      .h2_done                        ; every bit decoded: the string ended on a code
+    H2_WINDOW
+    lea     rcx, [rdi + 16]
+    cmp     rcx, r9
+    ja      .h2_little_room                 ; the stores could pass the room's end
+%rep 4
+    mov     r8, rdx
+    shr     r8, 64 - 12                     ; the next 12 bits (kept for .h2_partial)
+    mov     ecx, [rsi + r8 * 4]             ; cl = the bits, ch = the count, then the symbols
+    movzx   eax, cl
+    cmp     rax, r14
+    ja      .h2_partial                     ; past the string's end: its last bits
+    shl     rdx, cl                         ; the chain: the load, then this shift
+    sub     r14, rax
+    mov     eax, ecx
+    shr     eax, 16
+    mov     [rdi], ax                       ; the symbols (a lone one's neighbour: overwritten next)
+    movzx   eax, ch
+    add     rdi, rax
+%endrep
+    test    cl, cl
+    jz      .h2_single                      ; a long code stopped the lookups (dword 0)
+    jmp     .h2_group
+.h2_little_room:
+    cmp     rdi, r9
+    jb      .h2_single                      ; some room left: filled one symbol at a time
+.h2_count:                                  ; no room: the same lookups, counting only
+%rep 4
+    mov     r8, rdx
+    shr     r8, 64 - 12
+    mov     ecx, [rsi + r8 * 4]
+    movzx   eax, cl
+    cmp     rax, r14
+    ja      .h2_partial
+    shl     rdx, cl
+    sub     r14, rax
+    movzx   eax, ch
+    add     rdi, rax
+%endrep
+    test    cl, cl
+    jz      .h2_single
+    test    r14, r14
+    jz      .h2_done
+    H2_WINDOW
+    jmp     .h2_count
+
+.h2_partial:
+    ; The entry's bits pass the string's end (r14 bits left; ecx = the entry, r8 = the 12 bits
+    ; looked up, rdx the window there). Its first code is the string's when it fits: the code at
+    ; this position is unique (a prefix code), whatever the bits past the end are. It is written
+    ; when the room holds it (the counting loop's output has none left: counted only). What is
+    ; left after it cannot hold the entry's second code, nor any code: it is padding. When not
+    ; even the first code fits, everything left is padding.
+    mov     eax, ecx                        ; the entry: its first symbol in bits 16-23
+    lea     rcx, [rel ha_huff_first_bits]
+    movzx   ecx, byte [rcx + r8]            ; the first code's bits alone
+    cmp     rcx, r14
+    ja      .h2_padding
+    cmp     rdi, r9
+    jae     .h2_partial_counted
+    shr     eax, 16
+    mov     [rdi], al
+.h2_partial_counted:
+    inc     rdi
+    sub     r14, rcx
+    shl     rdx, cl
+    jmp     .h2_padding                     ; (none left: .h2_padding ends the string)
+
+.h2_single:                                 ; one symbol, by the canonical tables
+    test    r14, r14
+    jz      .h2_done                        ; the string ended on a code inside a group: no
+                                            ; window then (it would read past the block's end)
+    H2_WINDOW
+    mov     r8d, 5                          ; the shortest code's length
+.h2_length:
+    cmp     r8, r14
+    ja      .h2_padding                     ; no code within the bits left: they are padding
+    mov     ecx, 64
+    sub     ecx, r8d
+    mov     rax, rdx
+    shr     rax, cl                         ; the next r8 bits
+    lea     rcx, [rel ha_huff_limit]
+    cmp     eax, [rcx + r8 * 4]
+    jb      .h2_code
+    inc     r8d
+    jmp     .h2_length                      ; the code is complete: a length up to 30 fits
+.h2_code:
+    lea     rcx, [rel ha_huff_offset]
+    add     eax, [rcx + r8 * 4]             ; its index in canonical order
+    lea     rcx, [rel ha_huff_sorted]
+    movzx   eax, word [rcx + rax * 2]
+    cmp     eax, 256
+    je      .h2_bad                         ; EOS inside the string (RFC7541-5.2-p10#3)
+    cmp     rdi, r9
+    jae     .h2_counted                     ; past the room: counted, not written
+    mov     [rdi], al
+.h2_counted:
+    inc     rdi
+    sub     r14, r8
+    jmp     .h2_group
+.h2_padding:
+    ; r14 bits are left and no code fits in them: at most 7, all ones (EOS's start). None left
+    ; is no padding at all (a string that ends on a code, met by .h2_partial's next lookup); it
+    ; must not reach the shift below, whose count 64 x86 takes as 0.
+    test    r14, r14
+    jz      .h2_done
+    cmp     r14, 7
+    ja      .h2_bad
+    mov     ecx, 64
+    sub     ecx, r14d
+    mov     rax, rdx
+    shr     rax, cl                         ; the r14 bits
+    mov     ecx, r14d
+    mov     edx, 1
+    shl     edx, cl
+    dec     edx                             ; r14 ones
+    cmp     eax, edx
+    jne     .h2_bad
+.h2_done:
+    mov     r12, r11                        ; past the string
+    mov     rax, rdi
+    sub     rax, r10                        ; the decoded length
+    pop     r15
+    pop     r14
+    ret
+.h2_bad:
+    pop     r15
+    pop     r14
+    jmp     .bad
 
 ; -----------------------------------------------------------------------------
 ; int64_t httpasm_hpack_decode(httpasm_hpack *table, const uint8_t *block, size_t length,

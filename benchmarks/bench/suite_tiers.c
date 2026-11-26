@@ -51,12 +51,37 @@ static void add_h1_request(const char *input, const char *head)
     bench_add(&c);
 }
 
+/* add_hpack_decode: the tiers case of httpasm_hpack_decode on the rivals suite's block (bench.h):
+ * the Huffman decoder's versions (v1's automaton, v2's table decoder) each against the tier below.
+ * Left out, with a word on stderr, when the block cannot be made. */
+static void add_hpack_decode(void)
+{
+    const uint8_t *block;
+    size_t length;
+    if (bench_hpack_block(&block, &length) != 0) {
+        fprintf(stderr, "bench: tiers: no HPACK block: the hpack_decode case is left out\n");
+        return;
+    }
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "hpack_decode";
+    c.input = "browser request's block";
+    c.data = block;
+    c.length = length;
+    c.octets = length;
+    c.ours = bench_hpack_decode;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* bench_suite_tiers: registers the suite's cases (bench.h). */
 void bench_suite_tiers(void)
 {
     add_h1_request("small GET", bench_small_request);
     add_h1_request("browser GET", bench_browser_request);
     add_h1_request("API POST", bench_api_request);
+    add_hpack_decode();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

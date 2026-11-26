@@ -167,9 +167,9 @@ static int decoder_init(const bench_build *b, void *memory, size_t size)
     return b->api.httpasm_hpack_init(memory, size, 4096, 0);
 }
 
-/* httpasm_hpack_decoder: httpasm_hpack_decode of the block, `calls` times, with the build's own
- * decoder table. */
-static void httpasm_hpack_decoder(const bench_build *b, const bench_case *c, long calls)
+/* bench_hpack_decode: httpasm_hpack_decode of the case's block, `calls` times, with the build's
+ * own decoder table (bench.h: the tiers suite runs it too, with bench_hpack_block's block). */
+void bench_hpack_decode(const bench_build *b, const bench_case *c, long calls)
 {
     static httpasm_field fields[MAX_FIELDS];
     static uint8_t space[16384];
@@ -217,11 +217,17 @@ static const bench_rival hpack_rivals[] = {
     { "nghttp2 1.71.0", nghttp2_hpack_decoder },
 };
 
-/* make_block: the HPACK block: the browser request's fields as HTTP/2 sends them, encoded once by
- * the first build's encoder with Huffman, every field flagged NO_INDEX (so decoding it never
- * changes a table). Returns 0, or -1 when there is no build or encoding fails. */
-static int make_block(void)
+/* bench_hpack_block: the HPACK block (bench.h): the browser request's fields as HTTP/2 sends
+ * them, encoded by the first build's encoder with Huffman, every field flagged NO_INDEX (so
+ * decoding it never changes a table). Built on the first call; every suite shares it.
+ *   data, length  out: the block. Returns 0, or -1 when there is no build or encoding fails. */
+int bench_hpack_block(const uint8_t **data, size_t *length)
 {
+    if (block_length > 0) {
+        *data = block;
+        *length = block_length;
+        return 0;
+    }
     const bench_build *b = bench_first_build();
     if (b == NULL)
         return -1;
@@ -257,6 +263,8 @@ static int make_block(void)
     if (n <= 0)
         return -1;
     block_length = (size_t)n;
+    *data = block;
+    *length = block_length;
     return 0;
 }
 
@@ -288,10 +296,12 @@ void bench_suite_rivals(void)
     add("h1_request", "small GET", bench_small_request, sizeof bench_small_request - 1, bench_h1_request, h1_rivals, n);
     add("h1_request", "browser GET", bench_browser_request, sizeof bench_browser_request - 1, bench_h1_request, h1_rivals, n);
     add("h1_request", "API POST", bench_api_request, sizeof bench_api_request - 1, bench_h1_request, h1_rivals, n);
-    if (make_block() != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {
+    const uint8_t *hpack_block;
+    size_t hpack_length;
+    if (bench_hpack_block(&hpack_block, &hpack_length) != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {
         fprintf(stderr, "bench: rivals: no HPACK block or nghttp2 decoder: the HPACK case is left out\n");
         return;
     }
-    add("hpack_decode", "browser request's block", block, block_length, httpasm_hpack_decoder, hpack_rivals,
+    add("hpack_decode", "browser request's block", hpack_block, hpack_length, bench_hpack_decode, hpack_rivals,
         sizeof hpack_rivals / sizeof hpack_rivals[0]);
 }

@@ -723,7 +723,151 @@ internal static class Emit
             s.Append("    dd ").Append(string.Join(", ", entries.Select(e => $"0x{e:X5}"))).Append($"    ; {state}\n");
         }
 
+        AppendHuffmanTables(s, code);
         return s.ToString();
+    }
+
+    /// <summary>The bits ha_huff_pair is indexed by: the next 12 bits of a Huffman string.</summary>
+    private const int PairBits = 12;
+
+    /// <summary>The table decoder's data (hpack.asm hp_string's v2 decoder): ha_huff_pair, the
+    /// symbols the next <see cref="PairBits"/> bits begin with, and the canonical tables for the
+    /// codes longer than that.</summary>
+    /// <param name="s">The file being written.</param>
+    /// <param name="code">The code (symbol, code aligned to the least significant bit, length).</param>
+    /// <remarks>
+    /// ha_huff_pair[i] for the 12 bits i is a dword: byte 0 the bits the symbols take, byte 1 how
+    /// many symbols (1 or 2), byte 2 the first symbol, byte 3 the second. The bits come first so
+    /// that the decoder shifts its window by the loaded dword's low byte directly (each lookup's
+    /// latency chain: load, then shift); it then stores the two symbols (the second overwritten
+    /// next when there is just one) and advances by byte 1. A first code longer than 12 bits gives
+    /// the dword 0: a step that writes nothing lasting, consumes nothing and counts nothing, which
+    /// the decoder notices and hands to the canonical tables. A second symbol is listed only when its whole
+    /// code lies within the 12 bits. EOS is 30 bits, so no entry holds it. Then, for every length
+    /// L of 1-32 (dword arrays indexed by L):
+    /// ha_huff_limit[L], one past the last L-bit code's value (0 when there is none), and
+    /// ha_huff_offset[L], what the value of an L-bit code adds up to its index in
+    /// ha_huff_sorted, the symbols (dw: EOS is 256) in canonical order. A decoder that tries L
+    /// upwards and takes the first L whose top L bits are below the limit decodes exactly, since
+    /// the code is canonical: checked here, or the generator stops.
+    /// </remarks>
+    /// <exception cref="GenerateException">The code is not canonical (the length tables would
+    /// decode wrongly), or EOS's code is short enough to fall within a pair entry's bits (the
+    /// decoder's fast path would emit it instead of failing).</exception>
+    private static void AppendHuffmanTables(StringBuilder s, IReadOnlyList<(int Symbol, uint Code, int Length)> code)
+    {
+        // Canonical: sorted by (length, symbol), each code is the one before plus one, shifted
+        // left by the growth in length. The decoder's length tables rely on it.
+        var sorted = code.OrderBy(c => c.Length).ThenBy(c => c.Symbol).ToList();
+        ulong next = 0;
+        int length = sorted[0].Length;
+        foreach ((int symbol, uint bits, int l) in sorted)
+        {
+            next <<= l - length;
+            length = l;
+            if (bits != next)
+            {
+                throw new GenerateException($"Huffman: the code is not canonical at symbol {symbol}");
+            }
+
+            next++;
+        }
+
+        // ha_huff_pair: decode greedily from each 12-bit prefix.
+        var byLength = code.ToDictionary(c => (c.Length, c.Code), c => c.Symbol);
+        (int Symbol, int Length)? First(uint prefix, int available)
+        {
+            for (int l = 1; l <= available; l++)
+            {
+                uint top = prefix >> (available - l);
+                if (byLength.TryGetValue((l, top), out int symbol))
+                {
+                    return (symbol, l);
+                }
+            }
+
+            return null;
+        }
+
+        s.Append($"\n; ha_huff_pair[the next {PairBits} bits]: bits used, symbol count, first symbol, second symbol (bytes 0-3);\n");
+        s.Append("; 0 when the first code is longer (decoded by ha_huff_limit, _offset and _sorted).\n");
+        s.Append("align 64\nha_huff_pair:\n");
+        var entries = new uint[1 << PairBits];
+        for (uint i = 0; i < entries.Length; i++)
+        {
+            (int Symbol, int Length)? first = First(i, PairBits);
+            if (first is null)
+            {
+                entries[i] = 0;
+                continue;
+            }
+
+            (int symbol1, int length1) = first.Value;
+            if (symbol1 == 256)
+            {
+                throw new GenerateException("Huffman: EOS within the pair table's bits");
+            }
+
+            int rest = PairBits - length1;
+            uint low = i & ((1u << rest) - 1);
+            (int Symbol, int Length)? second = rest > 0 ? First(low, rest) : null;
+            if (second is { } two && two.Symbol != 256)
+            {
+                entries[i] = (uint)(length1 + two.Length) | 2u << 8 | (uint)symbol1 << 16 | (uint)two.Symbol << 24;
+            }
+            else
+            {
+                entries[i] = (uint)length1 | 1u << 8 | (uint)symbol1 << 16;
+            }
+        }
+
+        for (int row = 0; row < entries.Length; row += 8)
+        {
+            s.Append("    dd ").Append(string.Join(", ", entries.Skip(row).Take(8).Select(e => $"0x{e:X8}"))).Append('\n');
+        }
+
+        // ha_huff_first_bits: the first code's length alone, for the string's end, where a pair
+        // entry's bits pass the end: the first symbol is the string's if its code fits, and
+        // otherwise what is left can only be padding.
+        s.Append($"\n; ha_huff_first_bits[the next {PairBits} bits]: the first code's length (0 when longer than {PairBits}).\n");
+        s.Append("align 64\nha_huff_first_bits:\n");
+        var firstBits = new byte[1 << PairBits];
+        for (uint i = 0; i < firstBits.Length; i++)
+        {
+            firstBits[i] = (byte)(First(i, PairBits)?.Length ?? 0);
+        }
+
+        for (int row = 0; row < firstBits.Length; row += 32)
+        {
+            s.Append("    db ").Append(string.Join(", ", firstBits.Skip(row).Take(32))).Append('\n');
+        }
+
+        // The canonical tables, indexed by length 0-32 (lengths without codes: limit 0).
+        var limit = new uint[33];
+        var offset = new int[33];
+        int index = 0;
+        for (int l = 1; l <= 32; l++)
+        {
+            var codes = sorted.Where(c => c.Length == l).ToList();
+            if (codes.Count == 0)
+            {
+                continue;
+            }
+
+            limit[l] = codes[^1].Code + 1;
+            offset[l] = index - (int)codes[0].Code;
+            index += codes.Count;
+        }
+
+        s.Append("\n; ha_huff_limit[L]: one past the last L-bit code's value, 0 for none (L = 0-32).\nalign 4\nha_huff_limit:\n");
+        s.Append("    dd ").Append(string.Join(", ", limit.Select(v => $"0x{v:X8}"))).Append('\n');
+        s.Append("\n; ha_huff_offset[L]: added to an L-bit code's value, its index in ha_huff_sorted (L = 0-32).\nha_huff_offset:\n");
+        s.Append("    dd ").Append(string.Join(", ", offset)).Append('\n');
+        s.Append("\n; ha_huff_sorted: the symbols in canonical order (by length, then symbol; EOS = 256 last).\nalign 2\nha_huff_sorted:\n");
+        for (int row = 0; row < sorted.Count; row += 16)
+        {
+            s.Append("    dw ").Append(string.Join(", ", sorted.Skip(row).Take(16).Select(c => c.Symbol))).Append('\n');
+        }
     }
 
     /// <summary>generated/status.inc: HTTP/1.1 status lines of the registered codes (data, include once).</summary>

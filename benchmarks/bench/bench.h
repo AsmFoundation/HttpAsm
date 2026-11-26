@@ -166,6 +166,16 @@ extern const char bench_api_request[];
  * either suite: bench_case.ours. */
 void bench_h1_request(const bench_build *b, const bench_case *c, long calls);
 
+/* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
+ * nothing, built by the first build's encoder on the first call and shared by every suite
+ * (suite_rivals.c), so the tiers suite times the decoder's versions on the rivals' octets.
+ *   data, length  out: the block. Returns 0, or -1 when there is no build or encoding fails. */
+int bench_hpack_block(const uint8_t **data, size_t *length);
+
+/* bench_hpack_decode: httpasm_hpack_decode of the case's block, `calls` times, with the build's
+ * own decoder table (suite_rivals.c). A batch for either suite. */
+void bench_hpack_decode(const bench_build *b, const bench_case *c, long calls);
+
 /* The suites' registration functions, called by bench.c's main in this order. A suite whose
  * setup fails registers nothing and says why on stderr. */
 void bench_suite_tiers(void);
