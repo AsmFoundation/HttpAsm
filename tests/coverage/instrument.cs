@@ -26,6 +26,9 @@
 //   4. writes <object>.covmap beside the object: one line per marker (id, kind, the original
 //      file and line, the scope label, and the label or jump it stands for);
 //   5. assembles the instrumented text with the real NASM and the build's own arguments.
+// A source NASM cannot preprocess alone (an %if over equ symbols) is assembled as it is, and its
+// map records the octets of instructions left unmarked: report.cs fails the gate when there are
+// any, so code never drops out of the gate's sight with only a note to show for it.
 // Other sources the SDK assembles (its libc stubs) pass through untouched.
 //
 // Usage (as AsmNasmCommand): dotnet run --file tests/coverage/instrument.cs --
@@ -33,6 +36,7 @@
 //   (--section defaults to ha_cov)
 // Exit status: NASM's, or 2 for a usage error or an instruction this tool cannot instrument.
 // =============================================================================
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -116,19 +120,39 @@ internal static partial class Instrumenter
         string normalizedSource = source.Replace('\\', '/');
         if (Nasm(nasm, preArgs, out string preprocessErrors) != 0)
         {
-            // Some sources cannot be preprocessed alone: an %if over symbols ("%if ($ - table)
-            // != 256", semantics/tables.asm) needs the assembler. Such a source is assembled as
-            // it is, and its map says so, so the report lists it as not instrumented rather
-            // than dropping it. The preprocessor's complaints are kept back (MSBuild would count
-            // their "error" lines as the build's errors) and shown only if assembling fails too.
-            File.WriteAllLines(map, [$"# source\t{normalizedSource}\thash\t{Fnv1a(normalizedSource):X16}\tcount\t0", $"# uninstrumented\t{FirstLine(preprocessErrors)}"]);
+            // Some sources cannot be preprocessed alone: an %if over equ symbols (semantics/
+            // tables.asm builds its character table with "%if (bits & (HA_CC_DIGIT | ...))",
+            // and HA_CC_DIGIT is an equ) needs the assembler, which NASM's -E mode refuses with
+            // "symbol references not supported in preprocess-only mode". Such a source is
+            // assembled as it is, and its map says so, so the report lists it as not
+            // instrumented rather than dropping it. The preprocessor's complaints are kept back
+            // (MSBuild would count their "error" lines as the build's errors) and shown only if
+            // assembling fails too.
             int plain = Nasm(nasm, nasmArgs);
             if (plain != 0)
             {
                 Console.Error.Write(preprocessErrors);
+                return plain;
             }
 
-            return plain;
+            // The map also says how many octets of instructions went unmarked, read from the
+            // object just assembled. None (a source of tables only) is harmless; any is code the
+            // gate cannot see, and report.cs fails the gate for it: client.asm was assembled so,
+            // without a word but the report's note, while one "%if" over equ symbols kept it
+            // from being preprocessed alone (b7b30d7).
+            long code;
+            try
+            {
+                code = ExecutableOctets(obj);
+            }
+            catch (Exception e) when (e is InvalidDataException or IOException)
+            {
+                Console.Error.WriteLine($"instrument.cs: {obj}: {e.Message}");
+                return 2;
+            }
+
+            File.WriteAllLines(map, [$"# source\t{normalizedSource}\thash\t{Fnv1a(normalizedSource):X16}\tcount\t0", $"# uninstrumented\t{code}\t{FirstLine(preprocessErrors)}"]);
+            return 0;
         }
 
         try
@@ -202,6 +226,55 @@ internal static partial class Instrumenter
         process.WaitForExit();
         messages = stdout + stderr.Result;
         return process.ExitCode;
+    }
+
+    /// <summary>
+    /// The octets of instructions an ELF64 object holds: the sizes of its sections flagged
+    /// SHF_EXECINSTR, summed. Zero for an object of data only (NASM may still emit an empty
+    /// .text). Used on a source assembled without markers, to tell a harmless one from one whose
+    /// code the coverage gate would not see.
+    /// </summary>
+    /// <param name="path">The object NASM wrote (the Coverage and Fuzz builds are linux-x64: -f elf64).</param>
+    /// <returns>The octets of instructions.</returns>
+    /// <exception cref="InvalidDataException">The file is not a little-endian ELF64 object, its section table lies outside it, or it uses extended section numbering (more than 65,279 sections, which NASM never writes for one source).</exception>
+    /// <exception cref="IOException">The file could not be read.</exception>
+    private static long ExecutableOctets(string path)
+    {
+        byte[] elf = File.ReadAllBytes(path);
+        // e_ident: 0x7F "ELF", EI_CLASS 2 (ELFCLASS64), EI_DATA 1 (little-endian). Anything
+        // else would make the offsets below read the wrong fields: refused, not guessed at.
+        if (elf.Length < 64 || elf[0] != 0x7F || elf[1] != (byte)'E' || elf[2] != (byte)'L' || elf[3] != (byte)'F' || elf[4] != 2 || elf[5] != 1)
+        {
+            throw new InvalidDataException("not a little-endian ELF64 object");
+        }
+
+        long shoff = BinaryPrimitives.ReadInt64LittleEndian(elf.AsSpan(0x28));          // e_shoff
+        int shentsize = BinaryPrimitives.ReadUInt16LittleEndian(elf.AsSpan(0x3A));     // e_shentsize
+        int shnum = BinaryPrimitives.ReadUInt16LittleEndian(elf.AsSpan(0x3C));         // e_shnum
+        if (shnum == 0 && shoff != 0)
+        {
+            // e_shnum 0 with a table present means the count is in section 0's sh_size
+            // (extended numbering); one source never needs it, so it is refused, not read.
+            throw new InvalidDataException("extended section numbering");
+        }
+
+        if (shentsize < 64 || shoff < 0 || shoff + (long)shentsize * shnum > elf.Length)
+        {
+            throw new InvalidDataException("the section header table lies outside the file");
+        }
+
+        long code = 0;
+        for (int i = 0; i < shnum; i++)
+        {
+            ReadOnlySpan<byte> header = elf.AsSpan((int)(shoff + ((long)i * shentsize)), 64);
+            ulong flags = BinaryPrimitives.ReadUInt64LittleEndian(header[8..]);          // sh_flags
+            if ((flags & 0x4) != 0)                                                       // SHF_EXECINSTR
+            {
+                code += BinaryPrimitives.ReadInt64LittleEndian(header[32..]);            // sh_size
+            }
+        }
+
+        return code;
     }
 
     /// <summary>The first line of a text, for a one-line note.</summary>

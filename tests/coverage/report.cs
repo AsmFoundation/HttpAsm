@@ -19,6 +19,9 @@
 // race between threads takes (two answers claiming one exchange at once, a push meeting
 // another). No test can force such a race, and none can rule it out either, so the entry may
 // run or not in any one run; it must still match a marker of the build.
+// The gate also fails on a source the build assembled without markers when its object holds
+// instructions (instrument.cs records how many octets): that code would be invisible to every
+// rule above. A source of tables only is listed and passes.
 // --write-unreachable FILE writes the markers that did not run as a list to start from, each
 // reason "TODO", for a person to replace or the tests to remove.
 //
@@ -37,8 +40,17 @@ internal static partial class Coverage
     /// <summary>The magic at the start of every object's region of markers.</summary>
     private static readonly byte[] Magic = "HACOV001"u8.ToArray();
 
-    /// <summary>Sources the Coverage build assembled without markers, each with the reason.</summary>
-    private static readonly List<string> Uninstrumented = [];
+    /// <summary>
+    /// Sources the Coverage build assembled without markers. One whose <see cref="Unmarked.Code"/>
+    /// is above zero fails the gate: its instructions ran or not without anyone seeing.
+    /// </summary>
+    private static readonly List<Unmarked> Uninstrumented = [];
+
+    /// <summary>A source assembled without markers (instrument.cs could not preprocess it alone).</summary>
+    /// <param name="File">The source, relative to the repository.</param>
+    /// <param name="Code">The octets of instructions its object holds: 0 for tables only.</param>
+    /// <param name="Reason">The preprocessor's first complaint.</param>
+    private sealed record Unmarked(string File, long Code, string Reason);
 
     /// <summary>One marker of one object.</summary>
     /// <param name="Id">Its index in the object's region.</param>
@@ -129,10 +141,12 @@ internal static partial class Coverage
         if (Uninstrumented.Count > 0)
         {
             Console.WriteLine();
-            Console.WriteLine($"Not instrumented ({Uninstrumented.Count}; these have no markers, so the gate cannot see their code):");
-            foreach (string note in Uninstrumented.Order(StringComparer.Ordinal))
+            Console.WriteLine($"Not instrumented ({Uninstrumented.Count}; these have no markers, so the gate cannot see their code, and one with code fails it):");
+            foreach (Unmarked u in Uninstrumented.OrderBy(u => u.File, StringComparer.Ordinal))
             {
-                Console.WriteLine($"- {note}");
+                Console.WriteLine(u.Code > 0
+                    ? $"- {u.File}: {u.Code} octets of instructions unmarked: {u.Reason}"
+                    : $"- {u.File}: tables only: {u.Reason}");
             }
         }
 
@@ -163,14 +177,18 @@ internal static partial class Coverage
         var stale = listed.Where(p => races.Contains(p.Key)
             ? p.Value > allKeys.GetValueOrDefault(p.Key)
             : p.Value > notRunKeys.GetValueOrDefault(p.Key)).ToList();
+        // Code assembled without markers is outside every rule above, so it fails the gate on
+        // its own: the fix is to make the source preprocess alone (an assembly-time check in
+        // place of an %if over equ symbols, as client.asm's), not to list anything.
+        int hidden = Uninstrumented.Count(u => u.Code > 0);
         Console.WriteLine();
-        Console.WriteLine($"Gate: {notRun.Count} markers did not run; {unlisted.Sum(p => p.Value - listed.GetValueOrDefault(p.Key))} of them are not in tests/coverage/unreachable.tsv; {stale.Count} listed entries ran or no longer exist.");
+        Console.WriteLine($"Gate: {notRun.Count} markers did not run; {unlisted.Sum(p => p.Value - listed.GetValueOrDefault(p.Key))} of them are not in tests/coverage/unreachable.tsv; {stale.Count} listed entries ran or no longer exist; {hidden} sources with code are not instrumented.");
         foreach (var (key, _) in stale)
         {
             Console.WriteLine($"- stale: {key.Replace('\t', ' ')}");
         }
 
-        return reportOnly || (unlisted.Count == 0 && stale.Count == 0) ? 0 : 1;
+        return reportOnly || (unlisted.Count == 0 && stale.Count == 0 && hidden == 0) ? 0 : 1;
     }
 
     /// <summary>
@@ -209,8 +227,17 @@ internal static partial class Coverage
                     if (line.StartsWith("# uninstrumented", StringComparison.Ordinal))
                     {
                         // instrument.cs could not preprocess the source alone (an %if over
-                        // symbols) and assembled it as it is: shown, never silently dropped.
-                        Uninstrumented.Add($"{Relative(repo, header[1])}: {line["# uninstrumented".Length..].Trim()}");
+                        // equ symbols) and assembled it as it is: shown, never silently
+                        // dropped, and failing the gate when the object holds instructions.
+                        // "# uninstrumented", the octets of instructions, the reason; a map
+                        // without the count is from an instrument.cs before it (rebuild).
+                        string[] u = line.Split('\t', 3);
+                        if (u.Length != 3 || !long.TryParse(u[1], out long code) || code < 0)
+                        {
+                            throw new InvalidDataException($"{path}: malformed line (rebuild the Coverage configuration): {line}");
+                        }
+
+                        Uninstrumented.Add(new Unmarked(Relative(repo, header[1]), code, u[2].Trim()));
                         continue;
                     }
 
