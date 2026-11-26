@@ -709,6 +709,7 @@ ha_uring_conn:
     test    r13, r13
     js      .send_error
     add     [rbx + conn.wsent], r13
+    add     [rbx + conn.progress], r13      ; octets that left: a transfer's progress
     mov     rax, [rbx + conn.wlen]
     cmp     [rbx + conn.wsent], rax
     jb      .send_full                      ; the socket took part: wait until writable
@@ -750,6 +751,7 @@ ha_uring_conn:
     jz      .eof
     js      .recv_error
     add     [rbx + conn.rlen], r13
+    INPUT_PROGRESS rbx, r13                 ; a body's octets keep it alive, a head's do not
     mov     rdi, rbx
     call    ha_conn_drive
     jmp     .rearm

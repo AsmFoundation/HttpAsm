@@ -140,9 +140,12 @@ internal sealed unsafe class TestServer : IDisposable
     /// <param name="limits">The heads' limits.</param>
     /// <param name="flags">HTTPASM_SERVER_* (<see cref="ServerIo.AskUring"/> is added in an
     /// io_uring run: <see cref="UringRun"/>).</param>
+    /// <param name="minDataRate">Octets a second a transfer keeps to outlive the idle timeout
+    /// (0: the library's default, 240).</param>
     /// <exception cref="InvalidOperationException">The server could not be created or started, or an io_uring run
     /// (<see cref="UringRun"/>) that requires io_uring (<see cref="RequireUring"/>) did not get it for every worker.</exception>
-    public TestServer(Action<Exchange> handler, uint workers = 2, uint idleMs = 0, ulong maxBody = 0, H1Limits limits = default, ushort flags = 0)
+    public TestServer(Action<Exchange> handler, uint workers = 2, uint idleMs = 0, ulong maxBody = 0, H1Limits limits = default, ushort flags = 0,
+        uint minDataRate = 0)
     {
         this.handler = handler;
         self = GCHandle.Alloc(this);
@@ -156,6 +159,7 @@ internal sealed unsafe class TestServer : IDisposable
             BindAddress = Loopback,
             Limits = limits,
             Flags = (ushort)(flags | (UringRun ? ServerIo.AskUring : 0)),
+            MinDataRate = minDataRate,
         };
         int error = 0;
         server = Native.ServerCreate(&options, &error);

@@ -72,6 +72,8 @@ HA_BUFFER_INITIAL   equ 16384       ; a connection's input and output buffers to
 HA_OUTPUT_HIGH      equ 1048576     ; output pending past this: stop reading the connection
 HA_DEFAULT_MAX_BODY equ 1048576     ; request body limit: 413 beyond
 HA_DEFAULT_IDLE_MS  equ 60000       ; idle and request-head timeout
+HA_DEFAULT_MIN_RATE equ 240         ; octets a second a transfer keeps to earn another idle window
+                                    ; (ha_conn_expire; ASP.NET Core Kestrel's MinRequestBodyDataRate)
 HA_LINGER_MS        equ 2000        ; after a closing response: read and discard this long, then close
 HA_STOP_GRACE_MS    equ 5000        ; httpasm_server_stop waits this long for in-flight exchanges
 HA_LISTEN_BACKLOG   equ 4096
@@ -123,6 +125,8 @@ struc server
     .started:           resd 1
     .stop:              resd 1  ; set by httpasm_server_stop; workers read it when woken
     .flags:             resd 1  ; HTTPASM_SERVER_* from the options
+    .min_rate:          resd 1  ; octets a second (options.min_data_rate, or HA_DEFAULT_MIN_RATE)
+    .pad:               resd 1  ; keeps .limits 8-octet aligned (copied as two qwords)
     .limits:            resb httpasm_h1_limits_size
 endstruc
 
@@ -169,6 +173,8 @@ struc conn
     .body_end:          resq 1  ; the end of the body decoded so far (chunked), or of the body
     .message_end:       resq 1  ; the end of the whole message, once complete
     .deadline:          resq 1  ; monotonic ms when the idle or head timeout closes it
+    .progress:          resq 1  ; octets a transfer moved since the deadline was set: sent, and
+                                ; request body received (ha_conn_expire judges them)
     .lru_prev:          resq 1  ; the worker's list, oldest deadline first
     .lru_next:          resq 1
     .fields:            resq 1  ; httpasm_field[max_fields]
@@ -234,6 +240,20 @@ CS_BODY_LENGTH      equ 1       ; reading a Content-Length body
 CS_BODY_CHUNKED     equ 2       ; decoding a chunked body
 CS_TRAILERS         equ 3       ; reading the chunked body's trailer section
 CS_READY            equ 4       ; the message is complete: the handler may run
+
+; INPUT_PROGRESS conn, octets: request octets just read count as progress (conn.progress, judged
+; by ha_conn_expire) while the connection reads an HTTP/1.1 body (CS_BODY_LENGTH,
+; CS_BODY_CHUNKED, CS_TRAILERS). A head's octets do not: a head must be whole within one idle
+; window, however it trickles in (slowloris). An HTTP/2 connection stays CS_HEAD here; h2_data
+; counts its DATA. Clobbers ecx and the flags.
+%macro INPUT_PROGRESS 2
+    mov     ecx, [%1 + conn.state]
+    sub     ecx, CS_BODY_LENGTH
+    cmp     ecx, CS_TRAILERS - CS_BODY_LENGTH
+    ja      %%not_a_body
+    add     [%1 + conn.progress], %2
+%%not_a_body:
+%endmacro
 
 ; -----------------------------------------------------------------------------
 ; A worker.
@@ -340,6 +360,7 @@ struc h2
     .opened:            resq 1  ; streams the peer opened (rapid-reset accounting)
     .glitch_tokens:     resq 1  ; the glitch budget left, in thousandths of a glitch (h2_glitch)
     .glitch_time:       resq 1  ; monotonic ms the budget was last refilled to
+    .swept:             resq 1  ; monotonic ms the streams were last judged (ha_h2_sweep)
     .frame_payload:     resq 1  ; the frame being handled: its payload
     .frame_length:      resd 1  ;   its length
     .frame_stream:      resd 1  ;   its stream id (the reserved bit cleared)
@@ -407,6 +428,8 @@ struc h2stream
     .head:              resq 1  ; the request's fields and their strings, one block
     .tail:              resq 1  ; the trailers' fields and strings, one block, or 0
     .conn:              resq 1
+    .moved:             resq 1  ; DATA octets in either direction since .moved_since (ha_h2_sweep)
+    .moved_since:       resq 1  ; monotonic ms the stream's current window began
     .id:                resd 1
     .flags:             resd 1  ; HSF_*
     .trailer_count:     resd 1
@@ -436,6 +459,7 @@ extern ha_conn_reap         ; (rdi = worker): frees the connections closed since
 extern ha_conn_release      ; (rdi = conn): a zombie whose answer came: onto the closed list
 extern ha_conn_respond      ; (rdi = conn, esi = status, rdx = fields, ecx = count, r8 = body, r9 = len, [rsp+8] = flags)
 extern ha_lru_touch         ; (rdi = conn): the deadline moves to now + idle, to the list's tail
+extern ha_conn_expire       ; (rdi = conn) -> eax 1 kept (a new window), 0 to close: its deadline passed
 extern ha_set_interest      ; (rdi = conn): the events waited for follow the connection's flags
 extern ha_interest_mask     ; (rdi = conn) -> esi: those events (EPOLL* = POLL*); clobbers ecx
 extern ha_uring_open        ; (rdi = worker) -> eax 0 or -errno: the worker's ring (uring.asm)
@@ -462,6 +486,7 @@ extern ha_h2_completion     ; (rdi = conn, rsi = completion): a deferred stream'
 extern ha_h2_free           ; (rdi = conn): frees the HTTP/2 state; deferred streams are detached
 extern ha_h2_goodbye        ; (rdi = conn): GOAWAY(NO_ERROR) and one best-effort send, before a close
 extern ha_h2_notice         ; (rdi = conn) -> eax 1 if closed: a graceful stop's GOAWAY(2^31 - 1), flushed
+extern ha_h2_sweep          ; (rdi = conn): every stream judged on its own progress; stuck ones 408 or reset
 extern ha_check_fields      ; (rdi = fields, esi = count, edx = HA_CHECK_*) -> eax 0 or HTTPASM_ERROR_*
 extern ha_status_reason     ; (edi = status) -> rax = its reason phrase, edx = its length (0: none)
 

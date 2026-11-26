@@ -489,13 +489,31 @@ typedef struct httpasm_server_options {
     uint64_t max_body;          /* request bodies past this get 413; default 1 MiB */
     uint32_t workers;           /* worker threads; default: the CPUs this process may run on */
     uint32_t idle_timeout_ms;   /* a connection idle, or a request head not complete, this long
-                                   is closed; default 60000 */
+                                   is closed; default 60000 (see min_data_rate) */
     uint32_t bind_address;      /* IPv4, network byte order; 0 is 0.0.0.0 */
     uint16_t port;              /* 0: any free port (httpasm_server_port tells which) */
     uint16_t flags;             /* HTTPASM_SERVER_* */
     httpasm_h1_limits limits;   /* the heads' limits */
-    uint64_t reserved;
+    uint32_t min_data_rate;     /* octets a second a transfer must keep to outlive the idle
+                                   timeout; default 240 (ASP.NET Core Kestrel's) */
+    uint32_t reserved;
 } httpasm_server_options;
+
+/* Timeouts. idle_timeout_ms is a window, judged when it ends:
+ * - A connection with nothing in progress closes: HTTP/1.1 between requests or within a request
+ *   head (a head must be whole within one window: slowloris), HTTP/2 with no active stream.
+ *   Control frames are no activity: an HTTP/2 connection that only PINGs closes, with GOAWAY.
+ * - A transfer in progress - a request body arriving, an answer being sent - gets another
+ *   window when it moved at least min_data_rate octets a second over the one that ended; below
+ *   that the connection closes (slow-POST/RUDY, slow reads: a client that holds an answer's
+ *   memory by reading it a few octets at a time). So a large transfer takes as long as it
+ *   needs, at any pace a real client keeps.
+ * - An HTTP/2 stream is judged on its own too, so busy connections cannot hide stuck streams: one
+ *   whose request stopped arriving is answered 408 and reset; one whose answer stopped leaving
+ *   (its window never opened) is reset with CANCEL.
+ * - A deferred exchange (httpasm_exchange_defer) holds its connection open: the handler decides.
+ * Footgun: min_data_rate counts octets the kernel took; a client with a large receive buffer
+ * takes the first megabytes of an answer at once, and is then judged on how it reads the rest. */
 
 /* The workers wait and do their I/O through epoll, unless HTTPASM_SERVER_URING asks each worker
  * for its own io_uring (Linux 5.13 or later) instead; a worker whose ring the kernel refuses

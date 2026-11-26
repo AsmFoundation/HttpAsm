@@ -138,6 +138,21 @@ Open, not decided yet:
   - **Idle:** event-based, with no ticks and no spinning. A worker sleeps in the kernel until a
     completion arrives or its nearest timer falls due. Busy polling is an opt-in for latency
     (Linux 6.13's IRQ suspension polls while busy and returns to interrupts when idle).
+  - **Timeouts** (phase H, 2026-11-26): the idle timeout is a window, judged when it ends
+    (`ha_conn_expire`). Each window gets a verdict:
+    - **Nothing in progress:** the connection closes. That covers HTTP/1.1 between requests or
+      within a head (slowloris), and HTTP/2 with no active stream and nothing to send. PINGs
+      and other control frames are not activity.
+    - **A transfer in progress:** it gets another window if it moved at least
+      `min_data_rate` octets a second (default 240, Kestrel's). That covers a body arriving or
+      an answer leaving, so a transfer takes as long as it needs (RFC 9112 9.5), while
+      RUDY-style slow bodies and slow reads close.
+    - **HTTP/2 streams** are also judged one by one (`ha_h2_sweep`): one whose request stopped
+      gets 408 (Request Timeout), and one whose answer stopped is reset with CANCEL.
+    - **A deferred answer** holds its connection: the handler decides.
+
+    Counting octets costs one add per send or read. New windows start at a request head
+    (HTTP/1.1's body; HTTP/2's request) and at an answer queued.
   - **Async answers:** a handler may park a request and complete it from any thread, which wakes
     the owning worker with an event. In .NET, an `await` resumes on the same worker.
 - **Kernel baseline:**
@@ -536,10 +551,28 @@ HTTP/2, the drivers, the client):
        socket refuses output, before the 1 MiB mark. `Http2FrameTests` holds the protocol
        side: each glitch flood, the budget's refill, four ways to provoke resets, and
        `INITIAL_WINDOW_SIZE` repeated in one frame (in order, and only the net change applied).
+     - **Slow clients, and the deadline that cut transfers.** The deadline was set when a head
+       began (HTTP/1.1), when an answer was queued (HTTP/1.1), or when any frame arrived
+       (HTTP/2), and expiring closed the connection whatever was in flight. That caused three
+       bugs:
+       - an answer or an upload that took longer than the idle timeout was cut. In the tests,
+         an 8 MiB answer read at about 6 MB/s arrived with 4,453,647 of 8,388,608 octets;
+       - an HTTP/2 connection that only sent PINGs stayed open forever;
+       - a field block trickled one empty CONTINUATION at a time lived until the CONTINUATION
+         limit.
+
+       The idle timeout is now a window judged by progress (Architecture, "Timeouts"). Tests,
+       each failing against the old library where it should:
+       - `SendsAnswersLongerThanTheIdleTimeout` (both versions) and
+         `TakesBodiesLongerThanTheIdleTimeout`;
+       - `CutsSlowRequests`: slowloris and RUDY on HTTP/1.1, and slow headers and a slow body
+         on HTTP/2;
+       - `CutsSlowReaders`: 16 MiB read at 200 octets a second; what arrives is what the
+         kernel buffered;
+       - `ClosesIdleConnectionsThatOnlyPing`;
+       - `AnswersStuckStreams408`: a stuck upload behind a stream of real requests.
    - **Still to do:**
-     - the rest of the published attack corpora: slowloris and slow reads on both versions
-       (and the deadline that cuts any transfer longer than the idle timeout), and
-       request-smuggling mutations;
+     - the published request-smuggling mutations;
      - then `unreachable.tsv` and the gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,

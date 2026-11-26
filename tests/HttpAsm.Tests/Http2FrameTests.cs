@@ -1,4 +1,7 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
+using System.Globalization;
+using System.Net.Sockets;
 using System.Text;
 using static HttpAsm.Tests.H2Connection;
 
@@ -17,12 +20,16 @@ public sealed class Http2FrameTests
     /// at a time within this class, so no other test of it moves the count meanwhile).</summary>
     private static int handled;
 
+    /// <summary>/big's answer: 8 MiB, the same octets on every run.</summary>
+    private static readonly byte[] Big = MakeBig();
+
     /// <summary>
     /// A server whose answers the tests can steer by path: /slow answers a second later (its
     /// stream stays half-closed (remote) meanwhile), /echo echoes the body, /cookie answers the
-    /// cookie field it saw, /mixed answers with a mixed-case field name, "*" (OPTIONS for the
-    /// server as a whole) answers "asterisk" and the method, /reset answers 205 (first with a
-    /// body, which is refused, then empty), anything else "ok".
+    /// cookie field it saw, /mixed answers with a mixed-case field name, /big answers
+    /// <see cref="Big"/>, "*" (OPTIONS for the server as a whole) answers "asterisk" and the
+    /// method, /reset answers 205 (first with a body, which is refused, then empty), anything
+    /// else "ok".
     /// </summary>
     /// <param name="idleMs">The idle timeout (0: the library's default).</param>
     /// <param name="limits">The head limits (zeros: the library's defaults).</param>
@@ -61,6 +68,9 @@ public sealed class Http2FrameTests
                     break;
                 case "/mixed":
                     x.Respond(200, "ok", ("X-Mixed-Case", "1"));
+                    break;
+                case "/big":
+                    x.Respond(200, Big);
                     break;
                 default:
                     x.Respond(200, "ok");
@@ -605,6 +615,190 @@ public sealed class Http2FrameTests
         (uint last, uint code, int length) = c.ReadGoAway();        // after the idle timeout
         Assert.Equal((3u, NoError, 8), (last, code, length));       // every stream it handled: <= 3
         Assert.Null(c.ReadFrame());
+    }
+
+    /// <summary>
+    /// An answer that takes several idle timeouts to deliver arrives whole, though the client
+    /// sends nothing while it reads. The client grants the windows at once, then reads /big's
+    /// 8 MiB slowly through a small receive buffer (a 10 ms pause every 64 KiB). The timeout is
+    /// for idleness: each window in which the answer moves at least min_data_rate earns another.
+    /// The deadline used to move only when frames arrived, and the connection was closed with
+    /// the answer still on its way (8 MiB: far more than loopback's kernel buffers could still
+    /// deliver after a close).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.5-4")]
+    public void SendsAnswersLongerThanTheIdleTimeout()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port, 65536, (4, 0x7FFFFFFF));
+        c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);             // the connection's window too
+        var clock = Stopwatch.StartNew();
+
+        c.SendRequest(1, path: "/big");
+        var body = new MemoryStream();
+        while (true)
+        {
+            H2Frame frame = c.Expect(Data, 1);
+            body.Write(frame.Payload);
+            if (body.Length % 65536 < frame.Payload.Length)
+            {
+                Thread.Sleep(10);                                   // about 6 MB/s
+            }
+
+            if ((frame.Flags & EndStream) != 0)
+            {
+                break;
+            }
+        }
+
+        Assert.True(Big.AsSpan().SequenceEqual(body.ToArray()));
+        Assert.True(clock.ElapsedMilliseconds > 900, $"{clock.ElapsedMilliseconds} ms: the read was not slow");
+    }
+
+    /// <summary>
+    /// PING is no activity: a connection with no request in progress closes at the idle
+    /// timeout, with GOAWAY(NO_ERROR) naming the last stream served, however often its client
+    /// pings. A ping used to count as activity, so an idle connection could be held forever
+    /// with one 17-octet frame a minute.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-9.1-5", "RFC9113-10.5-6#1")]
+    public void ClosesIdleConnectionsThatOnlyPing()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+        var clock = Stopwatch.StartNew();
+        c.SendRequest(1);
+        Assert.Equal(200, c.ReadResponse(1).Status);
+
+        uint? code = null;
+        for (int i = 0; i < 60 && code is null; i++)
+        {
+            try
+            {
+                c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
+            }
+            catch (SocketException)
+            {
+                break;                                              // closed already
+            }
+
+            foreach (H2Frame frame in c.FramesWithin(50))
+            {
+                if (frame.Type == GoAway)
+                {
+                    code = BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.AsSpan(4));
+                }
+            }
+        }
+
+        Assert.Equal(NoError, code);
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 2000);
+    }
+
+    /// <summary>
+    /// A request that never finishes arriving is cut at the idle timeout. These are a field
+    /// block trickled one empty CONTINUATION at a time (slowloris over HTTP/2), and a body sent
+    /// below min_data_rate (RUDY: 20 octets a second). Neither is progress, so the connection
+    /// closes with GOAWAY(NO_ERROR) within a few timeouts while the client is still sending.
+    /// </summary>
+    /// <param name="attack">"slow-headers" or "slow-body".</param>
+    [Theory]
+    [InlineData("slow-headers")]
+    [InlineData("slow-body")]
+    [Requirement("RFC9113-9.1-5", "RFC9113-10.5-6#1")]
+    public void CutsSlowRequests(string attack)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+        var clock = Stopwatch.StartNew();
+        if (attack == "slow-headers")
+        {
+            c.SendFrame(Headers, EndStream, 1, c.RequestBlock()[..1]); // a block that never ends
+        }
+        else
+        {
+            c.SendRequest(1, endStream: false, "POST", "/echo", ("content-length", "1000"));
+        }
+
+        uint? code = null;
+        for (int i = 0; i < 60 && code is null; i++)
+        {
+            try
+            {
+                if (attack == "slow-headers")
+                {
+                    c.SendFrame(Continuation, 0, 1, []);
+                }
+                else
+                {
+                    c.SendFrame(Data, 0, 1, [(byte)'x']);           // an octet every 50 ms
+                }
+            }
+            catch (SocketException)
+            {
+                break;
+            }
+
+            foreach (H2Frame frame in c.FramesWithin(50))
+            {
+                if (frame.Type == GoAway)
+                {
+                    code = BinaryPrimitives.ReadUInt32BigEndian(frame.Payload.AsSpan(4));
+                }
+            }
+        }
+
+        Assert.Equal(NoError, code);
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 2000);
+    }
+
+    /// <summary>
+    /// A stream whose request stops arriving is answered 408 (Request Timeout) and reset,
+    /// even while the connection is busy with other requests. A client that keeps its
+    /// connection alive with real requests cannot hold up to 100 streams of half-sent uploads,
+    /// each keeping its body so far. Here the other streams' requests come every 50 ms and
+    /// are all answered, and the stuck stream is answered 408 within a few timeouts.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5-6#1")]
+    public void AnswersStuckStreams408()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+        var clock = Stopwatch.StartNew();
+        c.SendRequest(1, endStream: false, "POST", "/echo", ("content-length", "1000"));
+        c.SendFrame(Data, 0, 1, new byte[10]);                      // 10 octets of 1,000, then nothing
+
+        int status = 0;
+        for (int id = 3; id < 200 && status == 0; id += 2)
+        {
+            c.SendRequest(id);
+            foreach (H2Frame frame in c.FramesWithin(50))
+            {
+                if (frame.Type == Headers && frame.Stream == 1)
+                {
+                    status = int.Parse(c.Decoded[1].First(f => f.Name == ":status").Value, CultureInfo.InvariantCulture);
+                }
+            }
+        }
+
+        Assert.Equal(408, status);
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 2500);
+    }
+
+    /// <summary>The octets of /big's answer.</summary>
+    /// <returns>8 MiB, seeded by the length.</returns>
+    private static byte[] MakeBig()
+    {
+        byte[] data = new byte[8 << 20];
+        new Random(data.Length).NextBytes(data);
+        return data;
     }
 
     /// <summary>

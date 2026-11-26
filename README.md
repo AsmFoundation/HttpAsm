@@ -15,7 +15,10 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 >   port, one worker per core on epoll, or on its own io_uring when asked
 >   (`HTTPASM_SERVER_URING`; epoll measured as cheap or cheaper, so it is the default),
 >   handlers that answer at once or later from any thread; HTTP/2 passes all 146 cases of
->   h2spec;
+>   h2spec. Hardened against the published floods (each measured by `tests/native/floods`)
+>   and slow clients: the idle timeout is a window a transfer keeps by moving at least
+>   `min_data_rate` octets a second, so large transfers take as long as they need while
+>   slowloris, slow bodies and slow reads are cut;
 > - **a client** (`httpasm_client_*`): one blocking HTTP/1.1 connection, tested against this
 >   server and against Kestrel;
 > - **the codecs** behind them, callable on their own: HTTP/1.1 parsing and writing in both

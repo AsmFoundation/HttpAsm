@@ -134,6 +134,11 @@ httpasm_server_create:
     test    eax, eax
     cmovz   eax, ecx
     mov     [rbx + server.idle_ms], rax
+    mov     eax, [r12 + httpasm_server_options.min_data_rate]
+    mov     ecx, HA_DEFAULT_MIN_RATE
+    test    eax, eax
+    cmovz   eax, ecx
+    mov     [rbx + server.min_rate], eax
     mov     eax, [r12 + httpasm_server_options.bind_address]
     mov     [rbx + server.bind_address], eax
     movzx   eax, word [r12 + httpasm_server_options.port]
@@ -936,6 +941,7 @@ read_ready:
     jz      .eof
     js      .close
     add     [r13 + conn.rlen], rax
+    INPUT_PROGRESS r13, rax                 ; a body's octets keep it alive, a head's do not
     mov     rdi, r13
     call    ha_conn_drive
     jmp     .out
@@ -1398,8 +1404,9 @@ worker_main:
     cmp     rax, [rbx + worker.now_ms]
     ja      .expire
     call    resume_accept
-    ; Deadlines: close what timed out. A deferred exchange is the handler's to finish; its
-    ; connection waits another timeout.
+    ; Deadlines: each connection whose window ended is judged (ha_conn_expire): a deferred
+    ; exchange, or a transfer that kept min_data_rate, gets another window (to the list's tail
+    ; with a future deadline, so the loop ends at it at the latest); anything else closes.
 .expire:
     mov     r13, [rbx + worker.lru_head]
     test    r13, r13
@@ -1407,12 +1414,10 @@ worker_main:
     mov     rax, [r13 + conn.deadline]
     cmp     rax, [rbx + worker.now_ms]
     ja      .expired
-    cmp     dword [r13 + conn.deferred], 0  ; a handler's answer is coming (HTTP/1.1 or a stream)
-    je      .expire_close
     mov     rdi, r13
-    call    ha_lru_touch                    ; to the tail with a future deadline: the loop ends
-    jmp     .expire                         ; at it at the latest
-.expire_close:
+    call    ha_conn_expire
+    test    eax, eax
+    jnz     .expire                         ; kept: a new window
     mov     rdi, r13
     call    ha_conn_close
     jmp     .expire

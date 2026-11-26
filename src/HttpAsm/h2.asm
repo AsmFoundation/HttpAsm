@@ -517,6 +517,119 @@ h2_close:
     ret
 
 ; -----------------------------------------------------------------------------
+; h2_touch: a request head was accepted: activity, so the connection starts a new window
+; (ha_lru_touch). A connection kept busy this way never reaches its deadline, where its streams
+; would be judged (ha_conn_expire), so they are judged here as well, once a window
+; (ha_h2_sweep, when the last sweep is an idle timeout old). Otherwise a client could hold up
+; to 100 streams of half-sent uploads behind a trickle of real requests.
+;   The stream whose head was just accepted is not touched by the sweep: its window began when
+;   it opened (h2_new_stream), moments ago.
+;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+align 16
+h2_touch:
+    sub     rsp, 8
+    mov     rax, [rbx + conn.worker]
+    mov     rcx, [rax + worker.now_ms]
+    sub     rcx, [r12 + h2.swept]           ; how long ago the streams were last judged
+    mov     rax, [rax + worker.server]
+    cmp     rcx, [rax + server.idle_ms]
+    jb      .touch
+    mov     rdi, rbx
+    call    ha_h2_sweep
+.touch:
+    mov     rdi, rbx
+    call    ha_lru_touch
+    add     rsp, 8
+    ret
+
+; -----------------------------------------------------------------------------
+; ha_h2_sweep: every active stream judged on its own progress, as ha_conn_expire judges the
+; connection: h2stream.moved counts the stream's DATA in either direction (its request's body
+; arriving, its answer leaving as its window opens) since .moved_since. A stream whose window
+; is an idle timeout old starts a new one if it moved at least min_rate octets a second over
+; it; one below that is stuck:
+;   - its request stopped arriving (RUDY over HTTP/2): no answer has begun, so it is answered
+;     408 (Request Timeout, RFC 9110 15.5.9), and reset with NO_ERROR since its request never
+;     ended (an early answer, h2_error_response);
+;   - its answer stopped leaving (the client never opens its window: a slow read holding the
+;     answer's memory): reset with CANCEL.
+; Streams a handler holds (deferred, or its handler running) are the handler's to finish.
+;   In: rdi = conn (HTTP/2). Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
+; -----------------------------------------------------------------------------
+global ha_h2_sweep:function hidden (ha_h2_sweep.end - ha_h2_sweep)
+align 16
+ha_h2_sweep:
+    push    rbx
+    push    r12
+    push    r13
+    push    r14
+    push    r15                             ; five pushes: rsp aligned for the calls
+    mov     rbx, rdi
+    mov     r12, [rbx + conn.h2]
+    test    dword [r12 + h2.flags], H2F_CLOSING
+    jnz     .out
+    mov     rax, [rbx + conn.worker]
+    mov     r15, [rax + worker.now_ms]
+    mov     [r12 + h2.swept], r15
+    xor     r13d, r13d                      ; the slot
+.stream:
+    cmp     r13d, [r12 + h2.stream_count]
+    jae     .out
+    mov     r14, [r12 + h2.streams + r13 * 8]
+    test    dword [r14 + h2stream.flags], HSF_DEFERRED | HSF_IN_HANDLER
+    jnz     .next
+    mov     rcx, r15
+    sub     rcx, [r14 + h2stream.moved_since]   ; its window's age
+    mov     rax, [rbx + conn.worker]
+    mov     rax, [rax + worker.server]
+    cmp     rcx, [rax + server.idle_ms]
+    jb      .next                           ; younger than a window: not judged yet
+    mov     eax, [rax + server.min_rate]
+    imul    rax, rcx                        ; what its window needed, in thousandths of octets
+    imul    rdx, [r14 + h2stream.moved], 1000
+    cmp     rdx, rax
+    jb      .stuck
+    mov     qword [r14 + h2stream.moved], 0 ; it kept the pace: a new window
+    mov     [r14 + h2stream.moved_since], r15
+.next:
+    inc     r13d
+    jmp     .stream
+.stuck:
+    test    dword [r14 + h2stream.flags], HSF_ANSWERED
+    jnz     .cancel
+    mov     rdi, r14
+    mov     esi, 408
+    call    h2_error_response
+    jmp     .judged
+.cancel:
+    mov     edi, [r14 + h2stream.id]
+    mov     esi, H2_CANCEL
+    call    h2_stream_error
+.judged:
+    ; The stream may have left the active set, the last one taking its slot: the slot is
+    ; judged again unless it still holds this stream (a 408 whose DATA waits for window: its
+    ; window starts over, so it is not judged twice).
+    test    dword [r12 + h2.flags], H2F_CLOSING
+    jnz     .out
+    cmp     r13d, [r12 + h2.stream_count]
+    jae     .out
+    cmp     [r12 + h2.streams + r13 * 8], r14
+    jne     .stream
+    mov     qword [r14 + h2stream.moved], 0
+    mov     [r14 + h2stream.moved_since], r15
+    inc     r13d
+    jmp     .stream
+.out:
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
 ; h2_glitch: spends one glitch of the connection's budget (RFC9113-10.5-6: "track the use of
 ; these features and set limits on their use"). A glitch is a frame that costs this side work
 ; and moves no request forward: PRIORITY, an empty DATA frame without END_STREAM, a frame of an
@@ -767,6 +880,7 @@ ha_h2_start:
     mov     rax, [rbx + conn.worker]
     mov     rax, [rax + worker.now_ms]
     mov     [r12 + h2.glitch_time], rax
+    mov     [r12 + h2.swept], rax           ; no stream to judge for a window
 
     ; SETTINGS: three 6-octet entries, big-endian.
     mov     word [rsp], 0x0300              ; MAX_CONCURRENT_STREAMS (3)
@@ -871,7 +985,6 @@ ha_h2_process:
     mov     rbx, rdi
     mov     r12, [rbx + conn.h2]
     xor     r13d, r13d                      ; the offset of the next frame
-    xor     ebp, ebp                        ; frames handled
     xor     r15d, r15d                      ; the result: 1 for back-pressure
 .frame:
     test    dword [r12 + h2.flags], H2F_CLOSING
@@ -917,7 +1030,6 @@ ha_h2_process:
     mov     [r12 + h2.frame_stream], eax
     add     rsi, H2_FRAME_HEADER
     mov     [r12 + h2.frame_payload], rsi
-    inc     ebp
 
     ; While a field block is open, only its CONTINUATIONs may come (RFC 9113 6.2, 6.10).
     mov     edx, [r12 + h2.frame_type]
@@ -1013,11 +1125,10 @@ ha_h2_process:
 .consumed:
     call    .compact
 .finish:
-    test    ebp, ebp
-    jz      .no_activity
-    mov     rdi, rbx                        ; frames arrived: the idle timeout starts over
-    call    ha_lru_touch
-.no_activity:
+    ; Frames arriving are not activity by themselves: PING, SETTINGS, WINDOW_UPDATE and PRIORITY
+    ; would keep an idle connection forever. A request head accepted and an answer queued start
+    ; a new window (h2_touch, ha_h2_respond); DATA counts as progress (h2_data); the window's
+    ; end judges the rest (ha_conn_expire).
     ; The peer said GOAWAY: once no stream is active, the connection closes, with a GOAWAY of
     ; this side's first (RFC9113-6.8-7: a receiver done with the connection still says GOAWAY).
     ; It goes into the output here, before the flush half-closes the socket after it: written
@@ -1683,6 +1794,9 @@ h2_new_stream:
     jz      .out
     mov     [rax + h2stream.id], r13d
     mov     [rax + h2stream.conn], rbx
+    mov     rcx, [rbx + conn.worker]
+    mov     rcx, [rcx + worker.now_ms]
+    mov     [rax + h2stream.moved_since], rcx   ; its first window starts now (ha_h2_sweep)
     mov     ecx, [r12 + h2.peer_window]
     mov     [rax + h2stream.send_window], rcx
     mov     qword [rax + h2stream.recv_window], HA_H2_WINDOW
@@ -1778,6 +1892,7 @@ h2_block_done:
     call    h2_keep_head                    ; into the stream's own memory, cookies joined
     test    eax, eax
     jnz     .internal_error
+    call    h2_touch                        ; a request: activity, a new window (and a sweep)
     test    dword [rsp + B_FLAGS], H2_FLAG_END_STREAM
     jz      .body_follows
     or      dword [r13 + h2stream.flags], HSF_END_RECEIVED
@@ -2181,6 +2296,8 @@ h2_data:
     ja      .stream_flow_control_error
     sub     [r13 + h2stream.recv_window], rax
     add     [r13 + h2stream.recv_unacked], rax
+    add     [rbx + conn.progress], rax      ; a body arriving: the connection's progress
+    add     [r13 + h2stream.moved], rax     ; and the stream's own (ha_h2_sweep)
     ; Onto the body, within max_body (413 beyond, RFC 9110 15.5.14).
     mov     rax, [r13 + h2stream.body_length]
     add     rax, r15
@@ -2839,6 +2956,10 @@ ha_h2_respond:
     jmp     .continuation
 .headers_sent:
     or      dword [r13 + h2stream.flags], HSF_HEADERS_SENT | HSF_ANSWERED
+    ; An answer queued starts a new window for the connection, as HTTP/1.1's ha_conn_finish
+    ; does: however late in the last window it came, a slow client has a whole one to take it.
+    mov     rdi, rbx
+    call    ha_lru_touch                    ; keeps r13-r15
     test    r15d, r15d
     jz      .body
     or      dword [r13 + h2stream.flags], HSF_END_SENT
@@ -2937,7 +3058,8 @@ h2_send_out:
     sub     [r12 + h2.send_window], r14
     sub     [r13 + h2stream.send_window], r14
     add     [r13 + h2stream.out_sent], r14
-    jmp     .frame
+    add     [r13 + h2stream.moved], r14     ; the answer moving: the stream's progress (its
+    jmp     .frame                          ; window opening; the socket's pace is the conn's)
 .ended:
     test    r15d, r15d
     jnz     .borrowed_done

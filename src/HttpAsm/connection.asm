@@ -103,7 +103,8 @@ ha_set_interest:
 .end:
 
 ; -----------------------------------------------------------------------------
-; ha_lru_touch: the connection's deadline becomes now + the idle timeout, and it moves to the
+; ha_lru_touch: a new window: the connection's deadline becomes now + the idle timeout, its
+; progress starts over from 0 (ha_conn_expire judges the window by it), and it moves to the
 ; worker's list's tail (the list stays ordered by deadline: every touch uses the same timeout).
 ;   In: rdi = conn. Clobbers rax, rcx, rdx, rsi.
 ; -----------------------------------------------------------------------------
@@ -115,6 +116,7 @@ ha_lru_touch:
     mov     rax, [rax + server.idle_ms]
     add     rax, [rsi + worker.now_ms]
     mov     [rdi + conn.deadline], rax
+    mov     qword [rdi + conn.progress], 0
     call    lru_unlink
     mov     rax, [rsi + worker.lru_tail]    ; append
     mov     [rdi + conn.lru_prev], rax
@@ -156,6 +158,80 @@ lru_unlink:
     mov     qword [rdi + conn.lru_prev], 0
     mov     qword [rdi + conn.lru_next], 0
     ret
+
+; -----------------------------------------------------------------------------
+; ha_conn_expire: the connection's window ended (its deadline passed); this judges it. The idle
+; timeout is a window, not a limit on how long a transfer may take:
+;   - lingering after a closing response (C_DRAINING): the linger is over, close;
+;   - a deferred exchange holds the connection: a new window (the handler decides);
+;   - nothing in progress is idleness, and closes. That means no output waiting, and HTTP/1.1
+;     between requests or within a head, or HTTP/2 with no active stream. Octets do not matter
+;     here: a head's trickle (slowloris) and HTTP/2's control frames (PING) are not progress;
+;   - a transfer in progress (output waiting, an HTTP/1.1 body arriving, an HTTP/2 stream
+;     active) gets a new window when it moved at least min_rate octets a second over the window
+;     that ended: conn.progress x 1000 >= idle_ms x min_rate. Below that it closes (RUDY, slow
+;     reads). At or above it, a transfer outlives any number of windows (RFC9112-9.5-4);
+;   - an HTTP/2 connection that is kept has every stream judged on its own (ha_h2_sweep
+;     answers 408 or resets the stuck ones), so other streams' traffic cannot hide one.
+;   The verdict is reached before the streams are judged: the sweep may queue a 408, and an
+;   answer queued starts a new window (ha_h2_respond touches), zeroing the progress the verdict
+;   needs. Only a connection that is kept is swept; one that closes takes its streams with it.
+;   In: rdi = conn (its deadline passed). Out: eax = 1 when it gets a new window (ha_lru_touch:
+;   a future deadline, the list's tail), 0 when the caller should close it.
+;   Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
+; -----------------------------------------------------------------------------
+global ha_conn_expire:function hidden (ha_conn_expire.end - ha_conn_expire)
+align 16
+ha_conn_expire:
+    push    rbx                             ; also aligns rsp for the calls below
+    mov     rbx, rdi
+    test    dword [rbx + conn.flags], C_DRAINING
+    jnz     .close
+    cmp     dword [rbx + conn.deferred], 0
+    jne     .keep
+    mov     rax, [rbx + conn.wlen]
+    cmp     rax, [rbx + conn.wsent]
+    jne     .transfer                       ; output waiting: its pace decides
+    mov     rax, [rbx + conn.h2]
+    test    rax, rax
+    jz      .http1
+    cmp     dword [rax + h2.stream_count], 0
+    jne     .transfer
+    jmp     .close                          ; HTTP/2 with no active stream: idle
+.http1:
+    mov     ecx, [rbx + conn.state]
+    sub     ecx, CS_BODY_LENGTH
+    cmp     ecx, CS_TRAILERS - CS_BODY_LENGTH
+    ja      .close                          ; between requests, or within a head
+.transfer:
+    mov     rsi, [rbx + conn.worker]
+    mov     rsi, [rsi + worker.server]
+    mov     eax, [rsi + server.min_rate]
+    imul    rax, [rsi + server.idle_ms]     ; what the window needed, in thousandths of octets
+    imul    rcx, [rbx + conn.progress], 1000
+    cmp     rcx, rax
+    jb      .close
+.keep:
+%ifndef HTTPASM_H1_ONLY
+    cmp     qword [rbx + conn.h2], 0
+    je      .new_window
+    mov     rdi, rbx
+    call    ha_h2_sweep                     ; each stream on its own, now the verdict is in
+    mov     rax, [rbx + conn.h2]
+    test    dword [rax + h2.flags], H2F_CLOSING
+    jnz     .close                          ; a connection error meanwhile: it is ending anyway
+.new_window:
+%endif
+    mov     rdi, rbx
+    call    ha_lru_touch
+    mov     eax, 1
+    pop     rbx
+    ret
+.close:
+    xor     eax, eax
+    pop     rbx
+    ret
+.end:
 
 ; -----------------------------------------------------------------------------
 ; ha_conn_close: closes a connection's descriptor. Its memory is not freed here:
@@ -340,6 +416,7 @@ ha_conn_flush:
     test    rax, rax
     js      .send_error
     add     [rbx + conn.wsent], rax
+    add     [rbx + conn.progress], rax      ; octets that left: a transfer's progress
     jmp     .send
 .send_error:
     cmp     rax, -EINTR
@@ -913,13 +990,19 @@ ha_conn_process:
     add     rcx, rax
     mov     [rbx + conn.body_end], rcx
     mov     dword [rbx + conn.state], CS_BODY_LENGTH
-    jmp     .loop
+    jmp     .body_window
 .start_chunked:
     mov     [rbx + conn.body_end], rax
     pxor    xmm0, xmm0
     movdqu  [rbx + conn.chunked], xmm0
     movdqu  [rbx + conn.chunked + 16], xmm0
     mov     dword [rbx + conn.state], CS_BODY_CHUNKED
+.body_window:
+    ; The head is whole: its body gets a window of its own (ha_lru_touch), so a body that
+    ; starts late in the head's window is judged on its own pace (ha_conn_expire), not on
+    ; whatever was left of the head's.
+    mov     rdi, rbx
+    call    ha_lru_touch
     jmp     .loop
 .head_refused:
     neg     rax                             ; the status to answer

@@ -52,8 +52,13 @@ internal sealed class RawConnection : IDisposable
     /// <summary>Connects to the server on 127.0.0.1.</summary>
     /// <param name="port">The server's port.</param>
     /// <param name="timeoutMs">How long a read may wait before it fails.</param>
+    /// <param name="receiveBuffer">
+    /// The socket's receive buffer, set before connecting (0: the kernel's default, which
+    /// autotunes up to megabytes). A small one keeps a server's answer on the server's side
+    /// while a test reads slowly: the kernel cannot take the whole answer at once.
+    /// </param>
     /// <exception cref="SocketException">The connection was refused.</exception>
-    public RawConnection(int port, int timeoutMs = 10000)
+    public RawConnection(int port, int timeoutMs = 10000, int receiveBuffer = 0)
     {
         socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
         {
@@ -62,7 +67,52 @@ internal sealed class RawConnection : IDisposable
             ReceiveTimeout = timeoutMs,
             SendTimeout = timeoutMs,
         };
+        if (receiveBuffer > 0)
+        {
+            socket.ReceiveBufferSize = receiveBuffer;   // before the connect: the window it offers
+        }
+
         socket.Connect(IPAddress.Loopback, port);
+    }
+
+    /// <summary>
+    /// Reads like a slow client: at most <paramref name="piece"/> octets at a time, pausing
+    /// after each, until <paramref name="total"/> octets have come, the server closed (or reset)
+    /// the connection, or a read timed out. Octets an earlier read buffered come first.
+    /// </summary>
+    /// <param name="total">The octets wanted.</param>
+    /// <param name="piece">The most one read takes.</param>
+    /// <param name="pauseMs">The pause after each read.</param>
+    /// <returns>Every octet read, in order: fewer than <paramref name="total"/> when the
+    /// connection ended first.</returns>
+    public byte[] ReadSlowly(int total, int piece, int pauseMs)
+    {
+        var all = new MemoryStream(Math.Min(total, 1 << 20));       // total may be "to the end": int.MaxValue
+        all.Write(buffer, start, end - start);
+        start = end;
+        byte[] chunk = new byte[piece];
+        while (all.Length < total)
+        {
+            int n;
+            try
+            {
+                n = socket.Receive(chunk, 0, (int)Math.Min(piece, total - all.Length), SocketFlags.None);
+            }
+            catch (SocketException e) when (e.SocketErrorCode is SocketError.ConnectionReset or SocketError.TimedOut)
+            {
+                break;                      // the server is gone, or silent: what came is the answer
+            }
+
+            if (n == 0)
+            {
+                break;
+            }
+
+            all.Write(chunk, 0, n);
+            Thread.Sleep(pauseMs);
+        }
+
+        return all.ToArray();
     }
 
     /// <summary>Sends text as Latin-1 octets (one octet per char).</summary>

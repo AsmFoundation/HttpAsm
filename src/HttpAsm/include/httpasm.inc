@@ -25,7 +25,8 @@ struc httpasm_server_options
     .port:              resw 1  ; 0: any free port (httpasm_server_port tells which)
     .flags:             resw 1  ; HTTPASM_SERVER_*
     .limits:            resb httpasm_h1_limits_size
-    .reserved:          resq 1
+    .min_data_rate:     resd 1  ; octets a second a transfer keeps to outlive idle_timeout_ms; default 240
+    .reserved:          resd 1
 endstruc
 
 ; httpasm_server_options.flags

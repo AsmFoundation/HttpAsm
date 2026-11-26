@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -810,6 +812,168 @@ public sealed class ServerTests
         Assert.True(slow.ServerClosed());
         Assert.InRange(clock.ElapsedMilliseconds, 250, 5000);
         Assert.True(busy.QuietFor(50));     // 750 ms in, past the timeout, and still open
+    }
+
+    /// <summary>
+    /// The idle timeout is for idleness, not for the length of a transfer. An 8 MiB answer read
+    /// in 64 KiB pieces every 10 ms takes over four times the 300 ms timeout, and arrives whole:
+    /// each window in which it moves at least min_data_rate (240 octets a second by default)
+    /// earns another (RFC9112-9.5-4: the transport's flow control resolves a slow reader, not a
+    /// close). The deadline used to be set when the answer was queued, and the connection was
+    /// closed with the answer still on its way. The answer is far larger than the kernel's
+    /// buffering on loopback (its 64 KiB segments let the send buffer grow to 1.6 MB), which
+    /// would otherwise deliver what a close left behind.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.5-4")]
+    public void SendsAnswersLongerThanTheIdleTimeout()
+    {
+        Platform.RequireLinuxX64();
+        byte[] big = RandomBytes(8 << 20);
+        using var server = new TestServer(x => x.Respond(200, big), idleMs: 300);
+        using var c = new RawConnection(server.Port, receiveBuffer: 65536);
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        var clock = Stopwatch.StartNew();
+
+        byte[] got = c.ReadSlowly(int.MaxValue, 65536, 10);         // to the close, or the timeout
+
+        int head = got.AsSpan().IndexOf("\r\n\r\n"u8) + 4;
+        Assert.True(head > 4, "no answer");
+        Assert.True(big.AsSpan().SequenceEqual(got.AsSpan(head)), $"{got.Length - head} of {big.Length} octets came");
+        Assert.True(clock.ElapsedMilliseconds > 900, $"{clock.ElapsedMilliseconds} ms: the read was not slow");
+    }
+
+    /// <summary>
+    /// A request body sent slowly is taken whole however long it takes, as long as it keeps
+    /// moving: 2 MiB in 32 KiB pieces every 25 ms takes about five times the 300 ms timeout,
+    /// and is answered. The head's deadline used to run on through the body, and closed the
+    /// connection in the middle of the upload.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.5-4")]
+    public void TakesBodiesLongerThanTheIdleTimeout()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, x.Body.Length.ToString(CultureInfo.InvariantCulture)), idleMs: 300, maxBody: 4 << 20);
+        using var c = new RawConnection(server.Port);
+        byte[] piece = RandomBytes(32768);
+        var clock = Stopwatch.StartNew();
+
+        c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 2097152\r\n\r\n");
+        for (int i = 0; i < 64; i++)
+        {
+            Thread.Sleep(25);
+            c.Send(piece);
+        }
+
+        Assert.Equal("2097152", c.ReadResponse().Text);
+        Assert.True(clock.ElapsedMilliseconds > 900, $"{clock.ElapsedMilliseconds} ms: the upload was not slow");
+    }
+
+    /// <summary>
+    /// min_data_rate is the server's to choose. The upload the default rate keeps
+    /// (<see cref="TakesBodiesLongerThanTheIdleTimeout"/>: about 1.3 MB/s) is cut after its
+    /// first window when the server asks for 10 MB/s.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.5-3")]
+    public void HoldsTransfersToTheRateItIsGiven()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "taken"), idleMs: 300, maxBody: 4 << 20, minDataRate: 10_000_000);
+        using var c = new RawConnection(server.Port, timeoutMs: 5000);
+        byte[] piece = RandomBytes(32768);
+        var clock = Stopwatch.StartNew();
+
+        c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 2097152\r\n\r\n");
+        bool cut = false;
+        for (int i = 0; i < 64 && !cut; i++)
+        {
+            Thread.Sleep(25);
+            cut = !TrySend(c, Encoding.Latin1.GetString(piece));
+        }
+
+        Assert.True(cut || c.ServerClosed(1000), $"the upload was kept for {clock.ElapsedMilliseconds} ms");
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 2000);
+    }
+
+    /// <summary>
+    /// Slow requests are cut at the idle timeout. A head trickled an octet at a time
+    /// (slowloris) makes no progress: a head must be whole within the timeout. A body sent below
+    /// min_data_rate (RUDY: 200 octets a second against 240) is not progress enough to earn
+    /// another window. Each connection is closed within a few timeouts while its client is
+    /// still sending.
+    /// </summary>
+    /// <param name="attack">"slowloris" or "rudy".</param>
+    [Theory]
+    [InlineData("slowloris")]
+    [InlineData("rudy")]
+    [Requirement("RFC9112-9.5-3")]
+    public void CutsSlowRequests(string attack)
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "ok"), idleMs: 300, maxBody: 1 << 20);
+        using var c = new RawConnection(server.Port, timeoutMs: 5000);
+        var clock = Stopwatch.StartNew();
+        bool closed = false;
+        if (attack == "rudy")
+        {
+            c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 100000\r\n\r\n");
+        }
+
+        // Slowloris: "Gxxx..." never ends its request-line, an octet every 50 ms. RUDY: 10
+        // octets of body every 50 ms. Either way the client keeps going for 4 s unless cut.
+        for (int i = 0; i < 80 && !closed; i++)
+        {
+            closed = !TrySend(c, attack == "rudy" ? "0123456789" : i == 0 ? "G" : "x");
+            Thread.Sleep(50);
+        }
+
+        Assert.True(closed || c.ServerClosed(1000), $"{attack}: still open after {clock.ElapsedMilliseconds} ms");
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 3000);
+    }
+
+    /// <summary>
+    /// A client that reads an answer below min_data_rate (a slow read: 200 octets a second
+    /// against 240, holding the answer's memory on the server) is not progress enough to earn
+    /// another window. After a second and a half of slow reading, the rest of what the server
+    /// handed to the kernel arrives, then the end, far short of the 16 MiB answer. The kernel
+    /// takes the first megabyte or two at once, because loopback's 64 KiB segments let it grow
+    /// the server's send buffer that far. So the answer is large enough that only cutting the
+    /// transfer, not any buffer, can explain a short read.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.5-3")]
+    public void CutsSlowReaders()
+    {
+        Platform.RequireLinuxX64();
+        byte[] big = RandomBytes(16 << 20);
+        using var server = new TestServer(x => x.Respond(200, big), idleMs: 300);
+        using var c = new RawConnection(server.Port, timeoutMs: 5000, receiveBuffer: 4096);
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+
+        byte[] slow = c.ReadSlowly(300, 10, 50);                   // 10 octets every 50 ms, 1.5 s
+        byte[] rest = c.ReadSlowly(int.MaxValue, 65536, 0);        // then at once, to the end
+
+        Assert.Equal(300, slow.Length);
+        Assert.True(slow.Length + rest.Length < big.Length / 2, $"{slow.Length + rest.Length} octets came: the slow read was not cut");
+    }
+
+    /// <summary>Sends text, and says whether the connection took it (false: the server closed it).</summary>
+    /// <param name="c">The connection.</param>
+    /// <param name="text">The octets.</param>
+    /// <returns>True when sent.</returns>
+    private static bool TrySend(RawConnection c, string text)
+    {
+        try
+        {
+            c.Send(text);
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

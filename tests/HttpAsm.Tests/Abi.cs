@@ -477,8 +477,11 @@ internal struct ServerOptions
     /// <summary>The heads' limits.</summary>
     public H1Limits Limits;
 
+    /// <summary>Octets a second a transfer must keep to outlive the idle timeout (0: 240).</summary>
+    public uint MinDataRate;
+
     /// <summary>Reserved.</summary>
-    public ulong Reserved;
+    public uint Reserved;
 }
 
 /// <summary>The constants of httpasm.h that the tests use.</summary>

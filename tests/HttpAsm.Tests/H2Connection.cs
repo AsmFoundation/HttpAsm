@@ -105,8 +105,40 @@ internal sealed class H2Connection : IDisposable
     /// <exception cref="IOException">The server closed the connection during the handshake.</exception>
     /// <exception cref="SocketException">The connection was refused, or a read timed out.</exception>
     public H2Connection(int port, bool handshake = true, params (int Id, uint Value)[] settings)
+        : this(port, 0, handshake, settings)
+    {
+    }
+
+    /// <summary>
+    /// Connects with a receive buffer of a given size, then does the handshake as the other
+    /// constructor does. A small buffer keeps a server's answers on the server's side while a
+    /// test reads slowly: the kernel cannot take a whole large answer at once.
+    /// </summary>
+    /// <param name="port">The server's port.</param>
+    /// <param name="receiveBuffer">The socket's receive buffer, set before connecting.</param>
+    /// <param name="settings">This side's SETTINGS.</param>
+    /// <exception cref="IOException">The server closed the connection during the handshake.</exception>
+    /// <exception cref="SocketException">The connection was refused, or a read timed out.</exception>
+    public H2Connection(int port, int receiveBuffer, params (int Id, uint Value)[] settings)
+        : this(port, receiveBuffer, true, settings)
+    {
+    }
+
+    /// <summary>The constructors' common part.</summary>
+    /// <param name="port">The server's port.</param>
+    /// <param name="receiveBuffer">The receive buffer (0: the kernel's default).</param>
+    /// <param name="handshake">Whether to do the handshake now.</param>
+    /// <param name="settings">This side's SETTINGS.</param>
+    /// <exception cref="IOException">The server closed the connection during the handshake.</exception>
+    /// <exception cref="SocketException">The connection was refused, or a read timed out.</exception>
+    private H2Connection(int port, int receiveBuffer, bool handshake, (int Id, uint Value)[] settings)
     {
         socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, ReceiveTimeout = 5000 };
+        if (receiveBuffer > 0)
+        {
+            socket.ReceiveBufferSize = receiveBuffer;   // before the connect: the window it offers
+        }
+
         socket.Connect(IPAddress.Loopback, port);
         if (!handshake)
         {
