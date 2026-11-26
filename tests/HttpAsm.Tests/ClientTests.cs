@@ -137,12 +137,30 @@ internal sealed class CannedServer : IDisposable
     /// <param name="close">Close after the last answer (true) or keep the connection open.</param>
     /// <param name="after">Octets sent 200 ms after the last answer, when no request is
     /// outstanding (null or empty: none): what a client must never take for a response.</param>
+    /// <remarks>
+    /// The server runs on a thread of its own (LongRunning), not the thread pool: under load
+    /// (the coverage run's instrumented build, tests in parallel) a pool task started after the
+    /// test had ended and Dispose had stopped the listener, and its AcceptSocket then threw
+    /// "Not listening" (CI, 2026-11-26). A listener stopped before any client was accepted ends
+    /// the server quietly: the client never needed the accept (the kernel completes the
+    /// handshake from the backlog), so there was nothing to serve.
+    /// </remarks>
     public CannedServer(IReadOnlyList<string> answers, bool close, string? after = null)
     {
         listener.Start();
-        serving = Task.Run(() =>
+        serving = Task.Factory.StartNew(() =>
         {
-            using Socket socket = listener.AcceptSocket();
+            Socket accepted;
+            try
+            {
+                accepted = listener.AcceptSocket();
+            }
+            catch (Exception e) when (e is InvalidOperationException or SocketException or ObjectDisposedException)
+            {
+                return;                                                 // stopped before a client came
+            }
+
+            using Socket socket = accepted;
             byte[] buffer = new byte[65536];
             foreach (string answer in answers)
             {
@@ -160,7 +178,7 @@ internal sealed class CannedServer : IDisposable
             {
                 Thread.Sleep(3000);
             }
-        });
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
     /// <summary>The port.</summary>
