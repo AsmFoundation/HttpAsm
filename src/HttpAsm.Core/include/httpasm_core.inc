@@ -58,6 +58,8 @@ extern ha_x16_0a            ; 16 bytes of 0x0A: LF, the end of every HTTP/1.1 li
 extern ha_field_lookup      ; eax = known-field id of name rdi[0..rsi), 0 if not known
 extern ha_method_lookup     ; eax = HTTPASM_METHOD_* of method rdi[0..rsi), 0 if another
 extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi if none
+extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
+                            ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 
 %include "httpasm_abi.inc"
 %include "cpu.inc"

@@ -474,9 +474,12 @@ HTTP/2, the drivers, the client):
 3. *Tests from every angle* for M1's rows: section 2's matrix for each proven row. Also the
    published attack corpora (request smuggling, HTTP/2 floods, HPACK bombs, slowloris on both
    versions), memory and connection exhaustion, and races between deferred answers and stops.
-   Known open item: an IP-literal's IPv6 structure (eight groups, one "::", the IPv4 tail's
-   dec-octets) is not checked yet, only its octets (`semantics/authority.inc`); RFC 3986's
-   grammar and its published test vectors close it.
+   The IP-literal's IPv6 structure was an open item (only its octets were checked): closed
+   2026-11-26 by `semantics/ipv6.asm`. It enforces eight pieces, or seven at most with one
+   "::", an IPv4 tail last, and dec-octets without a leading zero. `AuthorityTests` holds all
+   eight entry points (HTTP/1.1's Host, absolute-form and CONNECT, parsed and written;
+   HTTP/2's :authority and Host) to one RFC 3986 verdict on 78 vectors, RFC 4291 2.2's
+   among them.
 
    Progress, 2026-11-26:
    - **Coverage:** the fuzz corpora replayed in the coverage run raised it to 94.2% of blocks

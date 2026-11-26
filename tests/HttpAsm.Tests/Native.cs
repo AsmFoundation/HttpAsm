@@ -160,6 +160,14 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_hpack_init")]
     internal static partial int HpackInit(byte* memory, nuint size, uint limit, uint flags);
 
+    /// <summary>int httpasm_h2_request(fields, count, request): HTTP/2's rules for a decoded request head.</summary>
+    /// <param name="fields">The decoded fields, pseudo-fields first; ids are set by the call.</param>
+    /// <param name="count">How many.</param>
+    /// <param name="request">Filled: method, target, authority, scheme, flags, regular fields.</param>
+    /// <returns>0, or -HTTPASM_ERROR_* (malformed: a stream error PROTOCOL_ERROR).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_h2_request")]
+    internal static partial int H2Request(HttpField* fields, uint count, HttpRequest* request);
+
     /// <summary>int64_t httpasm_hpack_decode(table, block, length, output).</summary>
     /// <param name="table">The decoder's table.</param>
     /// <param name="block">The header block.</param>

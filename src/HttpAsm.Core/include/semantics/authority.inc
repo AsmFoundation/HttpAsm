@@ -51,27 +51,17 @@
     or      %6, 0x20
     cmp     %6, 'v'
     je      %%future
-    xor     %9, %9                          ; the colons seen
-%%v6:                                       ; IPv6address: HEXDIG, ":" and "." (an IPv4 tail)
-    cmp     %1, %2
-    jae     %10                             ; no "]"
-    movzx   %6, byte [%1]
-    inc     %1
-    cmp     %7, ']'
-    je      %%v6_end
-    cmp     %7, ':'
-    je      %%v6_colon
-    cmp     %7, '.'
-    je      %%v6
-    cmp     byte [%4 + %5], 0xFF
-    je      %10                             ; neither HEXDIG, ":" nor "."
-    jmp     %%v6
-%%v6_colon:
-    inc     %9
-    jmp     %%v6
-%%v6_end:
-    cmp     %9, 2
-    jb      %10                             ; every IPv6 address has two colons at least ("::")
+    ; IPv6address, its whole structure, and the "]" (semantics/ipv6.asm): eight pieces, or
+    ; seven at most with one "::", an IPv4 tail last with dec-octets of 255 at most and no
+    ; leading zero. A function, not inline: its state needs more registers than this macro
+    ; has, and the call keeps every register (pushing the range, popping the result).
+    push    %2
+    push    %1
+    call    ha_ipv6_literal
+    pop     %1                              ; past the "]", or 0
+    add     rsp, 8
+    test    %1, %1
+    jz      %10
     jmp     %%port_or_end
 %%future:                                   ; IPvFuture = "v" 1*HEXDIG "." 1*( unreserved /
     inc     %1                              ;             sub-delims / ":" )
