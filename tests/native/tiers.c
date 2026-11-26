@@ -158,6 +158,106 @@ static int field_value_scan_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_field_id: the field-name lookup's versions (ha_field_lookup) -------------------- */
+
+/* field_id_check: one name at every tier, ending `gap` octets before the guard page (the octets
+ * between are random: whatever follows a name in a caller's buffer), so a version that reads
+ * past the page dies with SIGSEGV. Every tier must give v1's id, which the .NET suite proves
+ * against the known-field list.
+ *   name, n  the name (n + gap <= PAGE); gap  the octets after it, before the guard page.
+ * Returns 0 when every tier agrees; 1, after reporting the tier and the name, otherwise. Leaves
+ * the last tier set. */
+static int field_id_check(const uint8_t *name, size_t n, size_t gap)
+{
+    uint8_t *p = page_end - n - gap;
+    memcpy(p, name, n);
+    for (size_t i = 0; i < gap; i++)
+        p[n + i] = (uint8_t)rng();
+    httpasm_cpu_limit(caps[0]);
+    uint32_t expected = httpasm_field_id(p, n);
+    for (size_t t = 1; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        uint32_t actual = httpasm_field_id(p, n);
+        if (actual != expected) {
+            fprintf(stderr, "httpasm_field_id at %s (features %#llx): %u, v1 %u; the name ends %zu octets before the guard page\n",
+                    cap_names[t], (unsigned long long)features, actual, expected, gap);
+            dump("name", p, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* field_id_gaps: field_id_check at every gap that moves a name across the page-end cases of a
+ * 16-octet read: ending at the page (0), within one vector of it (1, 15), at exactly one vector
+ * (16) and past it (17, 31). Returns 0 when all agree, 1 at the first that did not. */
+static int field_id_gaps(const uint8_t *name, size_t n, long *checked)
+{
+    static const size_t gaps[] = { 0, 1, 15, 16, 17, 31 };
+    for (size_t g = 0; g < sizeof gaps / sizeof gaps[0]; g++) {
+        if (field_id_check(name, n, gaps[g]))
+            return 1;
+        (*checked)++;
+    }
+    return 0;
+}
+
+static uint8_t tchar_pick(void);
+
+/* field_id_tiers: every known name (httpasm_field_name) as listed, in random mixes of case, with
+ * each octet replaced in turn by the other case of a letter and by tchars of every kind (letters,
+ * digits, '-', and punctuation such as '^' and '_', which | 0x20 folds onto '~' and DEL: the
+ * key folds them alike, so only the compare tells them apart), one octet short and one long;
+ * then `randoms` random tokens of 0-40 octets. A replaced octet makes a near miss that must not
+ * match; a case change must still match. Returns 0 when every name agreed at every tier, 1 at
+ * the first that did not. */
+static int field_id_tiers(long randoms)
+{
+    static const uint8_t swaps[] = { '-', '0', '9', '^', '_', '`', '|', '~', '!', '.', 'z', 'Q' };
+    uint8_t name[64];
+    long checked = 0;
+    for (uint32_t id = 1;; id++) {
+        size_t n;
+        const uint8_t *known = httpasm_field_name(id, &n);
+        if (known == NULL)
+            break;
+        memcpy(name, known, n);
+        if (field_id_gaps(name, n, &checked))
+            return 1;
+        for (int mix = 0; mix < 4; mix++) {                 /* the same name in mixed case */
+            for (size_t i = 0; i < n; i++)
+                name[i] = (uint8_t)((known[i] >= 'a' && known[i] <= 'z' && rng() % 2) ? known[i] - 32 : known[i]);
+            if (field_id_gaps(name, n, &checked))
+                return 1;
+        }
+        for (size_t at = 0; at < n; at++) {                 /* one octet replaced: a near miss */
+            for (size_t s = 0; s <= sizeof swaps; s++) {
+                memcpy(name, known, n);
+                uint8_t c = known[at];
+                name[at] = s < sizeof swaps ? swaps[s] : (uint8_t)(c >= 'a' && c <= 'z' ? c - 32 : c);
+                if (field_id_gaps(name, n, &checked))
+                    return 1;
+            }
+        }
+        memcpy(name, known, n);                             /* one short, one long */
+        if (n > 1 && field_id_gaps(name, n - 1, &checked))
+            return 1;
+        name[n] = 's';
+        if (field_id_gaps(name, n + 1, &checked))
+            return 1;
+    }
+    for (long i = 0; i < randoms; i++) {
+        size_t n = (size_t)(rng() % 41);
+        for (size_t k = 0; k < n; k++)
+            name[k] = tchar_pick();
+        if (field_id_check(name, n, (size_t)(rng() % 33)))
+            return 1;
+        checked++;
+    }
+    printf("httpasm_field_id: %ld names, every tier agrees with v1\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_h1_parse_request: its field lines are scanned by versions (ha_h1_fields) ------ */
 
 #define PARSE_FIELDS 64
@@ -351,6 +451,8 @@ int main(int argc, char **argv)
     printf("\n");
 
     int failed = field_value_scan_tiers(randoms);
+    if (!failed)
+        failed = field_id_tiers(randoms);
     if (!failed)
         failed = parse_tiers(randoms / 10);
 

@@ -185,3 +185,320 @@ ha_field_text:
     db "te"
     db "trailer"
     db "upgrade"
+
+; ha_field_lower, ha_field_upper: id-indexed 32-octet rows (id 0 unused): each known name
+; in lower case, then with its letters in upper case, zero-padded. ha_field_upper follows
+; ha_field_lower directly, so one register reaches both rows of an id.
+align 64
+ha_field_lower:
+    times 32 db 0
+    db ":authority"
+    times 22 db 0
+    db ":method"
+    times 25 db 0
+    db ":path"
+    times 27 db 0
+    db ":scheme"
+    times 25 db 0
+    db ":status"
+    times 25 db 0
+    db "accept-charset"
+    times 18 db 0
+    db "accept-encoding"
+    times 17 db 0
+    db "accept-language"
+    times 17 db 0
+    db "accept-ranges"
+    times 19 db 0
+    db "accept"
+    times 26 db 0
+    db "access-control-allow-origin"
+    times 5 db 0
+    db "age"
+    times 29 db 0
+    db "allow"
+    times 27 db 0
+    db "authorization"
+    times 19 db 0
+    db "cache-control"
+    times 19 db 0
+    db "content-disposition"
+    times 13 db 0
+    db "content-encoding"
+    times 16 db 0
+    db "content-language"
+    times 16 db 0
+    db "content-length"
+    times 18 db 0
+    db "content-location"
+    times 16 db 0
+    db "content-range"
+    times 19 db 0
+    db "content-type"
+    times 20 db 0
+    db "cookie"
+    times 26 db 0
+    db "date"
+    times 28 db 0
+    db "etag"
+    times 28 db 0
+    db "expect"
+    times 26 db 0
+    db "expires"
+    times 25 db 0
+    db "from"
+    times 28 db 0
+    db "host"
+    times 28 db 0
+    db "if-match"
+    times 24 db 0
+    db "if-modified-since"
+    times 15 db 0
+    db "if-none-match"
+    times 19 db 0
+    db "if-range"
+    times 24 db 0
+    db "if-unmodified-since"
+    times 13 db 0
+    db "last-modified"
+    times 19 db 0
+    db "link"
+    times 28 db 0
+    db "location"
+    times 24 db 0
+    db "max-forwards"
+    times 20 db 0
+    db "proxy-authenticate"
+    times 14 db 0
+    db "proxy-authorization"
+    times 13 db 0
+    db "range"
+    times 27 db 0
+    db "referer"
+    times 25 db 0
+    db "refresh"
+    times 25 db 0
+    db "retry-after"
+    times 21 db 0
+    db "server"
+    times 26 db 0
+    db "set-cookie"
+    times 22 db 0
+    db "strict-transport-security"
+    times 7 db 0
+    db "transfer-encoding"
+    times 15 db 0
+    db "user-agent"
+    times 22 db 0
+    db "vary"
+    times 28 db 0
+    db "via"
+    times 29 db 0
+    db "www-authenticate"
+    times 16 db 0
+    db "access-control-allow-headers"
+    times 4 db 0
+    db "x-content-type-options"
+    times 10 db 0
+    db "x-xss-protection"
+    times 16 db 0
+    db "access-control-allow-credentials"
+    times 0 db 0
+    db "access-control-allow-methods"
+    times 4 db 0
+    db "access-control-expose-headers"
+    times 3 db 0
+    db "access-control-request-headers"
+    times 2 db 0
+    db "access-control-request-method"
+    times 3 db 0
+    db "alt-svc"
+    times 25 db 0
+    db "content-security-policy"
+    times 9 db 0
+    db "early-data"
+    times 22 db 0
+    db "expect-ct"
+    times 23 db 0
+    db "forwarded"
+    times 23 db 0
+    db "origin"
+    times 26 db 0
+    db "purpose"
+    times 25 db 0
+    db "timing-allow-origin"
+    times 13 db 0
+    db "upgrade-insecure-requests"
+    times 7 db 0
+    db "x-forwarded-for"
+    times 17 db 0
+    db "x-frame-options"
+    times 17 db 0
+    db "connection"
+    times 22 db 0
+    db "keep-alive"
+    times 22 db 0
+    db "proxy-connection"
+    times 16 db 0
+    db "te"
+    times 30 db 0
+    db "trailer"
+    times 25 db 0
+    db "upgrade"
+    times 25 db 0
+ha_field_upper:
+    times 32 db 0
+    db ":AUTHORITY"
+    times 22 db 0
+    db ":METHOD"
+    times 25 db 0
+    db ":PATH"
+    times 27 db 0
+    db ":SCHEME"
+    times 25 db 0
+    db ":STATUS"
+    times 25 db 0
+    db "ACCEPT-CHARSET"
+    times 18 db 0
+    db "ACCEPT-ENCODING"
+    times 17 db 0
+    db "ACCEPT-LANGUAGE"
+    times 17 db 0
+    db "ACCEPT-RANGES"
+    times 19 db 0
+    db "ACCEPT"
+    times 26 db 0
+    db "ACCESS-CONTROL-ALLOW-ORIGIN"
+    times 5 db 0
+    db "AGE"
+    times 29 db 0
+    db "ALLOW"
+    times 27 db 0
+    db "AUTHORIZATION"
+    times 19 db 0
+    db "CACHE-CONTROL"
+    times 19 db 0
+    db "CONTENT-DISPOSITION"
+    times 13 db 0
+    db "CONTENT-ENCODING"
+    times 16 db 0
+    db "CONTENT-LANGUAGE"
+    times 16 db 0
+    db "CONTENT-LENGTH"
+    times 18 db 0
+    db "CONTENT-LOCATION"
+    times 16 db 0
+    db "CONTENT-RANGE"
+    times 19 db 0
+    db "CONTENT-TYPE"
+    times 20 db 0
+    db "COOKIE"
+    times 26 db 0
+    db "DATE"
+    times 28 db 0
+    db "ETAG"
+    times 28 db 0
+    db "EXPECT"
+    times 26 db 0
+    db "EXPIRES"
+    times 25 db 0
+    db "FROM"
+    times 28 db 0
+    db "HOST"
+    times 28 db 0
+    db "IF-MATCH"
+    times 24 db 0
+    db "IF-MODIFIED-SINCE"
+    times 15 db 0
+    db "IF-NONE-MATCH"
+    times 19 db 0
+    db "IF-RANGE"
+    times 24 db 0
+    db "IF-UNMODIFIED-SINCE"
+    times 13 db 0
+    db "LAST-MODIFIED"
+    times 19 db 0
+    db "LINK"
+    times 28 db 0
+    db "LOCATION"
+    times 24 db 0
+    db "MAX-FORWARDS"
+    times 20 db 0
+    db "PROXY-AUTHENTICATE"
+    times 14 db 0
+    db "PROXY-AUTHORIZATION"
+    times 13 db 0
+    db "RANGE"
+    times 27 db 0
+    db "REFERER"
+    times 25 db 0
+    db "REFRESH"
+    times 25 db 0
+    db "RETRY-AFTER"
+    times 21 db 0
+    db "SERVER"
+    times 26 db 0
+    db "SET-COOKIE"
+    times 22 db 0
+    db "STRICT-TRANSPORT-SECURITY"
+    times 7 db 0
+    db "TRANSFER-ENCODING"
+    times 15 db 0
+    db "USER-AGENT"
+    times 22 db 0
+    db "VARY"
+    times 28 db 0
+    db "VIA"
+    times 29 db 0
+    db "WWW-AUTHENTICATE"
+    times 16 db 0
+    db "ACCESS-CONTROL-ALLOW-HEADERS"
+    times 4 db 0
+    db "X-CONTENT-TYPE-OPTIONS"
+    times 10 db 0
+    db "X-XSS-PROTECTION"
+    times 16 db 0
+    db "ACCESS-CONTROL-ALLOW-CREDENTIALS"
+    times 0 db 0
+    db "ACCESS-CONTROL-ALLOW-METHODS"
+    times 4 db 0
+    db "ACCESS-CONTROL-EXPOSE-HEADERS"
+    times 3 db 0
+    db "ACCESS-CONTROL-REQUEST-HEADERS"
+    times 2 db 0
+    db "ACCESS-CONTROL-REQUEST-METHOD"
+    times 3 db 0
+    db "ALT-SVC"
+    times 25 db 0
+    db "CONTENT-SECURITY-POLICY"
+    times 9 db 0
+    db "EARLY-DATA"
+    times 22 db 0
+    db "EXPECT-CT"
+    times 23 db 0
+    db "FORWARDED"
+    times 23 db 0
+    db "ORIGIN"
+    times 26 db 0
+    db "PURPOSE"
+    times 25 db 0
+    db "TIMING-ALLOW-ORIGIN"
+    times 13 db 0
+    db "UPGRADE-INSECURE-REQUESTS"
+    times 7 db 0
+    db "X-FORWARDED-FOR"
+    times 17 db 0
+    db "X-FRAME-OPTIONS"
+    times 17 db 0
+    db "CONNECTION"
+    times 22 db 0
+    db "KEEP-ALIVE"
+    times 22 db 0
+    db "PROXY-CONNECTION"
+    times 16 db 0
+    db "TE"
+    times 30 db 0
+    db "TRAILER"
+    times 25 db 0
+    db "UPGRADE"
+    times 25 db 0

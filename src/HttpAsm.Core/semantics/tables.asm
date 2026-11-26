@@ -106,6 +106,21 @@ ha_x16_0f:  times 16 db 0x0F        ; a nibble: what pshufb's index keeps of an 
 .end:
 
 ; -----------------------------------------------------------------------------
+; ha_lane_window: 16 octets of 0x00, 16 of 0xFF, 16 of 0x00. A 16-octet load from it selects
+; lanes of a vector by length without a shift or a table per length: at ha_lane_window + 32 - n
+; it is 0xFF in lanes 0..n-1 (the first n octets of a vector loaded at a string's start), at
+; ha_lane_window + n it is 0xFF in lanes 16-n..15 (the last n octets of a vector loaded so that
+; it ends at the string's end); n = 0..16 either way. Callers read it with movdqu: the offsets
+; are not multiples of 16.
+; -----------------------------------------------------------------------------
+global ha_lane_window:data hidden (ha_lane_window.end - ha_lane_window)
+ha_lane_window:
+    times 16 db 0x00
+    times 16 db 0xFF
+    times 16 db 0x00
+.end:
+
+; -----------------------------------------------------------------------------
 ; ha_tchar_lo, ha_tchar_hi: the tchar class as two 16-entry tables for pshufb, one indexed by an
 ; octet's low nibble and one by its high nibble: an octet is a tchar exactly when its two
 ; entries share a bit. tchar lives in the rows 0x20-0x7F only (it is visible ASCII), so each of

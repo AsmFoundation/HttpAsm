@@ -493,8 +493,42 @@ internal static class Emit
             s.Append($"    db {Db(f)}\n");
         }
 
+        // The rows a vector compare reads: each name twice, as two id-indexed tables of 32-octet
+        // rows (id 0's row is zeros), the second with its letters in upper case. A name matches a
+        // row when each of its octets equals the octet of either table at its position, which is
+        // exactly the case-insensitive compare of letters and the exact compare of everything
+        // else, since a non-letter octet is the same in both tables. 32 octets hold every known
+        // name: a longer one would need a wider row, so it stops the generator instead.
+        if (fields.Any(f => f.Length > RowLength))
+        {
+            throw new InvalidOperationException(
+                $"a known field name is longer than {RowLength} octets: widen ha_field_lower's rows and the lookup's compare");
+        }
+
+        s.Append($"\n; ha_field_lower, ha_field_upper: id-indexed {RowLength}-octet rows (id 0 unused): each known name\n");
+        s.Append("; in lower case, then with its letters in upper case, zero-padded. ha_field_upper follows\n");
+        s.Append("; ha_field_lower directly, so one register reaches both rows of an id.\n");
+        s.Append("align 64\nha_field_lower:\n");
+        s.Append($"    times {RowLength} db 0\n");
+        foreach (string f in fields)
+        {
+            s.Append($"    db {Db(f)}\n    times {RowLength - f.Length} db 0\n");
+        }
+
+        s.Append("ha_field_upper:\n");
+        s.Append($"    times {RowLength} db 0\n");
+        foreach (string f in fields)
+        {
+            s.Append($"    db {Db(f.ToUpperInvariant())}\n    times {RowLength - f.Length} db 0\n");
+        }
+
         return s.ToString();
     }
+
+    /// <summary>The octets of one row of ha_field_lower and ha_field_upper: the longest known
+    /// name's length rounded to a whole number of 16-octet vectors (32 since the first
+    /// generation). The lookup's vector compare reads a row in at most two vectors.</summary>
+    private const int RowLength = 32;
 
     /// <summary>generated/hpack.inc or qpack.inc: a static table (data, include once).</summary>
     /// <param name="table">"HPACK" or "QPACK".</param>

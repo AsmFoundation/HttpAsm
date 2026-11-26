@@ -650,6 +650,16 @@ HTTP/2, the drivers, the client):
      lead fell from 2.5x to 1.8x, and llhttp is now slower on every head measured.
      `tests/native/tiers` compares every tier with v1 on 44,850 heads that end against an
      inaccessible page.
+   - **The field-name lookup** (2026-11-26), 20% of the browser request's instructions after
+     that. `ha_field_lookup` serves HTTP/1.1, HPACK and the writers. At v2 it compares a
+     candidate 16 octets at a time against two generated rows per known name (lower case and
+     upper case; an octet must equal one of them, which keeps the compare exact for any octet),
+     with the key from two 16-bit loads. 1.42x faster than v1 in the same build; against the
+     commit before, 1.43x on the lookup alone, 1.06x on HPACK encoding and 1.10x on the API
+     POST head, while the browser head ran 10% fewer instructions in the same time: its lookups
+     are not on the chain of line scans that sets its time. `tests/native/tiers` compares every
+     tier on 279,050 names: every known one, in mixed case, with each octet replaced by near
+     misses, against the guard page.
 
 *H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
 in CI); differential fuzzing has no untriaged difference; every row passes on every tier and

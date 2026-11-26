@@ -10,7 +10,12 @@ default rel
 %include "httpasm_core.inc"
 
 section .rodata
-%include "generated/field_table.inc"        ; ha_field_hash, ha_field_names, ha_field_text
+%include "generated/field_table.inc"        ; ha_field_hash, ha_field_names, ha_field_text,
+                                            ; ha_field_lower, ha_field_upper
+
+; The distance from an id's row in ha_field_lower to its row in ha_field_upper: the generator
+; emits the two tables back to back, so one register addresses both rows of an id.
+LOOKUP_UPPER_APART equ ha_field_upper - ha_field_lower
 
 section .text
 
@@ -20,7 +25,10 @@ section .text
 ;        nobody has validated yet, so the answer must be exact for every octet string.
 ;   Out: eax = HA_FIELD_* id, 0 when the name is not a known field. The compare ignores the
 ;        case of ASCII letters, as field names do (RFC 9110 5.1), and of nothing else.
-;   Clobbers rcx, rdx, r8 and the flags. Reads rdi[0..rsi) only.
+;   Clobbers rcx, rdx, r8, xmm0-xmm4 and the flags (v1 leaves the XMM registers alone, but a
+;   caller may not count on that: the tier is the CPU's). Reads rdi[0..rsi) only, except that
+;   v2 may read up to 16 octets around a short name within the name's own 4 KiB pages, which
+;   can never fault, and ignores them.
 ;
 ;   The key packs the first two and last two octets (folded with | 0x20) and the length; the
 ;   generated multiplier sends every known name to its own slot of 256 (specs/generate.cs).
@@ -30,10 +38,17 @@ section .text
 ;   and 0x10-0x19 match digits: HPACK's decoder gave "\x1apath" the id of :path, and its
 ;   encoder sent "content\rlength" as the static table's content-length (tests/fuzz/hpack,
 ;   2026-11-26). Token names never hold those octets, which is why HTTP/1.1 never showed it.
+;
+;   Two versions, the same answer for every octet string (HA_CPU_PICK1 at the entry):
+;     v1  the key from four octet loads, the candidate compared octet by octet;
+;     v2  the key from two 16-bit loads, the candidate compared 16 octets at a time against
+;         its rows in ha_field_lower and ha_field_upper (SSE4.1's ptest settles a short
+;         name's lanes in one instruction).
 ; -----------------------------------------------------------------------------
 global ha_field_lookup:function hidden (ha_field_lookup.end - ha_field_lookup)
 align 16
 ha_field_lookup:
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .v2
     cmp     rsi, 2
     jb      .none                           ; no known name is shorter than 2 octets
     cmp     rsi, HA_FIELD_MAX_LENGTH
@@ -86,6 +101,98 @@ ha_field_lookup:
     ret                                     ; eax: the id
 .none:
     xor     eax, eax
+    ret
+
+; ---- v2: the same key and candidate, the compare 16 octets at a time.
+;
+; An octet matches when it equals the candidate's octet in ha_field_lower or in ha_field_upper
+; (generated: the same name with its letters in upper case). For a letter that is exactly v1's
+; case-insensitive compare; for anything else both rows hold the same octet, so it must be that
+; octet: the exactness the HPACK callers need (the comment above) holds by construction.
+.v2:
+    cmp     rsi, 2
+    jb      .none                           ; no known name is shorter than 2 octets
+    cmp     rsi, HA_FIELD_MAX_LENGTH
+    ja      .none
+    ; v1's key, from two loads: b0 | b1 << 8 and b[n-2] | b[n-1] << 8 (one word when n = 2,
+    ; as v1 reads it), each octet folded with | 0x20 at once.
+    movzx   eax, word [rdi]
+    movzx   ecx, word [rdi + rsi - 2]
+    shl     ecx, 16
+    or      eax, ecx
+    or      eax, 0x20202020
+    mov     rcx, rsi
+    shl     rcx, 32
+    or      rax, rcx                        ; | length << 32
+    mov     rcx, HA_FIELD_HASH_MULTIPLIER
+    imul    rax, rcx
+    shr     rax, 56                         ; the slot
+    lea     rcx, [rel ha_field_hash]
+    movzx   eax, byte [rcx + rax]           ; the candidate id
+    test    eax, eax
+    jz      .none
+    lea     rcx, [rel ha_field_names]
+    cmp     esi, [rcx + rax * 8 + 4]        ; the candidate's length
+    jne     .none
+    mov     edx, eax
+    shl     edx, 5                          ; 32 octets a row
+    lea     r8, [rel ha_field_lower]
+    add     r8, rdx                         ; the candidate's lower-case row, 32-aligned
+    cmp     esi, 16
+    ja      .v2_long
+    ; 2-16 octets: one vector from the name's start, when its 16 octets stay in the name's
+    ; page (the page holds the name's first octet, so it is mapped). Lanes past the name hold
+    ; whatever follows it; the lane window drops them.
+    mov     ecx, edi
+    and     ecx, 4095
+    cmp     ecx, 4096 - 16
+    ja      .v2_page_end
+    movdqu  xmm0, [rdi]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm0, [r8]
+    pcmpeqb xmm1, [r8 + LOOKUP_UPPER_APART]
+    por     xmm0, xmm1                      ; 0xFF where the octet is the known one, either case
+    lea     rcx, [rel ha_lane_window + 32]
+    sub     rcx, rsi
+    movdqu  xmm1, [rcx]                     ; 0xFF in the name's lanes 0..n-1
+    ptest   xmm0, xmm1                      ; CF = no name lane differs
+    jnc     .none
+    ret                                     ; eax: the id
+.v2_page_end:
+    ; The name starts within 16 octets of its page's end: read the 16 octets that end at the
+    ; name's end instead. They start at most 14 octets before the name, in its first page, and
+    ; end inside the name, so they are mapped. The name fills the top n lanes; the rows are
+    ; read at the same offset (the lanes below fall on the row before, never compared).
+    movdqu  xmm0, [rdi + rsi - 16]
+    movdqu  xmm2, [r8 + rsi - 16]
+    movdqu  xmm3, [r8 + LOOKUP_UPPER_APART + rsi - 16]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm0, xmm2
+    pcmpeqb xmm1, xmm3
+    por     xmm0, xmm1
+    lea     rcx, [rel ha_lane_window]
+    movdqu  xmm1, [rcx + rsi]               ; 0xFF in the top n lanes
+    ptest   xmm0, xmm1
+    jnc     .none
+    ret
+.v2_long:
+    ; 17-32 octets: the first 16 and the last 16 (they overlap), both inside the name; the
+    ; rows' last 16 of n are inside the 32-octet row, read unaligned.
+    movdqu  xmm0, [rdi]
+    movdqu  xmm2, [rdi + rsi - 16]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm0, [r8]
+    pcmpeqb xmm1, [r8 + LOOKUP_UPPER_APART]
+    por     xmm0, xmm1
+    movdqu  xmm3, [r8 + rsi - 16]
+    movdqu  xmm4, [r8 + LOOKUP_UPPER_APART + rsi - 16]
+    pcmpeqb xmm3, xmm2
+    pcmpeqb xmm4, xmm2
+    por     xmm3, xmm4
+    pand    xmm0, xmm3                      ; every lane of both halves must match
+    pmovmskb ecx, xmm0
+    cmp     ecx, 0xFFFF
+    jne     .none
     ret
 .end:
 

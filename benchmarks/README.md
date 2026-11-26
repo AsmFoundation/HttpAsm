@@ -189,6 +189,30 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, the field-name lookup at v2.** After the field lines, SDE's
+profile of the browser request put 20% of its instructions in `ha_field_lookup`, which compared
+a candidate name octet by octet (7 instructions an octet). At v2 it now builds the same key from
+two 16-bit loads and compares 16 octets at a time against two generated rows per known name, one
+lower case and one upper case (`specs/generate.cs`): an octet matches when it equals either, which
+is exactly the case-insensitive compare of letters and the exact compare of everything else.
+
+| Case | Instructions, before -> after (best tier) | Against fe7f29b (3 processes): best, v1 |
+|---|---:|---:|
+| field_id, 12 names (10 known) | 2,536 -> 1,931 | 1.43x faster, v1 not proven (0.96-0.98x) |
+| HPACK encode, 18 fields | | 1.06-1.08x faster, v1 no difference |
+| HTTP/2 request rules, 18 fields | | 1.29-1.32x faster, v1 1.12-1.15x faster |
+| small GET | 825 -> 804 | 0.93-0.95x, v1 0.88-0.90x |
+| browser GET | 6,180 -> 5,541 | no difference, v1 no difference |
+| API POST | 3,335 -> 3,030 | 1.09-1.11x faster, v1 0.95x |
+
+In the same build the v2 lookup is 1.42x faster than v1 (`parsers/field_id`, tier verdict). The
+v1 column is the control: its code changed only by the dispatch test at the lookup's entry, yet
+it moved between 0.88x and 1.15x, the code-placement effect again. So the rows where v1 moved
+say only that the best tier gained more (API POST, HTTP/2) or lost less (small GET) than the
+placement alone. The browser head ran 10% fewer instructions in the same time: its lookups run
+beside the line scans, off the path that sets its time, which is the scans' own chain from one
+line's end to the next line's start.
+
 **2026-11-26: phase H step 4, the HTTP/1.1 field lines at v2.** SDE's profile of the browser
 request (7,653 instructions per call) put 55% in `ha_h1_fields`, which now scans each line 16
 octets a step at v2 (docs/DESIGN.md, step 4). On the i9-13900K under WSL2:
@@ -205,6 +229,12 @@ heads, though it runs slightly more instructions (two dispatch tests per line). 
 moved the scalar loop to a placement this CPU runs faster. That is the code-placement effect the
 validation measured, so only the tier verdict above is the vector code's own. llhttp is now
 slower than HttpAsm on all three heads.
+
+A refinement (fe7f29b) classifies each value step once, and settles a step's bounds with one
+compare when it ends within the head. It cut the v2 instructions further (browser 6,536 -> 6,180,
+API POST 3,548 -> 3,335, small GET 832 -> 825) with no time difference in an A/B against e0ef184
+(3 processes). The same A/B measured v1, whose code had not changed, 4-5% slower on the two
+larger heads: placement again, the other way round.
 
 - 2026-11-26, `results/2026-11-26-rivals.md` (i9-13900K under WSL2, the first run, by the
   earlier `rivals` harness and its fastest-sample rule): the baseline for phase H step 4. The
