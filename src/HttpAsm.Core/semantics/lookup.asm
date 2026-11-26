@@ -352,7 +352,7 @@ ha_find_lf:
 ; uint32_t httpasm_field_id(const uint8_t *name, size_t n)
 ;   The known-field id of a field name, matched without regard to case (RFC 9110 5.1); 0 when
 ;   the name is not a known field or is not a token. In: rdi, rsi. Out: eax.
-;   Clobbers rcx, rdx, r8 and the flags.
+;   Clobbers rcx, rdx, r8, xmm0-xmm6 and the flags.
 ; -----------------------------------------------------------------------------
 global httpasm_field_id:function (httpasm_field_id.end - httpasm_field_id)
 align 16
@@ -360,11 +360,13 @@ httpasm_field_id:
     ; A token first: the C ABI promises 0 for a name that is not a token (pseudo-fields
     ; included), whatever the lookup would match. (The lookup itself is exact for any octets
     ; since 2026-11-26; this check once also guarded its folding.)
-    HA_TOKEN_SCAN rdi, rsi, rax, rcx, rdx
-    cmp     rax, rsi
-    jne     .not_token
     test    rsi, rsi
     jz      .not_token
+    sub     rsp, 8                          ; 16-byte aligned for the call
+    call    ha_token_length                 ; 16 octets a step from v2 (rdi, rsi kept)
+    add     rsp, 8
+    cmp     rax, rsi
+    jne     .not_token
     jmp     ha_field_lookup
 .not_token:
     xor     eax, eax

@@ -68,8 +68,15 @@ section .text
 
 ; -----------------------------------------------------------------------------
 ; wr_put: append rsi[0..rdx) at the cursor.
-;   In: rbx = cursor, r13 = the output's end, rsi, rdx. Out: rbx advanced, CF clear; or CF set
-;   when the output is full (nothing appended). Clobbers rcx, rdi, rsi.
+;   In: rbx = cursor, r13 = the output's end, rsi, rdx; the source must not overlap the
+;   output from the cursor on (callers copy constants, the caller's fields and stack buffers).
+;   Out: rbx advanced, CF clear; or CF set when the output is full (nothing appended).
+;   Clobbers rcx, rdi, rsi, xmm0, xmm1.
+;   The pieces are short (a name, ": ", a value, CRLF), and rep movsb's start-up cost, tens of
+;   cycles, was most of each one: two moves of the size class instead, the second ending at the
+;   piece's end (they overlap when the length is between sizes), and for 16 octets and more a
+;   16-octet loop with an overlapping last step. Reads exactly rsi[0..rdx), writes exactly
+;   rbx[0..rdx).
 ; -----------------------------------------------------------------------------
 align 16
 wr_put:
@@ -77,10 +84,50 @@ wr_put:
     sub     rcx, rbx
     cmp     rcx, rdx
     jb      .full                           ; CF is set by the compare
-    mov     rdi, rbx
-    mov     rcx, rdx
-    rep     movsb
-    mov     rbx, rdi
+    cmp     rdx, 16
+    jae     .long
+    cmp     edx, 8
+    jae     .eight
+    cmp     edx, 4
+    jae     .four
+    cmp     edx, 2
+    jae     .two
+    test    edx, edx
+    jz      .done
+    movzx   ecx, byte [rsi]                 ; one octet
+    mov     [rbx], cl
+    jmp     .done
+.two:                                       ; 2-3 octets
+    movzx   ecx, word [rsi]
+    movzx   edi, word [rsi + rdx - 2]
+    mov     [rbx], cx
+    mov     [rbx + rdx - 2], di
+    jmp     .done
+.four:                                      ; 4-7 octets
+    mov     ecx, [rsi]
+    mov     edi, [rsi + rdx - 4]
+    mov     [rbx], ecx
+    mov     [rbx + rdx - 4], edi
+    jmp     .done
+.eight:                                     ; 8-15 octets
+    mov     rcx, [rsi]
+    mov     rdi, [rsi + rdx - 8]
+    mov     [rbx], rcx
+    mov     [rbx + rdx - 8], rdi
+    jmp     .done
+.long:                                      ; 16 octets and more
+    movdqu  xmm0, [rsi + rdx - 16]          ; the last 16, stored after the loop
+    xor     ecx, ecx
+.step:
+    movdqu  xmm1, [rsi + rcx]
+    movdqu  [rbx + rcx], xmm1
+    add     rcx, 16
+    lea     rdi, [rcx + 16]
+    cmp     rdi, rdx
+    jbe     .step
+    movdqu  [rbx + rdx - 16], xmm0          ; overlaps the last whole step when needed
+.done:
+    add     rbx, rdx
     clc
     ret
 .full:
@@ -89,22 +136,31 @@ wr_put:
 
 ; -----------------------------------------------------------------------------
 ; wr_decimal / wr_hex: append rax in decimal / lower-case hex, no leading zeros ("0" for 0).
-;   In: rbx, r13 as wr_put; rax. Out: as wr_put. Clobbers rax, rcx, rdx, rsi, rdi, r8, r9.
+;   In: rbx, r13 as wr_put; rax. Out: as wr_put. Clobbers rax, rcx, rdx, rsi, rdi, r8, r9,
+;   xmm0, xmm1.
 ;   The digits are built backwards in a 32-octet stack buffer (a u64 has at most 20 decimal or
-;   16 hex digits), then appended in one wr_put.
+;   16 hex digits), then appended in one wr_put. A decimal digit divides by 10 through a
+;   multiplication: x / 10 = (x * 0xCCCCCCCCCCCCCCCD) >> 67 for every 64-bit x (the high half of
+;   the product shifted by 3), where div cost 20-40 cycles a digit on the Content-Length of
+;   every response.
 ; -----------------------------------------------------------------------------
 align 16
 wr_decimal:
     sub     rsp, 40                         ; 32 for the digits, 8 keeps the stack aligned
     lea     r8, [rsp + 32]                  ; one past the last digit
     mov     r9, r8
-    mov     rcx, 10
+    mov     rcx, 0xCCCCCCCCCCCCCCCD         ; ceil(2^67 / 10)
 .digit:
-    xor     edx, edx
-    div     rcx
-    add     dl, '0'
+    mov     rsi, rax                        ; x
+    mul     rcx                             ; rdx = the high half of x * ceil(2^67 / 10)
+    shr     rdx, 3                          ; q = x / 10
+    lea     rax, [rdx + rdx * 4]
+    add     rax, rax                        ; q * 10
+    sub     rsi, rax                        ; x - q * 10: the digit
+    add     sil, '0'
     dec     r9
-    mov     [r9], dl
+    mov     [r9], sil
+    mov     rax, rdx                        ; on to q
     test    rax, rax
     jnz     .digit
     mov     rsi, r9
@@ -141,7 +197,7 @@ wr_hex:
 ;   In: rdi = fields, esi = count, edx = WR_RESPONSE, WR_REQUEST, WR_TRAILER or WR_H2_RESPONSE.
 ;   Out: eax = 0, or HTTPASM_ERROR_FIELD_NAME (not a token), _FIELD_VALUE (a CTL, or whitespace
 ;   at an end), _FRAMING_FIELD (an id the writer owns); ecx = 1 when a Date field is among
-;   them. Clobbers rdx, rsi, rdi, r8-r11, xmm0-xmm5 and the flags. Keeps rbx, rbp, r12-r15.
+;   them. Clobbers rdx, rsi, rdi, r8-r11, xmm0-xmm6 and the flags. Keeps rbx, rbp, r12-r15.
 ;   One rule set for every version's responses: a field HTTP/1.1 would refuse to send is
 ;   refused in HTTP/2 too, so a handler cannot behave differently per version by accident.
 ; -----------------------------------------------------------------------------
@@ -166,7 +222,7 @@ wr_check_fields:
     mov     esi, [r12 + httpasm_field.name_length]
     test    esi, esi
     jz      .bad_name
-    HA_TOKEN_SCAN rdi, rsi, rax, rcx, rdx
+    call    ha_token_length                 ; 16 octets a step from v2 (rdi, rsi kept)
     cmp     rax, rsi
     jne     .bad_name
     call    ha_field_lookup                 ; eax = the id (rdi, rsi kept)

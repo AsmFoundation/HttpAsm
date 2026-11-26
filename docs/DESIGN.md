@@ -693,6 +693,12 @@ HTTP/2, the drivers, the client):
      same decoder (one macro, `H2_DECODER`) shifts its window with BMI2's `shlx`, which
      touches no flags (`shl` by `cl` merges them, so each shift waited for the compare before
      it): 3.5-5% faster than v2 in the same build, two runs agreeing (`tiers/hpack_decode`).
+   - **Whole-token checks and the response writer** (2026-11-27). `ha_token_length` scans a
+     token 16 octets a step from v2 (the writers' field names, `httpasm_field_id`,
+     `httpasm_token_length`: a 45-octet name 4.6x faster); the writer copies its pieces with
+     moves sized to each (no `rep movsb`, whose start-up cost was most of each short copy) and
+     makes its decimal digits by multiplication. A 200 with six fields is written 1.17x faster.
+     `tests/native/tiers` checks the token scan at every tier on 206,680 inputs against the RFC.
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's

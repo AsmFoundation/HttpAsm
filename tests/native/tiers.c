@@ -158,6 +158,96 @@ static int field_value_scan_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_token_length: the token scan's versions (ha_token_length) ------------------------ */
+
+static uint8_t tchar_pick(void);
+
+/* token_oracle: the oracle, from RFC 9110 5.6.2: the number of leading tchars of p[0..n). */
+static size_t token_oracle(const uint8_t *p, size_t n)
+{
+    static const char punctuation[] = "!#$%&'*+-.^_`|~";
+    for (size_t i = 0; i < n; i++) {
+        uint8_t c = p[i];
+        int tchar = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c != 0 && strchr(punctuation, c) != NULL);
+        if (!tchar)
+            return i;
+    }
+    return n;
+}
+
+/* token_check: one input at every tier, ending `gap` octets before the guard page (random octets
+ * between), against the oracle. Returns 0 when every tier agrees; 1, after reporting, otherwise. */
+static int token_check(const uint8_t *token, size_t n, size_t gap)
+{
+    uint8_t *p = page_end - n - gap;
+    memcpy(p, token, n);
+    for (size_t i = 0; i < gap; i++)
+        p[n + i] = (uint8_t)rng();
+    size_t expected = token_oracle(p, n);
+    for (size_t t = 0; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        size_t actual = httpasm_token_length(p, n);
+        if (actual != expected) {
+            fprintf(stderr, "httpasm_token_length at %s (features %#llx): expected %zu, got %zu; %zu octets before the guard page\n",
+                    cap_names[t], (unsigned long long)features, expected, actual, gap);
+            dump("token", p, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* token_tiers: every length 0-100 all tchars and with one non-tchar (each kind: a control, SP,
+ * a separator, DEL, 0x80-0xFF) at every position, every octet value as the last octet of a few
+ * lengths, then `randoms` random tokens; each at distances from the guard page that reach every
+ * short-token path (0-17 octets: within 16 of the page's end, or not) and the overlapping last
+ * step. Returns 0 when every one agreed at every tier, 1 at the first that did not. */
+static int token_tiers(long randoms)
+{
+    static uint8_t t[128];
+    static const uint8_t breakers[] = { 0x00, 0x09, ' ', '"', '(', ',', '/', ':', '@', '[', '{', 0x7F, 0x80, 0xFF };
+    static const size_t gaps[] = { 0, 1, 7, 15, 16, 17 };
+    long checked = 0;
+    for (size_t n = 0; n <= 100; n++) {
+        for (size_t k = 0; k < n; k++)
+            t[k] = tchar_pick();
+        for (size_t g = 0; g < sizeof gaps / sizeof gaps[0]; g++) {
+            if (token_check(t, n, gaps[g]))
+                return 1;
+            checked++;
+        }
+        for (size_t at = 0; at < n; at++) {
+            uint8_t keep = t[at];
+            t[at] = breakers[(at + n) % sizeof breakers];
+            if (token_check(t, n, gaps[(at + n) % (sizeof gaps / sizeof gaps[0])]))
+                return 1;
+            checked++;
+            t[at] = keep;
+        }
+    }
+    for (unsigned c = 0; c < 256; c++) {
+        for (size_t n = 1; n <= 40; n += 13) {
+            for (size_t k = 0; k < n; k++)
+                t[k] = tchar_pick();
+            t[n - 1] = (uint8_t)c;
+            if (token_check(t, n, gaps[c % (sizeof gaps / sizeof gaps[0])]))
+                return 1;
+            checked++;
+        }
+    }
+    for (long i = 0; i < randoms; i++) {
+        size_t n = (size_t)(rng() % 101);
+        for (size_t k = 0; k < n; k++)
+            t[k] = rng() % 40 == 0 ? (uint8_t)rng() : tchar_pick();
+        if (token_check(t, n, (size_t)(rng() % 33)))
+            return 1;
+        checked++;
+    }
+    printf("httpasm_token_length: %ld inputs, every tier agrees with the oracle\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_field_id: the field-name lookup's versions (ha_field_lookup) -------------------- */
 
 /* field_id_check: one name at every tier, ending `gap` octets before the guard page (the octets
@@ -862,6 +952,8 @@ int main(int argc, char **argv)
     printf("\n");
 
     int failed = field_value_scan_tiers(randoms);
+    if (!failed)
+        failed = token_tiers(randoms);
     if (!failed)
         failed = field_id_tiers(randoms);
     if (!failed)

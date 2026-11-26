@@ -66,6 +66,8 @@ extern ha_target_lo         ; 16 bytes: request-target octets but "%", by low ni
 extern ha_field_lookup      ; eax = known-field id of name rdi[0..rsi), 0 if not known
 extern ha_method_lookup     ; eax = HTTPASM_METHOD_* of method rdi[0..rsi), 0 if another
 extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi if none
+extern ha_token_length      ; rax = the leading tchars of rdi[0..rsi) (rsi when all are); keeps
+                            ; rdi, rsi; clobbers rcx, rdx, xmm0-xmm6 (semantics/fields.asm)
 extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
                             ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 

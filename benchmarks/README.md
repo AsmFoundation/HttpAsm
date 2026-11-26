@@ -189,6 +189,28 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: phase H step 4, whole-token checks at v2 and the response writer's copies.** SDE's
+profile of writing a 200 with six fields (2,366 instructions) put half in `ha_check_fields`: each
+field name checked octet by octet (`HA_TOKEN_SCAN`, 5 instructions an octet). The writer also
+copied every piece with `rep movsb` and divided by 10 with `div` for each digit of the length.
+  - `ha_token_length` (`semantics/fields.asm`, also `httpasm_token_length`): at v2, 16 octets a
+    step with the tchar tables, the last step overlapping, a short token read within its page.
+    The writers' field names and `httpasm_field_id` call it; a token inside a value keeps the
+    inline scan.
+  - `wr_put` copies with two overlapping moves sized to the piece, and a 16-octet loop beyond;
+    `wr_decimal` divides by multiplying (x / 10 = (x * 0xCCCCCCCCCCCCCCCD) >> 67). Both serve v1.
+
+| Case | Instructions, before -> after (best) | A/B against 199517f (3 processes): best, v1 |
+|---|---:|---:|
+| 200 with 6 fields | 2,366 -> 2,023 | 1.17-1.18x, v1 1.04-1.09x |
+| token_length, 45-octet name | 330 -> 75 | 4.56-4.62x, v1 no difference |
+| token_length, "GET" | 36 -> 40 | 1.09-1.11x, v1 0.93-0.94x |
+| field_id, 12 names | 1,931 -> 1,277 | 1.54-1.58x, v1 1.19-1.23x |
+
+v1's gain on the writer is its own (the copies and the division serve every tier); its 6% loss on
+a 3-octet token is the dispatch the scan now passes through. What is left of the writer spreads
+over its field checks, its 20 piece copies and the lookups, with no single block in front.
+
 **2026-11-26: phase H step 4, HPACK's Huffman decoding at v3 (BMI2).** The v2 table decoder
 shifts its window by `cl` after each lookup's bounds compare; on Intel cores `shl` by `cl` merges
 the flags (a shift by 0 keeps them), so the shift waits for the compare, on the chain that sets

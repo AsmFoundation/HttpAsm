@@ -15,13 +15,102 @@ section .text
 ; size_t httpasm_token_length(const uint8_t *p, size_t n)
 ;   The number of leading octets of p[0..n) that are tchar (RFC9110-5.6.2-2), n when all are.
 ;   p holds a token (a method, a field name: RFC9110-5.1-2) when n > 0 and the result is n.
-;   In: rdi = p, rsi = n. Out: rax. Clobbers rcx, rdx and the flags.
-;   Reads p[0..result] at most: never past p + n, and nothing at all when n is 0.
+;   In: rdi = p, rsi = n. Out: rax. Clobbers rcx, rdx, xmm0-xmm6 and the flags.
+;   Memory: as ha_token_length (it is that routine, exported).
 ; -----------------------------------------------------------------------------
 global httpasm_token_length:function (httpasm_token_length.end - httpasm_token_length)
 align 16
 httpasm_token_length:
+    jmp     ha_token_length
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_token_length: the number of leading octets of rdi[0..rsi) that are tchar, rsi when all are
+; (httpasm_token_length's contract; the core's writers and lookups call it to check a whole
+; name, where a token inside a value keeps HA_TOKEN_SCAN inline).
+;   In: rdi = p, rsi = n; both kept. Out: rax. Clobbers rcx, rdx, xmm0-xmm6 and the flags.
+;   Memory: v1 reads p[0..result] at most. v2 reads 16 octets a step inside p[0..n) (the last
+;   step overlaps the one before); a token shorter than 16 octets is read as 16 octets within
+;   the 4 KiB page of its first octet (from p, or ending at p + n when p is within 16 octets of
+;   its page's end), which can never fault; lanes outside p[0..n) are ignored.
+;
+;   Two versions, the same index for every input (HA_CPU_PICK1 at the entry):
+;     v1  HA_TOKEN_SCAN, one class-table lookup per octet (5 instructions an octet);
+;     v2  HA_NIBBLE_CLASSIFY with ha_tchar_lo/_hi, 16 octets a step.
+; -----------------------------------------------------------------------------
+global ha_token_length:function hidden (ha_token_length.end - ha_token_length)
+align 16
+ha_token_length:
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .v2
     HA_TOKEN_SCAN rdi, rsi, rax, rcx, rdx
+    ret
+.v2:
+    xor     eax, eax
+    test    rsi, rsi
+    jz      .out                            ; nothing to read
+    movdqa  xmm3, [rel ha_tchar_lo]
+    movdqa  xmm4, [rel ha_tchar_hi]
+    movdqa  xmm5, [rel ha_x16_0f]
+    pxor    xmm2, xmm2
+    cmp     rsi, 16
+    jb      .short
+.step:                                      ; rax + 16 <= rsi: a whole step inside p[0..n)
+    movdqu  xmm0, [rdi + rax]
+    HA_NIBBLE_CLASSIFY xmm0, xmm1, xmm6, xmm3, xmm4, xmm5, xmm2, ecx
+    test    ecx, ecx
+    jnz     .found
+    add     rax, 16
+    lea     rdx, [rax + 16]
+    cmp     rdx, rsi
+    jbe     .step
+    cmp     rax, rsi
+    je      .out                            ; n was a multiple of 16: every octet a tchar
+    ; 1-15 octets left: the last 16 of p[0..n), overlapping the step before, whose octets are
+    ; known tchars; its lanes below rax are shifted out of the mask.
+    mov     rdx, rsi
+    sub     rdx, 16                         ; where it starts
+    movdqu  xmm0, [rdi + rdx]
+    mov     ecx, eax
+    sub     ecx, edx                        ; the lanes already known (1-15)
+    HA_NIBBLE_CLASSIFY xmm0, xmm1, xmm6, xmm3, xmm4, xmm5, xmm2, edx
+    shr     edx, cl                         ; lane 0 is octet rax now
+    test    edx, edx
+    jz      .all                            ; the rest are tchars too
+    bsf     edx, edx
+    add     rax, rdx
+    ret
+.found:
+    bsf     ecx, ecx
+    add     rax, rcx
+.out:
+    ret
+.all:
+    mov     rax, rsi
+    ret
+.short:                                     ; 1-15 octets
+    mov     ecx, edi
+    and     ecx, 4095
+    cmp     ecx, 4096 - 16
+    ja      .short_page_end
+    movdqu  xmm0, [rdi]                     ; within p's page
+    HA_NIBBLE_CLASSIFY xmm0, xmm1, xmm6, xmm3, xmm4, xmm5, xmm2, edx
+    mov     ecx, esi
+    mov     eax, 1
+    shl     eax, cl
+    or      edx, eax                        ; lane n stops the scan: the answer is at most n
+    bsf     eax, edx
+    ret
+.short_page_end:                            ; the 16 octets ending at p + n: within p's page
+    movdqu  xmm0, [rdi + rsi - 16]
+    HA_NIBBLE_CLASSIFY xmm0, xmm1, xmm6, xmm3, xmm4, xmm5, xmm2, edx
+    mov     ecx, 16
+    sub     ecx, esi
+    shr     edx, cl                         ; lane 0 is p's first octet now
+    mov     ecx, esi
+    mov     eax, 1
+    shl     eax, cl
+    or      edx, eax                        ; lane n stops the scan
+    bsf     eax, edx
     ret
 .end:
 
