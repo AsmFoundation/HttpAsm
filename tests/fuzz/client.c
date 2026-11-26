@@ -131,6 +131,13 @@ static int expected(uint8_t *buf, size_t n, uint32_t method, httpasm_response_he
          * (RFC 9110 15; h1/response.asm), which the client returns. */
         if (h->status < 100 || h->status >= 200)
             break;
+        /* 101 (Switching Protocols) is no interim answer to skip: after it the connection
+         * speaks another protocol (RFC 9110 15.2.2), one this client never asked for (it sends
+         * no Upgrade; RFC 9110 7.8: a server must not switch to a protocol the request did not
+         * name). The client refuses it (-HTTPASM_ERROR_STATUS), and so does this oracle: CI's
+         * fuzzing found the oracle skipping "101 Continue" as an interim answer (2026-11-26). */
+        if (h->status == 101)
+            return 0;
     }
     *body = buf + at;
     *body_length = 0;

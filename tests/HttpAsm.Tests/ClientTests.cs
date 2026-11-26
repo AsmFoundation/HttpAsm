@@ -341,7 +341,13 @@ public sealed class ClientTests
     /// <summary>
     /// Failures close the connection: an invalid status-line, a server that closes in the middle
     /// of a body (incomplete: RFC9112-6.3-2.6, reported as a failure, never as a response that
-    /// looks complete), and a server that never answers (the timeout).
+    /// looks complete), a server that never answers (the timeout), and a 101 (Switching
+    /// Protocols) to a request that asked for no upgrade. A 101 is no interim answer to skip:
+    /// after it the connection speaks another protocol (RFC 9110 15.2.2), one a server must not
+    /// switch to unasked (RFC9110-7.8-5#3), so the octets after it are not this client's to read
+    /// as HTTP/1.1 (-HTTPASM_ERROR_STATUS, 25). The fuzzer's oracle once skipped it as an
+    /// interim answer, and CI's fuzzing caught the difference (2026-11-26, the seed
+    /// tests/fuzz/seeds/client/switching-protocols).
     /// </summary>
     /// <param name="answer">The canned server's answer.</param>
     /// <param name="close">Whether it closes after it.</param>
@@ -350,7 +356,8 @@ public sealed class ClientTests
     [InlineData("HTTP/1.1 2000 OK\r\n\r\n", true, -400)]
     [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort", true, -104)]
     [InlineData("", false, -110)]
-    [Requirement("RFC9112-6.3-2.6", "RFC9112-6.3-2.5#4", "RFC9112-8-2")]
+    [InlineData("HTTP/1.1 101 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", true, -25)]
+    [Requirement("RFC9112-6.3-2.6", "RFC9112-6.3-2.5#4", "RFC9112-8-2", "RFC9110-7.8-5#3")]
     public void ClosesOnFailures(string answer, bool close, int result)
     {
         Platform.RequireLinuxX64();
