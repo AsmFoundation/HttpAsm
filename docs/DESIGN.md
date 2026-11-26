@@ -379,7 +379,14 @@ HTTP/2, the drivers, the client):
        naming the same method, target and body length, or 413. A broken first request-line
        with no `HTTP/` in it gets the close alone, by design: it is no HTTP/1.x request,
        RFC 9112 2.2. HTTP/2 answers must be whole frames, SETTINGS first, and a plain GET on
-       a new connection must still be answered after every input.
+       a new connection must still be answered after every input; `h1_write`, the HTTP/1.1
+       writers, whose every accepted output must parse back with the caller's status, method,
+       target, Host and fields, and the framing and persistence the writer reported. It found
+       two places where HttpAsm wrote what its own parsers refuse:
+       - a Content-Length past 2^63 - 1, now refused by both writers;
+       - a request target whose form did not suit the method (`PO S HTTP/1.1`). The request
+         writer now applies the parser's form rules (CONNECT's authority-form through the
+         shared authority macros), and checks Host with `HA_URI_HOST`.
      - **The first campaigns:** `h1_request`, 10.7 million inputs in 60 s; `chunked` 3.6
        million; `h1_response` 7.8 million; `hpack` 19.5 million in 300 s. Planted failures
        (in a check, and in the chunked oracle) were found within seconds and printed in base64.

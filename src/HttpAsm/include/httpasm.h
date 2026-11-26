@@ -371,13 +371,16 @@ int64_t httpasm_h1_parse_response(uint8_t *buf, size_t len, size_t *scan_from,
 /* A server's response head into out[0..cap): the status-line, the writer's framing fields
  * (Content-Length or Transfer-Encoding, Connection, Date), the caller's fields, CRLF. See
  * httpasm_response for the flags it reports. Returns the head's length, 0 if cap is too small,
- * or -HTTPASM_ERROR_* (nothing written). */
+ * or -HTTPASM_ERROR_* (nothing written). A content_length past 2^63 - 1 is refused
+ * (-HTTPASM_ERROR_CONTENT_LENGTH): HttpAsm's own parsers refuse such a length, and a writer
+ * never sends what its library would refuse to read. */
 int64_t httpasm_h1_write_response(uint8_t *out, size_t cap, httpasm_response *response);
 
 /* A client's request head from an httpasm_request: method, target, authority (sent first as
  * Host), fields; flags HTTPASM_REQUEST_CONTENT_LENGTH (with content_length) or _CHUNKED, _CLOSE,
  * _EXPECT_CONTINUE (written only when the request has content: chunked, or a length above 0).
- * Always HTTP/1.1. Returns the length, 0 if cap is too small, or -HTTPASM_ERROR_*. */
+ * Always HTTP/1.1. Returns the length, 0 if cap is too small, or -HTTPASM_ERROR_* (a
+ * content_length past 2^63 - 1: -HTTPASM_ERROR_CONTENT_LENGTH, as for responses). */
 int64_t httpasm_h1_write_request(uint8_t *out, size_t cap, const httpasm_request *request);
 
 /* One chunk (len >= 1): hex size CRLF data CRLF. Returns the length, 0 if cap is too small, or

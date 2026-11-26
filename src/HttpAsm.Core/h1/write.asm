@@ -294,7 +294,7 @@ wr_fields:
 ;   head), or HTTPASM_RESPONSE_CLOSE (an HTTP/1.0 body of unknown length ends at the close).
 ;   A 1xx is an interim response: its status-line and the caller's fields only.
 ;   Returns the head's length, 0 if cap is too small, or -HTTPASM_ERROR_STATUS /
-;   _FIELD_NAME / _FIELD_VALUE / _FRAMING_FIELD.
+;   _FIELD_NAME / _FIELD_VALUE / _FRAMING_FIELD / _CONTENT_LENGTH (a length past 2^63 - 1).
 ;   In: rdi, rsi, rdx. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 global httpasm_h1_write_response:function (httpasm_h1_write_response.end - httpasm_h1_write_response)
@@ -328,6 +328,15 @@ httpasm_h1_write_response:
     test    eax, eax
     jnz     .refused
     mov     r15d, ecx                       ; the caller sent its own Date
+    ; A length past 2^63 - 1 is refused: HttpAsm's own readers refuse one (lengths live in
+    ; signed 64-bit offsets; RFC 9110 8.6 asks recipients to guard against such overflow), and
+    ; a writer must never send what its library would refuse to read. tests/fuzz/h1_write found
+    ; it writing one (2026-11-26).
+    test    dword [r14 + httpasm_response.flags], HTTPASM_RESPONSE_LENGTH
+    jz      .length_ok
+    cmp     qword [r14 + httpasm_response.content_length], 0
+    jl      .bad_length                     ; bit 63 set: 2^63 or more
+.length_ok:
 
     ; The framing (ebp = the flags out).
     mov     ebp, [r14 + httpasm_response.flags]
@@ -476,6 +485,9 @@ httpasm_h1_write_response:
 .full:
     xor     eax, eax
     jmp     .return
+.bad_length:
+    mov     eax, HTTPASM_ERROR_CONTENT_LENGTH
+    jmp     .refused
 .bad_status:
     mov     eax, HTTPASM_ERROR_STATUS
 .refused:
@@ -500,7 +512,9 @@ httpasm_h1_write_response:
 ;   but only to a request with content (chunked, or a Content-Length above 0): without content
 ;   the flag is ignored (RFC9110-10.1.1-11.1).
 ;   Always HTTP/1.1. Returns the head's length, 0 if cap is too small, or -HTTPASM_ERROR_METHOD
-;   / _TARGET / _AUTHORITY / _FIELD_NAME / _FIELD_VALUE / _FRAMING_FIELD.
+;   / _TARGET / _TARGET_FORM (a form the method does not take, as the parser refuses it) /
+;   _AUTHORITY / _FIELD_NAME / _FIELD_VALUE / _FRAMING_FIELD / _CONTENT_LENGTH (a length past
+;   2^63 - 1).
 ;   In: rdi, rsi, rdx. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 global httpasm_h1_write_request:function (httpasm_h1_write_request.end - httpasm_h1_write_request)
@@ -554,29 +568,116 @@ httpasm_h1_write_request:
     inc     ecx
     cmp     ecx, esi
     jb      .target_octet
-    ; The authority (Host's value): URI octets, none of "/", "?", "@", "#".
-    mov     rdi, [r14 + httpasm_request.authority]
-    mov     esi, [r14 + httpasm_request.authority_length]
-    xor     ecx, ecx
-.authority_octet:
-    cmp     ecx, esi
-    jae     .authority_ok
-    movzx   eax, byte [rdi + rcx]
-    test    byte [r8 + rax], HA_CC_TARGET
-    jz      .bad_authority
-    cmp     al, '/'
-    je      .bad_authority
-    cmp     al, '?'
-    je      .bad_authority
-    cmp     al, '@'
-    je      .bad_authority
-    inc     ecx
-    jmp     .authority_octet
+    ; The target's form must suit the method, by the rules the request parser applies (RFC 9112
+    ; 3.2; h1/request.asm's .form_*): authority-form for CONNECT (the shared authority macros,
+    ; semantics/authority.inc), "*" for OPTIONS only, origin-form ("/"), else an absolute-URI
+    ; whose http(s) authority is not empty, has no userinfo and follows Host's grammar.
+    ; tests/fuzz/h1_write found the writer sending "PO S HTTP/1.1", which no reader accepts
+    ; (2026-11-26): a writer must not send what its library would refuse to read.
+    mov     rdi, [r14 + httpasm_request.method]
+    mov     esi, [r14 + httpasm_request.method_length]
+    call    ha_method_lookup                ; eax = HTTPASM_METHOD_* (it clobbers only the flags)
+    mov     rsi, [r14 + httpasm_request.target]
+    mov     ecx, [r14 + httpasm_request.target_length]
+    lea     r11, [rsi + rcx]                ; the target's end
+    cmp     eax, HTTPASM_METHOD_CONNECT
+    je      .form_authority
+    movzx   edx, byte [rsi]
+    cmp     dl, '/'
+    je      .form_ok
+    cmp     dl, '*'
+    jne     .form_absolute
+    cmp     ecx, 1
+    jne     .bad_form                       ; "*" alone (RFC 9112 3.2.4)
+    cmp     eax, HTTPASM_METHOD_OPTIONS
+    jne     .bad_form
+    jmp     .form_ok
+.form_absolute:                             ; scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"
+    test    byte [r8 + rdx], HA_CC_ALPHA
+    jz      .bad_form
+    mov     edx, 1
+.form_scheme:
+    cmp     edx, ecx
+    jae     .bad_form                       ; no ":"
+    movzx   eax, byte [rsi + rdx]
+    cmp     al, ':'
+    je      .form_scheme_end
+    inc     edx
+    test    byte [r8 + rax], HA_CC_ALPHA | HA_CC_DIGIT
+    jnz     .form_scheme
+    cmp     al, '+'
+    je      .form_scheme
+    cmp     al, '-'
+    je      .form_scheme
+    cmp     al, '.'
+    je      .form_scheme
+    jmp     .bad_form
+.form_scheme_end:                           ; edx = the scheme's length: http and https get more
+    cmp     edx, 4
+    je      .form_http
+    cmp     edx, 5
+    jne     .form_ok
+    movzx   eax, byte [rsi + 4]
+    or      eax, 0x20
+    cmp     eax, 's'
+    jne     .form_ok
+.form_http:
+    mov     eax, [rsi]
+    or      eax, 0x20202020
+    cmp     eax, 'http'
+    jne     .form_ok
+    ; "//" authority: present, not empty, not starting with ":", no "@", Host's grammar.
+    lea     eax, [edx + 3]
+    cmp     eax, ecx
+    ja      .bad_form                       ; no room for "//" and a host
+    cmp     word [rsi + rdx + 1], '//'
+    jne     .bad_form
+    lea     r10, [rsi + rdx + 3]            ; the authority's start
+    mov     rdi, r10
+.form_authority_end:                        ; up to "/", "?" or the target's end
+    cmp     rdi, r11
+    jae     .form_authority_found
+    cmp     byte [rdi], '/'
+    je      .form_authority_found
+    cmp     byte [rdi], '?'
+    je      .form_authority_found
+    cmp     byte [rdi], '@'
+    je      .bad_form                       ; userinfo (RFC9110-4.2.4-4)
+    inc     rdi
+    jmp     .form_authority_end
+.form_authority_found:
+    cmp     rdi, r10
+    je      .bad_form                       ; no host
+    cmp     byte [r10], ':'
+    je      .bad_form                       ; a port without a host
+    mov     r11, rdi                        ; the authority's end
+    HA_URI_HOST r10, r11, r8, r9, rax, eax, al, rdx, edx, .bad_form
+    jmp     .form_ok
+.form_authority:                            ; CONNECT: uri-host ":" port, a port of 1-65535
+    mov     r10, rsi
+    HA_URI_HOST r10, r11, r8, r9, rax, eax, al, rdx, edx, .bad_form
+    HA_AUTHORITY_PORT rsi, r11, r10, eax, edx, r9d, .bad_form
+    lea     r9, [rel ha_hex_value]          ; HA_AUTHORITY_PORT used r9 for its place value
+.form_ok:
+    ; The authority (Host's value): uri-host [ ":" port ] by Host's own grammar, the macro the
+    ; request parser checks Host with (an empty value passes, as Host may be empty). The octet
+    ; check this replaced let "[" or "%" pass where the parser refuses them.
+    mov     r10, [r14 + httpasm_request.authority]
+    mov     r11d, [r14 + httpasm_request.authority_length]
+    add     r11, r10
+    HA_URI_HOST r10, r11, r8, r9, rax, eax, al, rdx, edx, .bad_authority
 .authority_ok:
     mov     eax, [r14 + httpasm_request.flags]
     and     eax, HTTPASM_REQUEST_CONTENT_LENGTH | HTTPASM_REQUEST_CHUNKED
     cmp     eax, HTTPASM_REQUEST_CONTENT_LENGTH | HTTPASM_REQUEST_CHUNKED
     je      .framing                        ; two framings
+    ; A length past 2^63 - 1: refused, as httpasm_h1_write_response refuses one (no HttpAsm
+    ; reader takes it).
+    test    eax, HTTPASM_REQUEST_CONTENT_LENGTH
+    jz      .request_length_ok
+    cmp     qword [r14 + httpasm_request.content_length], 0
+    jl      .bad_length
+.request_length_ok:
     mov     rdi, [r14 + httpasm_request.fields]
     mov     esi, [r14 + httpasm_request.field_count]
     mov     edx, WR_REQUEST
@@ -682,6 +783,12 @@ httpasm_h1_write_request:
     jmp     .refused
 .bad_authority:
     mov     eax, HTTPASM_ERROR_AUTHORITY
+    jmp     .refused
+.bad_length:
+    mov     eax, HTTPASM_ERROR_CONTENT_LENGTH
+    jmp     .refused
+.bad_form:
+    mov     eax, HTTPASM_ERROR_TARGET_FORM
     jmp     .refused
 .framing:
     mov     eax, HTTPASM_ERROR_FRAMING_FIELD

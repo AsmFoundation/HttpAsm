@@ -271,6 +271,50 @@ public sealed class H1MessageTests
         Assert.Equal(ParseError.ObsFold, H1Messages.ParseResponse("HTTP/1.1 200 OK\r\nContent-Length: 1\r\n 0\r\n\r\n").Error);
     }
 
+    /// <summary>
+    /// The writers send only what HttpAsm's own readers accept (tests/fuzz/h1_write found both
+    /// gaps, 2026-11-26). A Content-Length past 2^63 - 1 is refused by both writers, as the
+    /// parsers refuse it (RFC9110-8.6-10 makes recipients guard against such numerals). A
+    /// request's target must have the form its method takes: the authority-form with a port of
+    /// 1-65535 for CONNECT (RFC9112-3.2.3-3), "*" for OPTIONS only (RFC9112-3.2.4-3), an
+    /// http(s) absolute-URI with a host and no userinfo. Its Host must follow the grammar the
+    /// parser checks Host with. Each accepted head parses back whole.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-8.6-10", "RFC9112-3.2-2", "RFC9112-3.2.3-2", "RFC9112-3.2.3-3", "RFC9112-3.2.4-2", "RFC9112-3.2.4-3", "RFC9112-3.2-5#2")]
+    public void WritesOnlyWhatItReads()
+    {
+        Platform.RequireLinuxX64();
+        const uint contentLength = 0x2;
+        Assert.Equal(-(long)ParseError.ContentLength, H1Messages.WriteResponse(200, length: long.MinValue).Result);   // 2^63 as the ABI's uint64
+        Assert.True(H1Messages.WriteResponse(200, length: long.MaxValue).Result > 0);                                      // 2^63 - 1
+        Assert.Equal(-(long)ParseError.ContentLength, H1Messages.WriteRequest("POST", "/", "h", flags: contentLength, length: 1UL << 63).Result);
+
+        foreach ((string method, string target, string host) in new[]
+                 {
+                     ("PO", "S", "h"), ("GET", "*", "h"), ("CONNECT", "example.com", "example.com"), ("CONNECT", "example.com:0", "h"),
+                     ("CONNECT", "/", "h"), ("GET", "http://", "h"), ("GET", "http://u@h/", "h"), ("GET", "https://:80/", "h"),
+                     ("GET", "http:/x", "h"), ("GET", "1x:y", "h"),
+                 })
+        {
+            Assert.Equal(-(long)ParseError.TargetForm, H1Messages.WriteRequest(method, target, host).Result);
+        }
+
+        foreach ((string method, string target, string host) in new[]
+                 {
+                     ("OPTIONS", "*", "h"), ("CONNECT", "example.com:443", "example.com:443"), ("CONNECT", "[::1]:8443", "[::1]:8443"),
+                     ("GET", "http://h/x", "h"), ("GET", "urn:isbn:0451450523", "h"), ("GET", "/", "[2001:db8::1]:80"),
+                 })
+        {
+            var (result, text) = H1Messages.WriteRequest(method, target, host);
+            Assert.True(result > 0, $"{method} {target}: {result}");
+            Assert.Equal(text.Length, H1Parsing.Parse(text).Result);
+        }
+
+        Assert.Equal(-(long)ParseError.Authority, H1Messages.WriteRequest("GET", "/", "a[b").Result);
+        Assert.Equal(-(long)ParseError.Authority, H1Messages.WriteRequest("GET", "/", "[%:]").Result);
+    }
+
     /// <summary>A request: Host first, one framing, the flags' fields, the caller's fields; it parses back.</summary>
     [Fact]
     [Requirement("RFC9110-7.2-4#1", "RFC9110-7.2-4#2", "RFC9112-3.2-5#1", "RFC9112-6.3-7#1", "RFC9110-10.1.1-11.2", "RFC9112-3.2-5#2",
