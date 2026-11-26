@@ -11,13 +11,18 @@
  *
  *   1. 2,000 connects to a local listener under a 100-microsecond interval timer (SIGALRM, to
  *      this thread alone). Every connect must succeed; a thread drains the backlog.
- *   2. Connects that have to wait, under the same timer: to a listener whose backlog is full
- *      (listen backlog 0 and one connection already waiting), so the SYN is dropped and the
- *      connect waits in the kernel, interrupted again and again. With a 200 ms timeout it must
+ *   2. Connects that have to wait: to a listener whose backlog is full (listen backlog 0 and
+ *      one connection already waiting), so the SYN is dropped and the connect waits in the
+ *      kernel. Under the same timer, interrupted again and again: with a 200 ms timeout it must
  *      end in -ETIMEDOUT (the deadline passes inside the poll loop); with no timeout it must
  *      connect once the listener accepts (the client's retransmitted SYN, about a second
  *      later); and when the listener closes meanwhile, it must report the refusal its socket
- *      learned (SO_ERROR: -ECONNREFUSED), not success.
+ *      learned (SO_ERROR: -ECONNREFUSED), not success. Then the other ends of that wait: with
+ *      no signal at all, the connect's own timeout (SO_SNDTIMEO, which Linux reports as
+ *      EINPROGRESS) must read -ETIMEDOUT too; after one signal and no more, the poll's own
+ *      timeout must; a poll the kernel refuses (RLIMIT_NOFILE dropped to 0 meanwhile: EINVAL)
+ *      must be reported, as must an outcome that cannot be read (getsockopt failing, under a
+ *      seccomp filter in a child process, after the attempt ended).
  *   3. A server and the client under a storm: a thread sends SIGUSR1 to every other thread of
  *      the process every 100 microseconds (tgkill, so the server's workers get their share: a
  *      process-directed signal goes to the main thread first). The workers' waits (epoll_wait,
@@ -33,16 +38,23 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -95,73 +107,186 @@ static int full_listener(uint16_t *port, int *waiting)
     return fd;
 }
 
-/* The listener a helper thread acts on after a delay, and what it does: accept the waiting
- * connections (1) or close the listener (0). */
-static int delayed_fd;
-static int delayed_accepts;
+/* timer_once: arms the SIGALRM timer to fire once, in microseconds: a single interruption. */
+static void timer_once(long us)
+{
+    struct itimerval once = { .it_interval = { 0, 0 }, .it_value = { 0, us } };
+    setitimer(ITIMER_REAL, &once, NULL);
+}
 
-/* act_later: 100 ms later, accepts every waiting connection (keeping them open until the
- * process ends) or closes the listener. SIGALRM is blocked here (the creating thread blocked
- * it), so the timer's ticks keep landing on the connecting thread. */
+/* What a waiting connect's helper thread does, after its delay. */
+enum action {
+    NOTHING,            /* no helper */
+    ACCEPT,             /* accept the waiting connections (kept open until the process ends) */
+    CLOSE_LISTENER,     /* close the listener: the client's retransmitted SYN is refused */
+    NO_DESCRIPTORS,     /* RLIMIT_NOFILE to 0: the client's poll of its one socket is refused
+                           (EINVAL: more descriptors than the limit); the connect returns first */
+    SHUT_CONNECTING,    /* shutdown() of the client's socket while it connects: the attempt ends
+                           (ECONNRESET in SO_ERROR), so the poll returns at once */
+};
+
+/* The helper's orders: its action, its delay, the listener (CLOSE_LISTENER, ACCEPT) and the
+ * client's socket (SHUT_CONNECTING: the lowest free descriptor when the connect began, which
+ * socket() gives it; nothing else opens one meanwhile). */
+static enum action delayed_action;
+static long delayed_us;
+static int delayed_fd;
+static int connecting_fd;
+
+/* act_later: after delayed_us, carries out delayed_action. SIGALRM is blocked here (the
+ * creating thread blocked it), so the timer's ticks keep landing on the connecting thread. */
 static void *act_later(void *unused)
 {
     (void)unused;
-    usleep(100000);
-    if (!delayed_accepts) {
+    usleep((useconds_t)delayed_us);
+    struct rlimit none = { 0, 0 };
+    switch (delayed_action) {
+    case ACCEPT:
+        for (int i = 0; i < 2; i++)
+            accept(delayed_fd, NULL, NULL);
+        break;
+    case CLOSE_LISTENER:
         close(delayed_fd);
-        return NULL;
+        break;
+    case NO_DESCRIPTORS:
+        getrlimit(RLIMIT_NOFILE, &none);
+        none.rlim_cur = 0;
+        setrlimit(RLIMIT_NOFILE, &none);
+        break;
+    case SHUT_CONNECTING:
+        shutdown(connecting_fd, SHUT_RDWR);
+        break;
+    case NOTHING:
+        break;
     }
-    for (int i = 0; i < 2; i++)
-        accept(delayed_fd, NULL, NULL);
     return NULL;
+}
+
+/* fail_getsockopt: a seccomp filter on this process making every getsockopt fail with ENOBUFS,
+ * for the waiting connect whose outcome cannot be read (SO_ERROR). Returns 0, or -1. Only in a
+ * child process: a filter cannot be taken back. */
+static int fail_getsockopt(void)
+{
+    struct sock_filter code[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getsockopt, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOBUFS),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog program = { .len = sizeof code / sizeof code[0], .filter = code };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+        return -1;
+    return (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program);
+}
+
+/* One waiting connect: how it is interrupted, what happens meanwhile, and its outcome. */
+struct waiting_case {
+    const char *what;
+    long interval_us;           /* the timer: every this many microseconds, */
+    long once_us;               /* or once, this long after the connect began (0: neither) */
+    enum action action;
+    long action_us;
+    uint32_t timeout_ms;
+    int in_child;               /* 1: in a child process whose getsockopt fails (seccomp) */
+    int expected;               /* 0: connected; else -errno */
+};
+
+/* waiting_connect: runs one case. Returns 0, or 1 with the failure printed. */
+static int waiting_connect(const struct waiting_case *w)
+{
+    sigset_t alarm_only;
+    sigemptyset(&alarm_only);
+    sigaddset(&alarm_only, SIGALRM);
+    uint16_t port;
+    int waiting;
+    int fd = full_listener(&port, &waiting);
+    if (fd < 0) {
+        perror("signals: a full listener");
+        return 1;
+    }
+    struct rlimit descriptors;
+    getrlimit(RLIMIT_NOFILE, &descriptors);
+    connecting_fd = dup(0);                         /* the lowest free descriptor: the client's next */
+    close(connecting_fd);
+    pthread_t helper;
+    if (w->action != NOTHING) {
+        delayed_action = w->action;
+        delayed_us = w->action_us;
+        delayed_fd = fd;
+        pthread_sigmask(SIG_BLOCK, &alarm_only, NULL);
+        int made = pthread_create(&helper, NULL, act_later, NULL);
+        pthread_sigmask(SIG_UNBLOCK, &alarm_only, NULL);
+        if (made != 0)
+            return 1;
+    }
+    if (w->interval_us > 0)
+        timer(w->interval_us);
+    else if (w->once_us > 0)
+        timer_once(w->once_us);
+    int error = 0;
+    httpasm_client *c = httpasm_client_connect(htonl(INADDR_LOOPBACK), port, w->timeout_ms, &error);
+    timer(0);
+    int got = c != NULL ? 0 : error;
+    if (c != NULL)
+        httpasm_client_close(c);
+    if (w->action != NOTHING)
+        pthread_join(helper, NULL);
+    setrlimit(RLIMIT_NOFILE, &descriptors);         /* back, after NO_DESCRIPTORS */
+    close(waiting);
+    if (w->action != CLOSE_LISTENER)
+        close(fd);
+    if (got != w->expected) {
+        fprintf(stderr, "signals: a waiting connect (%s) returned %d, not %d\n", w->what, got, w->expected);
+        return 1;
+    }
+    return 0;
 }
 
 /* waiting_connects: part 2. Returns 0, or 1 with the failure printed. */
 static int waiting_connects(void)
 {
-    sigset_t alarm_only;
-    sigemptyset(&alarm_only);
-    sigaddset(&alarm_only, SIGALRM);
-    for (int variant = 0; variant < 3; variant++) {
-        uint16_t port;
-        int waiting;
-        int fd = full_listener(&port, &waiting);
-        if (fd < 0) {
-            perror("signals: a full listener");
-            return 1;
-        }
-        pthread_t helper;
-        if (variant > 0) {
-            delayed_fd = fd;
-            delayed_accepts = variant == 1;
-            pthread_sigmask(SIG_BLOCK, &alarm_only, NULL);
-            int made = pthread_create(&helper, NULL, act_later, NULL);
-            pthread_sigmask(SIG_UNBLOCK, &alarm_only, NULL);
-            if (made != 0)
+    static const struct waiting_case cases[] = {
+        /* Under the 100-microsecond timer: the poll loop's own deadline; no timeout, connected
+         * once the listener accepts (the retransmitted SYN, about a second later); the refusal
+         * the socket learned when the listener closed. */
+        { "a 200 ms timeout under the timer", 100, 0, NOTHING, 0, 200, 0, -ETIMEDOUT },
+        { "no timeout under the timer", 100, 0, ACCEPT, 100000, 0, 0, 0 },
+        { "the listener closing under the timer", 100, 0, CLOSE_LISTENER, 100000, 3000, 0, -ECONNREFUSED },
+        /* No signal at all: the connect's own SO_SNDTIMEO passes (Linux: EINPROGRESS), and the
+         * client reports the timeout as it does every other one. */
+        { "a 200 ms timeout, no signal", 0, 0, NOTHING, 0, 200, 0, -ETIMEDOUT },
+        /* One signal 20 ms in, then none: the poll that waits for the rest times out itself. */
+        { "one signal, then the poll's own timeout", 0, 20000, NOTHING, 0, 300, 0, -ETIMEDOUT },
+        /* The descriptor limit drops to 0 while the connect waits; the signal then sends the
+         * client to poll, which refuses one descriptor past the limit: reported, the socket
+         * closed. */
+        { "the poll refused", 0, 30000, NO_DESCRIPTORS, 10000, 300, 0, -EINVAL },
+        /* The attempt ends while the client polls (its socket shut down), and the outcome
+         * cannot be read: getsockopt fails (seccomp, in a child process). */
+        { "SO_ERROR unreadable", 0, 20000, SHUT_CONNECTING, 50000, 3000, 1, -ENOBUFS },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        if (!cases[i].in_child) {
+            if (waiting_connect(&cases[i]) != 0)
                 return 1;
+            continue;
         }
-        timer(100);
-        int error = 0;
-        uint32_t timeout = variant == 0 ? 200 : variant == 1 ? 0 : 3000;
-        httpasm_client *c = httpasm_client_connect(htonl(INADDR_LOOPBACK), port, timeout, &error);
-        timer(0);
-        const char *what = variant == 0 ? "a 200 ms timeout" : variant == 1 ? "no timeout" : "the listener closing";
-        int expected = variant == 0 ? -ETIMEDOUT : variant == 1 ? 0 : -ECONNREFUSED;
-        int got = c != NULL ? 0 : error;
-        if (c != NULL)
-            httpasm_client_close(c);
-        if (variant > 0)
-            pthread_join(helper, NULL);
-        close(waiting);
-        if (variant != 2)
-            close(fd);
-        if (got != expected) {
-            fprintf(stderr, "signals: a waiting connect with %s returned %d, not %d\n", what, got, expected);
+        fflush(NULL);                               /* the child's exit() must not print it again */
+        pid_t pid = fork();
+        if (pid == 0)                               /* exit(), not _exit(): the coverage build writes its */
+            exit(fail_getsockopt() != 0 ? 2 : waiting_connect(&cases[i]));     /* markers at exit */
+        int status = 0;
+        if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "signals: the child for a waiting connect (%s) failed (status %d)\n", cases[i].what, status);
             return 1;
         }
     }
-    printf("signals: waiting connects under the timer: -ETIMEDOUT at the deadline, connected with no timeout, "
-           "-ECONNREFUSED when the listener closed\n");
+    printf("signals: waiting connects: -ETIMEDOUT at the deadline under the timer, with no signal, and at the "
+           "poll's own end; connected with no timeout; -ECONNREFUSED when the listener closed; -EINVAL when the "
+           "poll was refused; -ENOBUFS when SO_ERROR could not be read\n");
     return 0;
 }
 

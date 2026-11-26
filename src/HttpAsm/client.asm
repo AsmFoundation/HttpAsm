@@ -41,6 +41,7 @@ MSG_PEEK            equ 0x02        ; look without taking (MSG_DONTWAIT: driver.
 ENOTCONN            equ 107
 ECONNRESET          equ 104
 ETIMEDOUT           equ 110
+EINPROGRESS         equ 115         ; a blocking connect whose SO_SNDTIMEO passed: read as ETIMEDOUT
 EPROTO              equ 71          ; the server sent octets no request asked for
 
 HA_CLIENT_BUFFER    equ 16384   ; the input to start with (it grows as a response needs)
@@ -79,7 +80,8 @@ section .text
 ;                                        int *error)
 ;   Connects to an IPv4 address (network byte order) and port. timeout_ms bounds the connect
 ;   and each later read and write (0: no limit). NULL on failure with *error = -errno (error may
-;   be NULL): ECONNREFUSED, ETIMEDOUT (EINPROGRESS when the connect timed out), ENOMEM, ...
+;   be NULL): ECONNREFUSED, ETIMEDOUT (the timeout passed, whether a signal interrupted the
+;   wait or not), ENOMEM, ...
 ; -----------------------------------------------------------------------------
 CC_ADDRESS  equ 0       ; sockaddr_in (16); after the connect, a struct pollfd and a socklen_t
 CC_TIME     equ 16      ; struct timeval (16); after the connect, a struct timespec
@@ -169,6 +171,12 @@ httpasm_client_connect:
     syscall
     test    eax, eax
     jns     .connected
+    ; SO_SNDTIMEO passed while the connect waited: Linux fails it with EINPROGRESS ("still
+    ; connecting"), which tells a caller nothing it can act on, and which a timeout reached
+    ; through the poll below would report as ETIMEDOUT. Both read ETIMEDOUT (until 2026-11-26 the
+    ; first came back as -EINPROGRESS: signals.c's waiting connects only ever met the second).
+    cmp     eax, -EINPROGRESS
+    je      .timed_out
     cmp     eax, -EINTR
     jne     .fail
     ; A signal interrupted the connect. Nothing restarts it (SA_RESTART never does for
@@ -206,6 +214,7 @@ httpasm_client_connect:
     test    rax, rax
     js      .fail
     jnz     .connect_done
+.timed_out:                                 ; poll's own timeout passed (0), or the connect's (above)
     mov     eax, -ETIMEDOUT
     jmp     .fail
 .connect_done:
@@ -603,10 +612,14 @@ httpasm_client_send:
     mov     dword [r15 + httpasm_client_response.trailer_count], 0
     mov     dword [r15 + httpasm_client_response.reserved], 0
     mov     eax, [r15 + httpasm_client_response.head + httpasm_response_head.flags]
-    test    eax, HTTPASM_RESPONSE_HEAD_NO_BODY
-    jnz     .no_body
+    ; TUNNEL first: the parser gives a 2xx to CONNECT NO_BODY as well (the head ends the
+    ; message), and taking it for a plain bodiless answer kept the connection for the next
+    ; request whenever no tunnel octets had come yet, so that request went into the tunnel
+    ; (until 2026-11-26: .tunnel never ran; the coverage report showed it).
     test    eax, HTTPASM_RESPONSE_HEAD_TUNNEL
     jnz     .tunnel
+    test    eax, HTTPASM_RESPONSE_HEAD_NO_BODY
+    jnz     .no_body
     test    eax, HTTPASM_RESPONSE_HEAD_CONTENT_LENGTH
     jnz     .length
     test    eax, HTTPASM_RESPONSE_HEAD_CHUNKED

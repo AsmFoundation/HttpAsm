@@ -605,7 +605,8 @@ typedef struct httpasm_client_response {
 } httpasm_client_response;
 
 /* Connects to an IPv4 address (network byte order) and port; timeout_ms bounds the connect and
- * every later read and write (0: none). NULL with *error = -errno on failure (error may be NULL). */
+ * every later read and write (0: none). NULL with *error = -errno on failure (error may be NULL):
+ * -ETIMEDOUT when timeout_ms passed first, -ECONNREFUSED, -ENOMEM, or the socket's own error. */
 httpasm_client *httpasm_client_connect(uint32_t address, uint16_t port, uint32_t timeout_ms,
                                        int *error);
 

@@ -521,14 +521,20 @@ public sealed class ClientTests
     /// <summary>
     /// A 2xx to CONNECT makes the connection a tunnel (RFC 9110 9.3.6): the answer is returned
     /// with no body, its Content-Length ignored (RFC9110-9.3.6-12#2: what follows is the
-    /// tunnel's), and the connection is no longer the client's to use for HTTP (-ENOTCONN).
+    /// tunnel's), and the connection is no longer the client's to use for HTTP (-ENOTCONN),
+    /// whether the tunnel's first octets came with the head or not yet. Without them the client
+    /// used to keep the connection as an idle HTTP/1.1 one (the head also says NO_BODY, which it
+    /// checked first), and the next request went into the tunnel.
     /// </summary>
-    [Fact]
+    /// <param name="answer">The canned answer: the head, with or without tunnel octets after it.</param>
+    [Theory]
+    [InlineData("HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\ntunnel octets")]
+    [InlineData("HTTP/1.1 200 Connection Established\r\n\r\n")]
     [Requirement("RFC9110-9.3.6-12#2", "RFC9112-6.3-2.2")]
-    public void HandsOverATunnel()
+    public void HandsOverATunnel(string answer)
     {
         Platform.RequireLinuxX64();
-        using var server = new CannedServer(["HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\ntunnel octets"], close: false);
+        using var server = new CannedServer([answer], close: false);
         using var client = new AsmClient(server.Port);
 
         ClientResult tunnel = client.Send("CONNECT", "example.com:443");

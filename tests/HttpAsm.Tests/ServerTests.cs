@@ -860,7 +860,7 @@ public sealed class ServerTests
 
     /// <summary>
     /// The idle timeout is for idleness, not for the length of a transfer. An 8 MiB answer read
-    /// in 64 KiB pieces every 10 ms takes over four times the 300 ms timeout, and arrives whole:
+    /// in 64 KiB pieces every 25 ms takes over four times the 700 ms timeout, and arrives whole:
     /// each window in which it moves at least min_data_rate (240 octets a second by default)
     /// earns another (RFC9112-9.5-4: the transport's flow control resolves a slow reader, not a
     /// close). The deadline used to be set when the answer was queued, and the connection was
@@ -868,23 +868,30 @@ public sealed class ServerTests
     /// buffering on loopback (its 64 KiB segments let the send buffer grow to 1.6 MB), which
     /// would otherwise deliver what a close left behind.
     /// </summary>
+    /// <remarks>
+    /// The window is 700 ms, not the 300 ms this test had: a reader that stops for a whole
+    /// window moves nothing in it, and the server rightly closes then. This process's own
+    /// pauses (a blocking collection of a heap the parallel classes fill with 8 to 64 MiB
+    /// arrays, a starved thread) stopped the reader for that long once in about ten local runs
+    /// of three classes together (2026-11-26: 6,222,039 of 8,388,608 octets came).
+    /// </remarks>
     [Fact]
     [Requirement("RFC9112-9.5-4")]
     public void SendsAnswersLongerThanTheIdleTimeout()
     {
         Platform.RequireLinuxX64();
         byte[] big = RandomBytes(8 << 20);
-        using var server = new TestServer(x => x.Respond(200, big), idleMs: 300);
+        using var server = new TestServer(x => x.Respond(200, big), idleMs: 700);
         using var c = new RawConnection(server.Port, receiveBuffer: 65536);
         c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         var clock = Stopwatch.StartNew();
 
-        byte[] got = c.ReadSlowly(int.MaxValue, 65536, 10);         // to the close, or the timeout
+        byte[] got = c.ReadSlowly(int.MaxValue, 65536, 25);         // to the close, or the timeout
 
         int head = got.AsSpan().IndexOf("\r\n\r\n"u8) + 4;
         Assert.True(head > 4, "no answer");
         Assert.True(big.AsSpan().SequenceEqual(got.AsSpan(head)), $"{got.Length - head} of {big.Length} octets came");
-        Assert.True(clock.ElapsedMilliseconds > 900, $"{clock.ElapsedMilliseconds} ms: the read was not slow");
+        Assert.True(clock.ElapsedMilliseconds > 2800, $"{clock.ElapsedMilliseconds} ms: the read was not slow");
     }
 
     /// <summary>
@@ -1233,14 +1240,18 @@ public sealed class ServerTests
     }
 
     /// <summary>
-    /// An answer's head larger than the first room the connection reserves for it (512 octets)
-    /// is written whole: the room doubles until the head fits. 20 fields of 100 octets each.
+    /// An answer's head larger than the room the connection's output has is written whole: the
+    /// room it reserves (512 octets at first) doubles until the head fits, the output growing
+    /// with it. 40 fields of 1,000 octets each, about 40 KB: past the output's first 16 KiB, so
+    /// the first try does not fit. (With 20 fields of 100 octets, as this test had before, the
+    /// head fit the 16 KiB the output starts with at once, and the doubling never ran: the
+    /// coverage report showed it, 2026-11-26.)
     /// </summary>
     [Fact]
     public void WritesHeadsLargerThanTheirFirstRoom()
     {
         Platform.RequireLinuxX64();
-        (string, string)[] fields = [.. Enumerable.Range(0, 20).Select(i => ($"X-Field-{i}", new string((char)('a' + i), 100)))];
+        (string, string)[] fields = [.. Enumerable.Range(0, 40).Select(i => ($"X-Field-{i}", new string((char)('a' + (i % 26)), 1000)))];
         using var server = new TestServer(x => x.Respond(200, "big head", fields));
         using var c = new RawConnection(server.Port);
 
@@ -1418,6 +1429,115 @@ public sealed class ServerTests
         {
             Assert.True(RandomBytes(100_000 + target.Length).AsSpan().SequenceEqual(c.ReadResponse().Body), target);
         }
+    }
+
+    /// <summary>
+    /// A deferred answer that comes while the answer before it is still partly unsent goes
+    /// behind it: the output first drops what was sent (compacts), and when that does not make
+    /// room enough, grows. 500,000 octets answered inline, then a deferred request answered
+    /// 200 ms later with 2 MB, to a client that reads nothing for half a second (its 16 KiB
+    /// receive buffer keeps most of the first answer on the server).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.3.2-1#3")]
+    public void AppendsADeferredAnswerBehindOnePartlySent()
+    {
+        Platform.RequireLinuxX64();
+        byte[] first = RandomBytes(500_000);
+        byte[] second = RandomBytes(2_000_000);
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/first")
+            {
+                x.Respond(200, first);
+                return;
+            }
+
+            x.Defer();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(200);
+                x.Respond(200, second);
+            });
+        }, workers: 1);
+        using var c = new RawConnection(server.Port, receiveBuffer: 16 << 10);
+
+        c.Send("GET /first HTTP/1.1\r\nHost: t\r\n\r\nGET /second HTTP/1.1\r\nHost: t\r\n\r\n");
+        Thread.Sleep(500);                                          // the deferred answer is appended meanwhile
+
+        Assert.True(first.AsSpan().SequenceEqual(c.ReadResponse().Body), "the first answer");
+        Assert.True(second.AsSpan().SequenceEqual(c.ReadResponse().Body), "the deferred answer");
+    }
+
+    /// <summary>
+    /// A client pipelines a request the handler defers behind one whose 8 MiB answer stops the
+    /// processing for back-pressure, then half-closes. The deferred request is processed once
+    /// the large answer drained, with the peer's end possibly already read (io_uring reads it
+    /// while the output waits): it is still answered, after the first, and the connection then
+    /// closes (the peer is done).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.3.2-1#3", "RFC9112-9.5-2#2")]
+    public void AnswersADeferredRequestBehindALargeAnswerAfterAHalfClose()
+    {
+        Platform.RequireLinuxX64();
+        byte[] big = RandomBytes(8 << 20);
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/big")
+            {
+                x.Respond(200, big);
+                return;
+            }
+
+            x.Defer();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(100);
+                x.Respond(200, "deferred");
+            });
+        }, workers: 1);
+        using var c = new RawConnection(server.Port, timeoutMs: 20000, receiveBuffer: 16 << 10);
+
+        c.Send("GET /big HTTP/1.1\r\nHost: t\r\n\r\nGET /later HTTP/1.1\r\nHost: t\r\n\r\n");
+        c.ShutdownSend();
+        Thread.Sleep(300);                                          // the end arrives while the output waits
+
+        Assert.True(big.AsSpan().SequenceEqual(c.ReadResponse().Body), "the large answer");
+        Assert.Equal("deferred", c.ReadResponse().Text);
+        Assert.True(c.ServerClosed(), "the peer is done: the server closes after the last answer");
+    }
+
+    /// <summary>
+    /// After a closing answer the server half-closes and lingers, reading and discarding what
+    /// the client still sends (a reset then could destroy the answer in the client's receive
+    /// buffer, RFC 9112 9.6), but only for HA_LINGER_MS (2 s): a client that never closes its
+    /// side is closed then. Octets sent during the linger are taken quietly; once it ended, the
+    /// server's socket is gone and they meet a reset.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.6-6#1")]
+    public void EndsTheLingerOfAClientThatNeverCloses()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "bye"));
+        using var c = new RawConnection(server.Port);
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+        var clock = Stopwatch.StartNew();
+
+        Assert.Equal("bye", c.ReadResponse().Text);
+        Assert.True(c.ServerClosed(1000), "the server's half-close");
+        Assert.True(TrySend(c, new string('x', 100_000)), "a write during the linger is taken");
+        Thread.Sleep(Math.Max(0, 2700 - (int)clock.ElapsedMilliseconds));
+
+        bool reset = false;
+        for (int i = 0; i < 20 && !reset; i++)
+        {
+            reset = !TrySend(c, new string('y', 65_536));            // the first may still go; the reset follows
+            Thread.Sleep(20);
+        }
+
+        Assert.True(reset, $"still lingering {clock.ElapsedMilliseconds} ms after the answer");
     }
 
     /// <summary>Octets that are the same on every run (seeded by the length).</summary>

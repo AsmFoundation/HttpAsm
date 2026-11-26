@@ -1962,6 +1962,80 @@ public sealed class Http2FrameTests
     }
 
     /// <summary>
+    /// A request answered early (417 for an expectation the server cannot meet) whose client
+    /// then ends it with trailers rather than DATA: the stream ends once both sides are done,
+    /// with no reset either way. When the 417 went out whole, the trailers end the stream at
+    /// once; when its body still waits for the client's window (SETTINGS_INITIAL_WINDOW_SIZE 0
+    /// here), the stream stays until a WINDOW_UPDATE lets the body out, END_STREAM with it.
+    /// The connection serves on in both cases.
+    /// </summary>
+    /// <param name="bodyWaits">Whether the 417's body is held back by a window of 0.</param>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Requirement("RFC9110-10.1.1-5", "RFC9113-6.9.1-2#1")]
+    public void EndsAStreamAnsweredEarlyWhenItsTrailersCome(bool bodyWaits)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = bodyWaits ? new H2Connection(server.Port, true, (4, 0u)) : new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/echo", ("expect", "something-else"));
+        H2Frame head = c.ReadFrame()!;
+        while (head.Type != Headers || head.Stream != 1)
+        {
+            head = c.ReadFrame()!;
+        }
+
+        Assert.Equal("417", c.Decoded[1].Single(f => f.Name == ":status").Value);
+        c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("x-trailer", "late")));
+        if (bodyWaits)
+        {
+            // The answer's body has not gone: the stream is not over, and nothing is reset.
+            Assert.DoesNotContain(c.FramesWithin(150), f => f.Stream == 1);
+            c.SendU32(WindowUpdate, 1, 1 << 16);
+            H2Frame body = c.ReadFrame()!;
+            while (body.Type != Data || body.Stream != 1)
+            {
+                body = c.ReadFrame()!;
+            }
+
+            Assert.NotEqual(0, body.Flags & EndStream);
+        }
+
+        c.SendRequest(3, path: "/no-content");                     // 204: no DATA, whatever the window
+        Assert.Equal(204, c.ReadResponse(3).Status);
+        Assert.DoesNotContain(c.FramesWithin(100), f => f.Type == RstStream);
+    }
+
+    /// <summary>
+    /// A CONNECT request (RFC 9113 8.5: :method and :authority, neither :scheme nor :path) that
+    /// carries DATA: its head is kept while the DATA arrives (the stream does not end on its
+    /// HEADERS), and the scheme it lacks stays absent through the keeping, where a kept head's
+    /// pointers move with it. The handler sees the method, the authority (also the target, as
+    /// for HTTP/1.1's CONNECT), no scheme, and the octets, and says so in its answer: a 501, as
+    /// a server that makes no tunnels answers CONNECT (a 2xx would make the stream a tunnel,
+    /// and httpasm_exchange_respond refuses one with -HTTPASM_ERROR_STATUS).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-8.5-3.2", "RFC9110-9.3.6-6")]
+    public void KeepsAConnectRequestsHeadWhileItsDataArrives()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x =>
+            x.Respond(501, $"{x.Method} {x.Authority} [{x.Target}] [{x.Scheme ?? "no scheme"}] {Encoding.ASCII.GetString(x.Body)}"));
+        using var c = new H2Connection(server.Port);
+
+        c.SendFrame(Headers, EndHeaders, 1, c.Block((":method", "CONNECT"), (":authority", "example.com:443")));
+        c.SendFrame(Data, 0, 1, "tunnel "u8);
+        c.SendFrame(Data, EndStream, 1, "octets"u8);
+
+        H2Response answer = c.ReadResponse(1);
+        Assert.Equal(501, answer.Status);
+        Assert.Equal("CONNECT example.com:443 [example.com:443] [no scheme] tunnel octets", Encoding.ASCII.GetString(answer.Body));
+    }
+
+    /// <summary>
     /// Two answers waiting on the connection's window share each WINDOW_UPDATE as it comes:
     /// with both streams' windows wide open and the connection's spent, an update of 1,000
     /// octets moves exactly 1,000 octets in all - the resume stops when the window is spent,
