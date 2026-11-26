@@ -123,6 +123,8 @@ public sealed unsafe class AuthorityTests
         { "h:65536", true, false },
         { "h:0443", true, true },
         { "h:000000000443", true, true },
+        { "h:100443", true, false },                                // a sixth digit, not a leading zero
+        { "1234", true, false },                                    // all digits: a host, and no port
         { ":80", true, false },
         { "", true, false },
         { "exa mple", false, false },

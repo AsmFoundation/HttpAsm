@@ -51,9 +51,13 @@ HA_CLIENT_FIELDS    equ 256     ; response field records: the head's, then the t
 ; trailers always find room after the head's records. httpasm_client_send's no-room branch
 ; stays safe should that ever change (it parses into a record of its frame and refuses), but
 ; is unreachable while this holds, as tests/coverage/unreachable.tsv says.
-%if HA_CLIENT_FIELDS <= HA_H1_DEFAULT_MAX_FIELDS
-  %error "HA_CLIENT_FIELDS must exceed HA_H1_DEFAULT_MAX_FIELDS: trailers need room after a full head"
-%endif
+; Checked when the file is assembled: the count below is 0 while the rule holds and -1 when it
+; breaks, which NASM refuses ("TIMES value -1 is negative"). Not a preprocessor %if: these are
+; equ symbols, which the preprocessor cannot read, and the coverage build preprocesses each
+; file alone (nasm -E) - an %if over them left this whole file uninstrumented (2026-11-26).
+[absolute 0]
+    times (HA_CLIENT_FIELDS > HA_H1_DEFAULT_MAX_FIELDS) - 1 resb 1
+__SECT__
 
 struc client
     .rbuf:              resq 1

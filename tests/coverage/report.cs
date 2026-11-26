@@ -14,7 +14,11 @@
 // Writes a summary per source file, then every marker that did not run, to stdout (Markdown).
 //
 // The gate fails (exit 1) on a marker that did not run and is not listed, and on a listed one
-// that did run (the list must not go stale); --report-only prints without failing.
+// that did run (the list must not go stale); --report-only prints without failing. One kind of
+// entry is exempt from the second rule: a reason that starts with "race:" names a branch only a
+// race between threads takes (two answers claiming one exchange at once, a push meeting
+// another). No test can force such a race, and none can rule it out either, so the entry may
+// run or not in any one run; it must still match a marker of the build.
 // --write-unreachable FILE writes the markers that did not run as a list to start from, each
 // reason "TODO", for a person to replace or the tests to remove.
 //
@@ -141,9 +145,10 @@ internal static partial class Coverage
 
         string listPath = Path.Combine(repo, "tests/coverage/unreachable.tsv");
         Dictionary<string, int> listed;
+        HashSet<string> races;
         try
         {
-            listed = ReadList(listPath);
+            (listed, races) = ReadList(listPath);
         }
         catch (InvalidDataException e)
         {
@@ -152,7 +157,12 @@ internal static partial class Coverage
         }
         var notRunKeys = notRun.GroupBy(m => m.Key).ToDictionary(g => g.Key, g => g.Count());
         var unlisted = notRunKeys.Where(p => p.Value > listed.GetValueOrDefault(p.Key)).ToList();
-        var stale = listed.Where(p => p.Value > notRunKeys.GetValueOrDefault(p.Key)).ToList();
+        // A race's entry may have run this time (it is not stale for that), but it must still
+        // name markers the build has: one that no longer exists at all is stale like any other.
+        var allKeys = maps.Values.SelectMany(m => m.Markers).GroupBy(m => m.Key).ToDictionary(g => g.Key, g => g.Count());
+        var stale = listed.Where(p => races.Contains(p.Key)
+            ? p.Value > allKeys.GetValueOrDefault(p.Key)
+            : p.Value > notRunKeys.GetValueOrDefault(p.Key)).ToList();
         Console.WriteLine();
         Console.WriteLine($"Gate: {notRun.Count} markers did not run; {unlisted.Sum(p => p.Value - listed.GetValueOrDefault(p.Key))} of them are not in tests/coverage/unreachable.tsv; {stale.Count} listed entries ran or no longer exist.");
         foreach (var (key, _) in stale)
@@ -319,16 +329,23 @@ internal static partial class Coverage
         File.WriteAllText(path, text.ToString());
     }
 
-    /// <summary>Reads unreachable.tsv as a multiset of marker keys (a missing file is empty).</summary>
+    /// <summary>
+    /// Reads unreachable.tsv as a multiset of marker keys (a missing file is empty), and the
+    /// keys whose reason names a race ("race: ..."), which the gate does not hold to staying
+    /// unrun.
+    /// </summary>
     /// <param name="path">The file.</param>
-    /// <returns>Each key and how many markers it covers.</returns>
-    /// <exception cref="InvalidDataException">A line without its five fields, or a reason left "TODO".</exception>
-    private static Dictionary<string, int> ReadList(string path)
+    /// <returns>Each key and how many markers it covers; and the race keys.</returns>
+    /// <exception cref="InvalidDataException">A line without its five fields, a reason left
+    /// "TODO", or one key listed both as a race and not.</exception>
+    private static (Dictionary<string, int> Listed, HashSet<string> Races) ReadList(string path)
     {
         var listed = new Dictionary<string, int>(StringComparer.Ordinal);
+        var races = new HashSet<string>(StringComparer.Ordinal);
+        var plain = new HashSet<string>(StringComparer.Ordinal);
         if (!File.Exists(path))
         {
-            return listed;
+            return (listed, races);
         }
 
         foreach (string line in File.ReadAllLines(path))
@@ -346,9 +363,18 @@ internal static partial class Coverage
 
             string key = string.Join('\t', f[..4]);
             listed[key] = listed.GetValueOrDefault(key) + 1;
+            (f[4].StartsWith("race:", StringComparison.Ordinal) ? races : plain).Add(key);
         }
 
-        return listed;
+        // Markers alike in their key are one multiset entry: a race's exemption covers all of
+        // them, so the same key may not also be listed as plainly unreachable.
+        string? both = races.FirstOrDefault(plain.Contains);
+        if (both is not null)
+        {
+            throw new InvalidDataException($"{path}: listed both as a race and not: {both.Replace('\t', ' ')}");
+        }
+
+        return (listed, races);
     }
 
     /// <summary>A path relative to the repository, with forward slashes.</summary>

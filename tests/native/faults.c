@@ -121,6 +121,14 @@ static void *answer_later(void *exchange)
     return NULL;
 }
 
+/* answer_big_later: as answer_later, with big_body: the answer outgrows the connection's
+ * output when the worker appends it. Returns NULL. */
+static void *answer_big_later(void *exchange)
+{
+    httpasm_exchange_respond(exchange, 200, NULL, 0, big_body, sizeof big_body);
+    return NULL;
+}
+
 /* target_is: whether the request-target (or :path) is exactly path. */
 static int target_is(const httpasm_request *r, const char *path)
 {
@@ -128,33 +136,37 @@ static int target_is(const httpasm_request *r, const char *path)
     return r->target_length == n && memcmp(r->target, path, n) == 0;
 }
 
-/* handler: "/echo" answers the body it got, "/big" big_body, "/defer" defers and answers from a
- * thread of its own (inline when no thread can be made: under injection pthread_create fails,
- * and a deferred exchange nobody answers would hold its connection until the stop); anything
- * else "ok". */
+/* handler: "/echo" answers the body it got, "/big" big_body, "/defer" and "/defer-big" defer
+ * and answer from a thread of their own, small or big_body (inline when no thread can be made:
+ * under injection pthread_create fails, and a deferred exchange nobody answers would hold its
+ * connection until the stop); anything else "ok". */
 static void handler(void *context, httpasm_exchange *exchange)
 {
     (void)context;
     const httpasm_request *r = httpasm_exchange_request(exchange);
+    void *(*later)(void *) = target_is(r, "/defer") ? answer_later : target_is(r, "/defer-big") ? answer_big_later : NULL;
     if (target_is(r, "/echo")) {
         size_t length = 0;
         const uint8_t *body = httpasm_exchange_body(exchange, &length);
         httpasm_exchange_respond(exchange, 200, NULL, 0, body, length);
     } else if (target_is(r, "/big")) {
         httpasm_exchange_respond(exchange, 200, NULL, 0, big_body, sizeof big_body);
-    } else if (target_is(r, "/defer") && httpasm_exchange_defer(exchange) == 0) {
+    } else if (later != NULL && httpasm_exchange_defer(exchange) == 0) {
         pthread_t t;
-        if (pthread_create(&t, NULL, answer_later, exchange) == 0)
+        if (pthread_create(&t, NULL, later, exchange) == 0)
             pthread_detach(t);
         else
-            answer_later(exchange);
+            later(exchange);
     } else {
         httpasm_exchange_respond(exchange, 200, NULL, 0, (const uint8_t *)"ok", 2);
     }
 }
 
 /* exchange_raw: one connection to the port: sends the octets, half-closes, reads to the close
- * (within 3 s). Returns the octets read, or -1 when the connection failed. */
+ * (each wait 1 s at most: a loopback exchange takes milliseconds, and under a lasting failure -
+ * every accept4 failing, say - each of the scenario's ten connections waits its full time, which
+ * must stay within the child's 20 s alarm). Returns the octets read, or -1 when the connection
+ * failed. */
 static ssize_t exchange_raw(uint16_t port, const void *octets, size_t n)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -170,7 +182,7 @@ static ssize_t exchange_raw(uint16_t port, const void *octets, size_t n)
     ssize_t total = 0;
     for (;;) {
         struct pollfd p = { .fd = fd, .events = POLLIN };
-        if (poll(&p, 1, 3000) <= 0)
+        if (poll(&p, 1, 1000) <= 0)
             break;
         ssize_t r = recv(fd, buf, sizeof buf, 0);
         if (r <= 0)
@@ -185,6 +197,10 @@ static ssize_t exchange_raw(uint16_t port, const void *octets, size_t n)
  * building them allocates nothing a count could see; children inherit them). */
 static char chunked_upload[41 << 10];
 static size_t chunked_upload_length;
+static char length_upload[41 << 10];        /* Content-Length: 40000: the input grows to the body */
+static size_t length_upload_length;
+static char too_large[101 << 10];           /* a body past max_body: 413, then the rest is drained */
+static size_t too_large_length;
 static unsigned char h2_more[21 << 10];
 static size_t h2_more_length;
 
@@ -230,6 +246,19 @@ static void build_messages(void)
     memcpy(chunked_upload + chunked_upload_length, tail, sizeof tail - 1);
     chunked_upload_length += sizeof tail - 1;
 
+    head = snprintf(length_upload, sizeof length_upload,
+                    "POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 40000\r\nConnection: close\r\n\r\n");
+    length_upload_length = (size_t)head;
+    memset(length_upload + length_upload_length, 'z', 40000);
+    length_upload_length += 40000;
+
+    /* 2 MB announced against the scenario's max_body (1 MiB, the default): 413 at once, then
+     * the server drains the 100,000 octets that follow before it closes. */
+    head = snprintf(too_large, sizeof too_large, "POST /echo HTTP/1.1\r\nHost: a\r\nContent-Length: 2000000\r\n\r\n");
+    too_large_length = (size_t)head;
+    memset(too_large + too_large_length, 'q', 100000);
+    too_large_length += 100000;
+
     static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     memcpy(h2_more, preface, sizeof preface - 1);
     h2_more_length = sizeof preface - 1;
@@ -268,6 +297,10 @@ static int scenario(void)
 {
     static const char h1[] = "GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n";
     static const char h1_defer[] = "GET /defer HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n";
+    static const char h1_defer_big[] = "GET /defer-big HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n";
+    /* Two answers of 256 KiB asked for at once: the second is written while the first still
+     * fills the output. */
+    static const char h1_pipelined[] = "GET /big HTTP/1.1\r\nHost: a\r\n\r\nGET /big HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n";
     static const unsigned char h2[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
                                       "\x00\x00\x00\x04\x00\x00\x00\x00\x00"                              /* SETTINGS */
                                       "\x00\x00\x06\x01\x05\x00\x00\x00\x01\x82\x86\x84\x41\x01\x61";    /* HEADERS: GET / a */
@@ -286,8 +319,13 @@ static int scenario(void)
         return 2;
     }
     uint16_t port = httpasm_server_port(s);
+    (void)httpasm_server_io(s);                     /* what the workers run on: MIXED under some failures */
     exchange_raw(port, h1, sizeof h1 - 1);
     exchange_raw(port, h1_defer, sizeof h1_defer - 1);
+    exchange_raw(port, h1_defer_big, sizeof h1_defer_big - 1);
+    exchange_raw(port, h1_pipelined, sizeof h1_pipelined - 1);
+    exchange_raw(port, length_upload, length_upload_length);
+    exchange_raw(port, too_large, too_large_length);
     exchange_raw(port, chunked_upload, chunked_upload_length);
     exchange_raw(port, h2, sizeof h2 - 1);
     exchange_raw(port, h2_more, h2_more_length);
@@ -453,11 +491,11 @@ static int run_parallel(long total, void (*configure)(long), void (*setup)(long)
 #define EXHAUST_CONNECTIONS 12
 
 /* exhaustion_server: the server's process. It starts a server on the backend `flags` asks
- * for, lowers RLIMIT_NOFILE so only EXHAUST_ROOM more descriptors can be opened, writes the
+ * for (idle_ms: its idle timeout, 0 the default), lowers RLIMIT_NOFILE so only EXHAUST_ROOM more descriptors can be opened, writes the
  * port to `out`, then answers commands read from `in`: 'c' writes the process's CPU time so far
  * (microseconds, a uint64_t); anything else, or the parent's end, stops and destroys the server
  * and exits 0. Exits 2 when the server cannot start, 3 when the limit cannot be set. */
-static void exhaustion_server(int in, int out, uint16_t flags)
+static void exhaustion_server(int in, int out, uint16_t flags, uint32_t idle_ms)
 {
     httpasm_server_options o;
     memset(&o, 0, sizeof o);
@@ -465,6 +503,7 @@ static void exhaustion_server(int in, int out, uint16_t flags)
     o.workers = 1;
     o.bind_address = htonl(INADDR_LOOPBACK);
     o.flags = flags;
+    o.idle_timeout_ms = idle_ms;
     int error = 0;
     httpasm_server *s = httpasm_server_create(&o, &error);
     if (s == NULL || httpasm_server_start(s) != 0)
@@ -521,8 +560,13 @@ static uint64_t server_cpu(int to, int from)
 }
 
 /* exhaustion: the descriptor-exhaustion check on one backend (see this file's header).
+ * idle_ms 0 keeps the default idle timeout, so the accepted connections hold their descriptors
+ * through the check and the waiting request must not be answered early. A short one (50 ms)
+ * closes them while the listener rests: the earliest deadline then comes before the pause's
+ * end (100 ms), which the worker's wait must take first; the waiting request may then be
+ * answered at any time, so only the rest (no spin) and the answer are checked.
  * Returns 0 when it held, else 1 with the failure printed. */
-static int exhaustion(uint16_t flags, const char *backend)
+static int exhaustion(uint16_t flags, const char *backend, uint32_t idle_ms)
 {
     int down[2], up[2];
     if (pipe(down) != 0 || pipe(up) != 0)
@@ -533,7 +577,7 @@ static int exhaustion(uint16_t flags, const char *backend)
         alarm(30);
         close(down[1]);
         close(up[0]);
-        exhaustion_server(down[0], up[1], flags);
+        exhaustion_server(down[0], up[1], flags, idle_ms);
     }
     close(down[0]);
     close(up[1]);
@@ -579,7 +623,7 @@ static int exhaustion(uint16_t flags, const char *backend)
                 (double)(after - before) / 1000.0);
         failed = 1;
     }
-    if (answered_early != 0) {
+    if (answered_early != 0 && idle_ms == 0) {
         fprintf(stderr, "faults: exhaustion (%s): the last connection was answered while the descriptors were short\n", backend);
         failed = 1;
     }
@@ -868,6 +912,7 @@ int main(int argc, char **argv)
         { SYS_clone3, EAGAIN, 2, 0, "clone3 EAGAIN (two workers)" },
         { SYS_sched_getaffinity, EINVAL, 0, 0, "sched_getaffinity EINVAL (one worker per CPU)" },
         { SYS_io_uring_setup, ENOMEM, 1, HTTPASM_SERVER_URING, "io_uring_setup ENOMEM" },
+        { SYS_io_uring_setup, ENOMEM, 2, HTTPASM_SERVER_URING, "io_uring_setup ENOMEM (two workers: one on epoll)" },
         { SYS_mmap, ENOMEM, 1, HTTPASM_SERVER_URING, "mmap ENOMEM (io_uring)" },
     };
     /* Not swept, measured 2026-11-26: io_uring_enter, whose completions run as the caller's
@@ -896,6 +941,7 @@ int main(int argc, char **argv)
            "%ld at its send, %ld without a filter; the most CPU a child used: %.2f s (the limit is %.1f s)\n",
            outcomes[0], outcomes[1], outcomes[2], outcomes[3], outcomes[4], outcomes[100], child_cpu_most, CHILD_CPU_LIMIT);
 
-    int exhausted = exhaustion(0, "epoll") + exhaustion(HTTPASM_SERVER_URING, "io_uring");
+    int exhausted = exhaustion(0, "epoll", 0) + exhaustion(HTTPASM_SERVER_URING, "io_uring", 0)
+                    + exhaustion(0, "epoll, 50 ms idle", 50) + exhaustion(HTTPASM_SERVER_URING, "io_uring, 50 ms idle", 50);
     return failures + syscall_failures + sweep_failures + exhausted == 0 ? 0 : 1;
 }

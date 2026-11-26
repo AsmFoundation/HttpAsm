@@ -24,12 +24,22 @@ public sealed class Http2FrameTests
     private static readonly byte[] Big = MakeBig();
 
     /// <summary>
+    /// /large-head's fields: 40 of 1,000 octets each, a field block larger than the 16,384
+    /// octets one frame may carry, so the answer's head needs HEADERS and CONTINUATION frames.
+    /// </summary>
+    private static readonly (string, string)[] LargeHead =
+        [.. Enumerable.Range(0, 40).Select(i => (FormattableString.Invariant($"x-large-{i}"), new string((char)('a' + i % 26), 1000)))];
+
+    /// <summary>
     /// A server whose answers the tests can steer by path: /slow answers a second later (its
     /// stream stays half-closed (remote) meanwhile), /echo echoes the body, /cookie answers the
     /// cookie field it saw, /mixed answers with a mixed-case field name, /big answers
     /// <see cref="Big"/>, "*" (OPTIONS for the server as a whole) answers "asterisk" and the
     /// method, /reset answers 205 (first with a body, which is refused, then empty), /trailers
-    /// answers the trailer fields it got ("name=value" joined by ";"), anything else "ok".
+    /// answers the trailer fields it got ("name=value" joined by ";"), /large-head answers with
+    /// <see cref="LargeHead"/>'s fields, /no-content 204, /not-modified 304, /dated with its own
+    /// Date, /checked tries three answers the rules refuse and then answers their codes,
+    /// anything else "ok".
     /// </summary>
     /// <param name="idleMs">The idle timeout (0: the library's default).</param>
     /// <param name="limits">The head limits (zeros: the library's defaults).</param>
@@ -74,6 +84,25 @@ public sealed class Http2FrameTests
                     break;
                 case "/trailers":
                     x.Respond(200, string.Join(";", x.Trailers.Select(t => t.Name + "=" + t.Value)));
+                    break;
+                case "/large-head":
+                    x.Respond(200, "large", LargeHead);
+                    break;
+                case "/no-content":
+                    x.Respond(204);
+                    break;
+                case "/not-modified":
+                    x.Respond(304);
+                    break;
+                case "/dated":
+                    x.Respond(200, "dated", ("date", "Sun, 06 Nov 1994 08:49:37 GMT"));
+                    break;
+                case "/checked":
+                    // Answers the HTTP/2 rules refuse inline, each leaving the exchange
+                    // answerable: a 1xx (the server's alone), a status past 599, a
+                    // connection-specific field; then the answer that goes out, with the codes.
+                    int interim = x.Respond(103), beyond = x.Respond(600), framing = x.Respond(200, "no", ("connection", "close"));
+                    x.Respond(200, FormattableString.Invariant($"{interim} {beyond} {framing}"));
                     break;
                 default:
                     x.Respond(200, "ok");
@@ -1279,9 +1308,15 @@ public sealed class Http2FrameTests
 
     /// <summary>
     /// The glitch budget refills with time, so a client that glitches now and then is never
-    /// cut. After 9,900 PRIORITY frames, 1.5 seconds earn about 495 more; 500 then pass (with
-    /// the refill during the first burst as margin), and 700 more do not.
+    /// cut. After 9,900 PRIORITY frames, 3 seconds earn about 990 more; 600 then pass, and
+    /// 1,200 more do not.
     /// </summary>
+    /// <remarks>
+    /// The margins are wide both ways: about 490 tokens (1.5 s of refill) beyond the 600, and
+    /// about 710 short of the 1,200. A 1.5 s pause followed by 500 left a margin of 95 tokens
+    /// (0.3 s), and one run of the coverage build - instrumented, every test class at once - was
+    /// cut there (2026-11-26).
+    /// </remarks>
     [Fact]
     [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5-6#2")]
     public void RefillsTheGlitchBudgetWithTime()
@@ -1293,11 +1328,11 @@ public sealed class Http2FrameTests
         Glitches(c, "priority", 9_900);
         c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
         Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // all taken: about 100 left
-        Thread.Sleep(1_500);
-        Glitches(c, "priority", 500);
+        Thread.Sleep(3_000);
+        Glitches(c, "priority", 600);
         c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
         Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // the refill paid for them
-        Glitches(c, "priority", 700);
+        Glitches(c, "priority", 1_200);
 
         Assert.Equal(EnhanceYourCalm, c.ExpectGoAway());
     }
@@ -1811,6 +1846,242 @@ public sealed class Http2FrameTests
         H2Response response = c.ReadResponse(1);
 
         Assert.Equal((200, "accept-encoding=gzip, deflate;etag=\"v1\";x-own=literal"), (response.Status, Encoding.ASCII.GetString(response.Body)));
+    }
+
+    /// <summary>
+    /// An answer's field block larger than one frame (40 fields of 1,000 octets against the
+    /// 16,384 octets a frame carries) goes as HEADERS then CONTINUATION frames - a first, middle
+    /// ones, and the last with END_HEADERS - with no other frame between them on the connection
+    /// (RFC9113-4.3-10, checked for every frame the server sends), and the client decodes every
+    /// field. No answer before had a head that needed more than one frame.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-4.3-10", "RFC9113-6.10-5.2.2#1", "RFC9113-6.10-7#1", "RFC9113-6.10-8#1")]
+    public void SplitsALargeHeadIntoContinuationFrames()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, path: "/large-head");
+        var frames = new List<H2Frame>();
+        while (c.ReadFrame() is H2Frame frame)
+        {
+            frames.Add(frame);
+            if (frame.Stream == 1 && (frame.Flags & EndStream) != 0)
+            {
+                break;
+            }
+        }
+
+        var head = frames.Where(f => f.Stream == 1 && f.Type is Headers or Continuation).ToList();
+        Assert.True(head.Count >= 3, $"{head.Count} frames for the head");
+        Assert.Equal(Headers, head[0].Type);
+        Assert.All(head.Skip(1), f => Assert.Equal(Continuation, f.Type));
+        Assert.Equal(EndHeaders, head[^1].Flags & EndHeaders);
+        Assert.All(head.SkipLast(1), f => Assert.Equal(0, f.Flags & EndHeaders));
+        Assert.All(LargeHead, f => Assert.Equal(f.Item2, c.Decoded[1].Single(d => d.Name == f.Item1).Value));
+    }
+
+    /// <summary>
+    /// Inline answers are held to HTTP/2's rules as deferred ones are: a 1xx (the server's to
+    /// send), a status past 599 and a connection-specific field are refused
+    /// (-HTTPASM_ERROR_STATUS, -HTTPASM_ERROR_FRAMING_FIELD) with nothing sent, each leaving the
+    /// exchange answerable; the handler's own Date replaces the server's; and 204 and 304 end
+    /// the stream on their HEADERS, with no DATA (RFC 9110 6.4.1).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-8.2.2-1#1")]
+    public void HoldsInlineAnswersToTheRules()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, path: "/checked");
+        Assert.Equal(FormattableString.Invariant($"{-(int)ParseError.Status} {-(int)ParseError.Status} {-(int)ParseError.FramingField}"),
+            Encoding.ASCII.GetString(c.ReadResponse(1).Body));
+
+        c.SendRequest(3, path: "/dated");
+        H2Response dated = c.ReadResponse(3);
+        Assert.Equal("Sun, 06 Nov 1994 08:49:37 GMT", Assert.Single(dated.Fields, f => f.Name == "date").Value);
+
+        foreach ((int stream, string path, int status) in new[] { (5, "/no-content", 204), (7, "/not-modified", 304) })
+        {
+            c.SendRequest(stream, path: path);
+            H2Frame answer = c.Expect(Headers, stream);
+            Assert.Equal(EndStream, answer.Flags & EndStream);
+            Assert.Equal(status.ToString(CultureInfo.InvariantCulture), c.Decoded[stream].Single(f => f.Name == ":status").Value);
+        }
+    }
+
+    /// <summary>
+    /// An expectation the server cannot meet is answered early with 417 (RFC 9110 10.1.1); the
+    /// client may still finish sending, and the stream then ends normally (no reset), the
+    /// connection serving on. The stream ends once both sides are done: the 417 went out
+    /// whole, and the body's end arrives after it.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-10.1.1-5")]
+    public void EndsAStreamAnsweredEarlyWhenItsBodyEnds()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/echo", ("expect", "something-else"));
+        H2Response answer = c.ReadResponse(1);
+        Assert.Equal(417, answer.Status);
+        c.SendFrame(Data, EndStream, 1, "late body"u8);
+        c.SendRequest(3);
+
+        Assert.Equal(200, c.ReadResponse(3).Status);
+        Assert.DoesNotContain(c.FramesWithin(100), f => f.Type == RstStream);
+    }
+
+    /// <summary>
+    /// A trailer section past the server's limit (max_head 1 KiB here) is refused like a head
+    /// past it - the stream is answered 431, and the connection stays in step and serves on -
+    /// rather than handed to the handler.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5.1-3")]
+    public void RefusesTrailersPastTheLimit()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(limits: new H1Limits { MaxHead = 1024 });
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/trailers");
+        c.SendFrame(Data, 0, 1, "body"u8);
+        c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("x-big", new string('t', 2000))));
+
+        Assert.Equal(431, ReadStatus(c, 1));
+        c.SendRequest(3);
+        Assert.Equal(200, c.ReadResponse(3).Status);
+    }
+
+    /// <summary>
+    /// Two answers waiting on the connection's window share each WINDOW_UPDATE as it comes:
+    /// with both streams' windows wide open and the connection's spent, an update of 1,000
+    /// octets moves exactly 1,000 octets in all - the resume stops when the window is spent,
+    /// whichever stream it reached - and a large one lets both finish, intact.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-6.9.1-2#1", "RFC9113-6.9-11")]
+    public void SharesTheConnectionWindowBetweenWaitingAnswers()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port, true, (4, 0x7FFFFFFF));
+        c.SendRequest(1, path: "/big");
+        c.SendRequest(3, path: "/big");
+
+        // Everything the server sends until it falls silent: both heads, and DATA up to the
+        // connection's window (the other stream's HEADERS can come after the last DATA).
+        int received = c.FramesWithin(300).Where(f => f.Type == Data).Sum(f => f.Payload.Length);
+
+        Assert.Equal(65535, received);
+        c.SendU32(WindowUpdate, 0, 1000);
+        int moved = 0;
+        foreach (H2Frame frame in c.FramesWithin(200))
+        {
+            moved += frame.Type == Data ? frame.Payload.Length : 0;
+        }
+
+        Assert.Equal(1000, moved);
+        c.SendU32(WindowUpdate, 0, 0x7FFF0000);
+        var bodies = new Dictionary<int, List<byte>> { [1] = [], [3] = [] };
+        int ended = 0;
+        while (ended < 2 && c.ReadFrame() is H2Frame frame)
+        {
+            if (frame.Type == Data)
+            {
+                bodies[frame.Stream].AddRange(frame.Payload);
+                ended += (frame.Flags & EndStream) != 0 ? 1 : 0;
+            }
+        }
+
+        Assert.Equal(2, ended);
+        Assert.Equal(2L * Big.Length, bodies[1].Count + bodies[3].Count + received + moved);
+    }
+
+    /// <summary>
+    /// A stuck upload whose 408 cannot go whole (the client opened no stream window:
+    /// SETTINGS_INITIAL_WINDOW_SIZE 0, so the 408's body waits) is answered once: the sweep
+    /// finds the same stream in its slot after answering it, starts its window over, and does
+    /// not answer it again. Then the answer itself is stuck - an answered stream that moves
+    /// nothing - and a later window resets it CANCEL. Meanwhile bodiless answers on other
+    /// streams (204: no window needed) keep the connection busy, and are served.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5-6#1")]
+    public void AnswersAStuckUploadOnceThenCancelsItsStuckAnswer()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port, true, (4, 0));
+        c.SendRequest(1, endStream: false, "POST", "/echo", ("content-length", "1000"));
+        c.SendFrame(Data, 0, 1, new byte[10]);                      // 10 octets of 1,000, then nothing
+
+        int heads = 0, served = 0;
+        uint? reset = null;
+        for (int id = 3; id < 300 && reset is null; id += 2)
+        {
+            c.SendRequest(id, path: "/no-content");
+            foreach (H2Frame frame in c.FramesWithin(50))
+            {
+                if (frame.Stream == 1 && frame.Type == Headers)
+                {
+                    heads++;
+                    Assert.Equal("408", c.Decoded[1].Single(f => f.Name == ":status").Value);
+                }
+                else if (frame.Stream == 1 && frame.Type == RstStream)
+                {
+                    reset = BinaryPrimitives.ReadUInt32BigEndian(frame.Payload);
+                }
+                else if (frame.Type == Headers)
+                {
+                    served++;
+                }
+            }
+        }
+
+        Assert.Equal(1, heads);
+        Assert.Equal(Cancel, reset);
+        Assert.True(served > 0);
+    }
+
+    /// <summary>
+    /// Resets within the rule are no attack: past the 128 a connection may always have, a
+    /// client may keep resetting streams as long as they are fewer than half of those it
+    /// opened (RFC9113-10.5-6#2's rule here). 300 answered requests, then 140 uploads each
+    /// reset by the client while the server waits for its body (an active stream: only those
+    /// count): the connection serves on.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5-6#2")]
+    public void ToleratesResetsBelowHalfTheStreams()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+        int id = 1;
+        for (int i = 0; i < 300; i++, id += 2)
+        {
+            c.SendRequest(id);
+            c.ReadResponse(id);
+        }
+
+        for (int i = 0; i < 140; i++, id += 2)
+        {
+            c.SendRequest(id, endStream: false, "POST", "/echo");
+            c.SendU32(RstStream, id, Cancel);
+        }
+
+        c.SendRequest(id);
+        Assert.Equal(200, c.ReadResponse(id).Status);
+        Assert.Equal(0, c.GoAwayCount);
     }
 
     /// <summary>Reads a stream's final status (its HEADERS), without waiting for its end.</summary>

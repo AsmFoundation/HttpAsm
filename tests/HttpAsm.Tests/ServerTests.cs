@@ -1316,6 +1316,110 @@ public sealed class ServerTests
         await stop.WaitAsync(TimeSpan.FromSeconds(10), ct);
     }
 
+    /// <summary>
+    /// A peer that resets while its request is arriving, or while its answer is being sent
+    /// (an 8 MiB answer it stops reading), ends its connection with an error the server meets
+    /// in a receive or a send - on io_uring as an operation's failed completion - and the
+    /// server serves the next client as before.
+    /// </summary>
+    [Fact]
+    public void ServesOnAfterPeersResetMidRequestAndMidAnswer()
+    {
+        Platform.RequireLinuxX64();
+        byte[] big = RandomBytes(8 << 20);
+        using var server = new TestServer(x => x.Respond(200, x.Target == "/big" ? big : "ok"u8.ToArray()), workers: 1);
+
+        using (var midRequest = new RawConnection(server.Port))
+        {
+            midRequest.Send("GET / HTTP/1.1\r\nHo");
+            Thread.Sleep(50);
+            midRequest.Abort();
+        }
+
+        using (var midAnswer = new RawConnection(server.Port, receiveBuffer: 16 << 10))
+        {
+            midAnswer.Send("GET /big HTTP/1.1\r\nHost: t\r\n\r\n");
+            midAnswer.ReadSlowly(64 << 10, 16 << 10, 10);
+            midAnswer.Abort();
+        }
+
+        Thread.Sleep(100);
+        using var next = new RawConnection(server.Port);
+        next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("ok", next.ReadResponse().Text);
+    }
+
+    /// <summary>
+    /// Three hundred connections at once on one worker, each with a request: all answered. On
+    /// io_uring one turn of the loop then wants more operations than the 256-entry submission
+    /// queue holds, so it submits the full queue and goes on filling it.
+    /// </summary>
+    [Fact]
+    public void ServesThreeHundredConnectionsAtOnce()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "ok"), workers: 1);
+        var connections = Enumerable.Range(0, 300).Select(_ => new RawConnection(server.Port)).ToList();
+        try
+        {
+            foreach (RawConnection c in connections)
+            {
+                c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+            }
+
+            Assert.All(connections, c => Assert.Equal("ok", c.ReadResponse().Text));
+        }
+        finally
+        {
+            connections.ForEach(c => c.Dispose());
+        }
+    }
+
+    /// <summary>
+    /// A stop waits HA_STOP_GRACE_MS (5 s) for exchanges in flight; one its handler never
+    /// answers is then forced closed, and the stop returns: the client sees its connection
+    /// closed, with no answer.
+    /// </summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task ForcesTheStopOnceItsGraceEnds()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var server = new TestServer(x => x.Defer(), workers: 1);
+        using var c = new RawConnection(server.Port, timeoutMs: 15000);
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Thread.Sleep(100);                                          // the handler has deferred it
+        var clock = Stopwatch.StartNew();
+
+        await Task.Run(server.Stop, ct).WaitAsync(TimeSpan.FromSeconds(15), ct);
+
+        Assert.InRange(clock.ElapsedMilliseconds, 4500, 10000);
+        Assert.True(c.ServerClosed(1000));
+    }
+
+    /// <summary>
+    /// Pipelined requests whose answers outgrow the output while a slow reader drains it: each
+    /// answer of 100,000 octets is written when the output has room again, after what was sent
+    /// is dropped from its front, and when that is still not room enough the output grows. All
+    /// three answers arrive whole and in order.
+    /// </summary>
+    [Fact]
+    public void WritesPipelinedAnswersWhileTheOutputDrains()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, RandomBytes(100_000 + x.Target.Length)), workers: 1);
+        using var c = new RawConnection(server.Port, receiveBuffer: 16 << 10);
+
+        c.Send("GET /a HTTP/1.1\r\nHost: t\r\n\r\nGET /bb HTTP/1.1\r\nHost: t\r\n\r\nGET /ccc HTTP/1.1\r\nHost: t\r\n\r\n");
+        Thread.Sleep(200);                                          // the server fills what the socket takes
+
+        foreach (string target in new[] { "/a", "/bb", "/ccc" })
+        {
+            Assert.True(RandomBytes(100_000 + target.Length).AsSpan().SequenceEqual(c.ReadResponse().Body), target);
+        }
+    }
+
     /// <summary>Octets that are the same on every run (seeded by the length).</summary>
     /// <param name="length">How many.</param>
     /// <returns>The octets.</returns>
