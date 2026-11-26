@@ -371,6 +371,29 @@ internal static unsafe partial class Native
     [LibraryImport(Libc, EntryPoint = "unsetenv", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int UnsetEnv(string name);
 
+    /// <summary>The io_uring_setup system call's number on x86-64.</summary>
+    internal const long SysIoUringSetup = 425;
+
+    /// <summary>long syscall(long number, ...), called with io_uring_setup's two arguments.</summary>
+    /// <param name="number"><see cref="SysIoUringSetup"/>.</param>
+    /// <param name="entries">The SQ ring's size to ask for.</param>
+    /// <param name="parameters">struct io_uring_params (120 octets, zeroed): the kernel fills it.</param>
+    /// <returns>The ring's descriptor, or -1 with errno set (ENOMEM past RLIMIT_MEMLOCK on a
+    /// kernel that charges rings to it; EPERM or ENOSYS where io_uring is refused).</returns>
+    /// <remarks>
+    /// glibc's syscall is variadic, but on x86-64 it is assembly that only moves its integer
+    /// arguments into place and ignores the vector-register count a variadic call passes in al,
+    /// so this fixed-argument import calls it correctly. The caller closes a descriptor it gets.
+    /// </remarks>
+    [LibraryImport(Libc, EntryPoint = "syscall", SetLastError = true)]
+    internal static partial long SyscallIoUringSetup(long number, long entries, byte* parameters);
+
+    /// <summary>int close(int fd).</summary>
+    /// <param name="fd">The descriptor.</param>
+    /// <returns>0, or -1 with errno set.</returns>
+    [LibraryImport(Libc, EntryPoint = "close", SetLastError = true)]
+    internal static partial int Close(int fd);
+
     /// <summary>getrlimit's and setrlimit's RLIMIT_MEMLOCK on Linux x64.</summary>
     internal const int RlimitMemlock = 8;
 

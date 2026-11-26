@@ -26,9 +26,11 @@
 #      (cpu.inc), and each tier runs on epoll and then with every server asking for io_uring.
 #      A tier above what the CPU has would only repeat the best one it has: v4 on a CPU without
 #      AVX-512 is left to step 2, which can emulate it, since the .NET runtime hangs under SDE.
-#   2. tests/native/tiers: every multi-version routine at every tier in one process, against
-#      oracles and guard pages; natively, and under Intel SDE as a Sapphire Rapids (AVX-512)
-#      when the CPU has no AVX-512 of its own.
+#   2. tests/native/fallback: a seccomp filter refuses io_uring_setup, as Docker's does; a server
+#      asking for io_uring must run on epoll and serve. Then tests/native/tiers: every
+#      multi-version routine at every tier in one process, against oracles and guard pages;
+#      natively, and under Intel SDE as a Sapphire Rapids (AVX-512) when the CPU has no AVX-512
+#      of its own.
 #
 # Why Linux at all: libhttpasm.so is a Linux ELF file. The native tests skip themselves
 # elsewhere, and HTTPASM_REQUIRE_LINUX=1 makes such a skip a failure here, so this run can only
@@ -123,17 +125,19 @@ run_suite() {
   esac
 }
 
-# run_tiers: tests/native/tiers natively, then under SDE when the CPU has no AVX-512. The SDE
-# run must report v4 among its tiers, or it proved nothing about the AVX-512 versions.
-run_tiers() {
+# run_native: the native programs. tests/native/fallback (a seccomp filter refuses io_uring;
+# a server asking for it must run on epoll and serve), then tests/native/tiers natively, and
+# under SDE when the CPU has no AVX-512. The SDE run must report v4 among its tiers, or it
+# proved nothing about the AVX-512 versions.
+run_native() {
   local repo bin sde
   repo="$(lpath "$here")"
   bin='$HOME/.cache/httpasm/native'
   [ "$runner" = native ] && bin="$here/tests/native/bin"
   sde='$HOME/.cache/httpasm/sde'
   [ "$runner" = native ] && sde="$tools/sde"
-  echo "run-linux.sh: tests/native/tiers, natively" >&2
-  on_linux "set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/tiers"
+  echo "run-linux.sh: tests/native/fallback and tests/native/tiers, natively" >&2
+  on_linux "set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers"
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep
@@ -156,9 +160,9 @@ for cpu in $cpus; do
   run_suite uring "$cpu" "$@" || note
 done
 if [ "$runner" = docker ]; then
-  echo "run-linux.sh: INCOMPLETE - the docker runner has no C compiler or SDE for tests/native/tiers; use the wsl or native runner" >&2
+  echo "run-linux.sh: INCOMPLETE - the docker runner has no C compiler or SDE for tests/native; use the wsl or native runner" >&2
   [ "$status" -ne 0 ] || status=3
 else
-  run_tiers || note
+  run_native || note
 fi
 exit "$status"

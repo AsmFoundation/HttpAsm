@@ -493,11 +493,13 @@ typedef struct httpasm_server_options {
  * epoll is the default because it measured as cheap or cheaper (Linux 5.15, benchmarks/README.md):
  * 4.99 us of server CPU per HTTP/1.1 keep-alive request against 5.10-5.46 on io_uring, the same
  * pipelined and over HTTP/2.
- * Footgun: Linux 6.14 and later charge each worker's ring to the user's RLIMIT_MEMLOCK (84 KiB,
- * up to 144 KiB while the kernel rounds its allocation up), which all of that user's processes
- * share (8 MiB by default on Ubuntu 24.04: at least 57 rings); a worker past it silently runs
- * on epoll. Raise the limit (ulimit -l, systemd's LimitMEMLOCK=) for large or many servers,
- * and check httpasm_server_io. */
+ * Footgun: Linux 6.14 to 7.2 charge each worker's ring to the user's RLIMIT_MEMLOCK (84 KiB, up
+ * to 144 KiB while the kernel rounds its allocation up), unless the kernel carries upstream
+ * commit b59cabf9b4ac (2026-10-06), which reverts that 6.14 regression and is backported to
+ * stable kernels. The limit is shared by all of the user's processes (8 MiB by default on
+ * Ubuntu 24.04: at least 57 rings); a worker past it silently runs on epoll. On such kernels,
+ * raise the limit (ulimit -l, systemd's LimitMEMLOCK=) for large or many servers, and check
+ * httpasm_server_io. */
 #define HTTPASM_SERVER_URING        0x0001
 #define HTTPASM_SERVER_IO_NONE      0   /* httpasm_server_io: not running */
 #define HTTPASM_SERVER_IO_EPOLL     1   /* every worker on epoll */

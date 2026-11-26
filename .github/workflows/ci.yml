@@ -20,8 +20,10 @@
 #      by not running. h2spec and Intel SDE come from tests/tools.sh, pinned by version and
 #      SHA-256; h2spec's 146 cases are required. HTTPASM_REQUIRE_URING=1: the runner's kernel
 #      has io_uring, so a server that asks for it and silently falls back to epoll fails the
-#      run (the runner's kernel 7.0 charges rings to RLIMIT_MEMLOCK, 8 MiB there:
-#      RingBudgetTests runs on it, and too large rings once made servers fall back here).
+#      run. Runner kernels differ in whether they charge rings to RLIMIT_MEMLOCK (8 MiB
+#      there; upstream b59cabf9b4ac reverted the charge, and backports reach kernels at
+#      different times): RingBudgetTests asks the kernel and checks the library follows it,
+#      and tests/native/fallback refuses io_uring with seccomp, deterministically.
 #   4. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
 #      written to the job summary with the runner's CPU. Informational: a shared runner is no
 #      measuring machine, but it is where AVX-512 versions get timed when the runner has it.

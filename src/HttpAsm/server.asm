@@ -227,7 +227,8 @@ worker_open:
     mov     dword [rbx + worker.stopping], 0
     mov     qword [rbx + worker.stop_deadline], 0
     ; io_uring only when the options ask for it; a kernel without it (or a seccomp profile
-    ; refusing it, or a user past RLIMIT_MEMLOCK on Linux 6.14+) leaves the worker on epoll,
+    ; refusing it, or a user past RLIMIT_MEMLOCK where the kernel charges rings to it) leaves
+    ; the worker on epoll,
     ; which needs no setting at all.
     test    dword [r12 + server.flags], HTTPASM_SERVER_URING
     jz      .epoll
@@ -594,9 +595,9 @@ httpasm_server_port:
 ;   What the running server's workers wait and do their I/O with: HTTPASM_SERVER_IO_URING when
 ;   every worker has its ring, _EPOLL when none has, _MIXED when some have and some do not, or
 ;   _NONE when the server is not running. Each worker makes its ring on its own when it opens,
-;   so the kernel can refuse some and not others: Linux 6.14 and later charge rings to the
-;   user's RLIMIT_MEMLOCK, and a user past it gets epoll for the remaining workers (uring.asm,
-;   HA_RING_ENTRIES). For tests, measurements and operators that must know what really runs.
+;   so the kernel can refuse some and not others: Linux 6.14 to 7.2 without upstream commit
+;   b59cabf9b4ac charge rings to the user's RLIMIT_MEMLOCK, and a user past it gets epoll for
+;   the remaining workers (uring.asm, HA_RING_ENTRIES). For tests, measurements and operators that must know what really runs.
 ;   Every worker's flag is set before httpasm_server_start returns; a stop clears them as the
 ;   workers exit, so a call racing a stop may see a mix.
 ;   In: rdi = server. Out: eax. Clobbers rcx, rdx, rsi.

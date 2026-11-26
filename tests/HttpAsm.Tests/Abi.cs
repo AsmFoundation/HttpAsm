@@ -440,8 +440,8 @@ internal static class ServerIo
     public const uint Uring = 2;
 
     /// <summary>
-    /// HTTPASM_SERVER_IO_MIXED: the kernel gave rings to some workers only (on Linux 6.14 and
-    /// later, typically the user's RLIMIT_MEMLOCK running out; see httpasm.h).
+    /// HTTPASM_SERVER_IO_MIXED: the kernel gave rings to some workers only (typically the user's
+    /// RLIMIT_MEMLOCK running out on a kernel that charges rings to it; see httpasm.h).
     /// </summary>
     public const uint Mixed = 3;
 }

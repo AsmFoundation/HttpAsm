@@ -261,11 +261,14 @@ stays only if the difference is within noise.
      - SQEs are written only right before `io_uring_enter`, from each connection's state
        then, so none names a descriptor number reused since; a closed connection is freed
        only when its last operation has completed (`conn.uops`);
-     - the ring's memory budget: Linux 6.14 and later charge every page of a ring to the
+     - the ring's memory budget: Linux 6.14 to 7.2 charge every page of a ring to the
        user's RLIMIT_MEMLOCK (8 MiB by default on Ubuntu 24.04, shared by all of the user's
-       processes). Rings of 4096 SQEs and 16384 CQEs (132 pages) let 10 to 15 workers have
-       one, and CI's kernel 7.0 put the rest on epoll; 256 and 4096 (21 pages) allow 57 to
-       97. `httpasm_server_io` says MIXED when only some workers got a ring.
+       processes), unless the kernel carries upstream commit b59cabf9b4ac (2026-10-06). That
+       commit calls the charge a 6.14 regression and reaches stable kernels as a backport, so
+       CI's runners have shown both behaviors. Rings of 4096 SQEs and 16384 CQEs (132 pages)
+       let 10 to 15 workers have one where rings are charged, and a CI runner put the rest on
+       epoll; 256 and 4096 (21 pages) allow 57 to 97. `httpasm_server_io` says MIXED when
+       only some workers got a ring.
    - **Why epoll is the default** (`benchmarks/README.md`, 2026-11-23, Linux 5.15): io_uring
      as built cost 5.10 to 5.46 µs of server CPU per HTTP/1.1 keep-alive request against
      epoll's 4.99, and was never cheaper than epoll in five interleaved rounds; pipelined and

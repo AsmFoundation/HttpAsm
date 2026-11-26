@@ -556,7 +556,7 @@ public sealed class ServerTests
     /// server stopped and started again comes back on the same backend. Runs that know io_uring
     /// is there (WSL, CI) set HTTPASM_REQUIRE_URING=1, so a silent fall back to epoll fails
     /// them, saying why it may have happened (the kernel and RLIMIT_MEMLOCK, which Linux 6.14
-    /// and later charge rings to). In an io_uring run (HTTPASM_TEST_IO=uring) every server asks,
+    /// to 7.2 charge rings to unless they carry upstream commit b59cabf9b4ac). In an io_uring run (HTTPASM_TEST_IO=uring) every server asks,
     /// the plain one too.
     /// </summary>
     /// <remarks>

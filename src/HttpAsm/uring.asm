@@ -3,7 +3,8 @@
 ; server's options ask for it (HTTPASM_SERVER_URING) and the kernel offers it (Linux 5.13 or
 ; later; built and tested on 5.15: a wait with a timeout, SEND and RECV that honor
 ; MSG_DONTWAIT). Where io_uring is refused (seccomp in Docker's default profile, an older
-; kernel, a user past RLIMIT_MEMLOCK on 6.14+), the worker falls back to epoll by itself.
+; kernel, a user past RLIMIT_MEMLOCK on a kernel that charges rings to it), the worker falls
+; back to epoll by itself.
 ;
 ; Not the default: on Linux 5.15 this design measured 5.10-5.46 us of server CPU per HTTP/1.1
 ; keep-alive request against epoll's 4.99, and never cheaper than epoll in any of five
@@ -60,11 +61,12 @@ IORING_OP_POLL_REMOVE   equ 7
 IORING_OP_SEND          equ 26
 IORING_OP_RECV          equ 27
 ENOSYS                  equ 38
-; The ring's size is a budget. Linux 6.14 and later charge every page of a ring (the SQ and CQ
+; The ring's size is a budget. Linux 6.14 to 7.2 charge every page of a ring (the SQ and CQ
 ; rings, the SQE array) to the user's RLIMIT_MEMLOCK, shared by all of that user's processes
-; (8 MiB by default on Ubuntu 24.04): 4096 SQEs and 16384 CQEs took 132 pages a worker, so ten
-; to fifteen workers exhausted it and the rest fell back to epoll (the CI runner's kernel 7.0
-; showed it). These sizes take 21 pages (84 KiB), or 36 while the kernel can also charge the
+; (8 MiB by default on Ubuntu 24.04), unless the kernel carries upstream commit b59cabf9b4ac
+; (2026-10-06), which reverts that 6.14 regression and reaches stable kernels as a backport:
+; 4096 SQEs and 16384 CQEs took 132 pages a worker, so ten to fifteen workers exhausted it and
+; the rest fell back to epoll (a CI runner's kernel without the fix showed it). These sizes take 21 pages (84 KiB), or 36 while the kernel can also charge the
 ; rounding of its allocation to a power of two: 57 to 97 workers per 8 MiB. Neither size limits
 ; correctness:
 ;   - SQEs: a walk that queues more submits them in parts (ha_uring_sqe), 256 per system call,

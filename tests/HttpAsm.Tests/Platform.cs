@@ -92,8 +92,8 @@ internal static class Platform
 
     /// <summary>
     /// The kernel release and this process's RLIMIT_MEMLOCK, for a failure message about
-    /// io_uring: Linux 6.14 and later charge every ring to that limit (httpasm.h, HTTPASM_SERVER_URING),
-    /// so a worker past it runs on epoll.
+    /// io_uring: Linux 6.14 to 7.2 without upstream commit b59cabf9b4ac charge every ring to that
+    /// limit (httpasm.h, HTTPASM_SERVER_URING), so a worker past it runs on epoll.
     /// </summary>
     /// <returns>For example "kernel 7.0.0-1017-azure, RLIMIT_MEMLOCK 8192 KiB (hard 8192 KiB)".</returns>
     public static string IoUringBudget()

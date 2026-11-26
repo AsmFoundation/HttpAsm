@@ -153,7 +153,7 @@ What it shows:
   against 0.60 and 0.60, a gap that an earlier run of the same comparison (a scratch copy of
   the script) gave the other way round, 0.64 against 0.61 and 0.62. No change is measurable.
 - The ring sizes changed after this run (4096 SQEs and 16384 CQEs, then 256 and 4096, for
-  Linux 6.14's memory charge; docs/DESIGN.md section 7, step 4). At 64 connections per worker
+  the memory charge of Linux 6.14 to 7.2; docs/DESIGN.md section 7, step 4). At 64 connections per worker
   a turn queues at most 192 SQEs and no CQE overflows, so the sizes do not touch these
   numbers.
 
