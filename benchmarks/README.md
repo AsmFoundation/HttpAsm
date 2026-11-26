@@ -189,6 +189,18 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: phase H step 4, HPACK's Huffman encoding.** `hp_string_encode` measured a string's
+code first (a table load and an add per octet, the adds in one chain) and then wrote it an octet
+per flush. Now the measure takes four octets a step into two sums, and the codes leave 32 bits at
+a time. Every tier runs it, so the proof is the A/B against 4a9f52f (3 processes agreeing):
+
+| Case | Instructions, before -> after | Best tier | v1 |
+|---|---:|---:|---:|
+| hpack_encode, the browser request's 18 fields | 21,155 -> 15,677 | 1.67-1.70x faster | 1.59-1.60x faster |
+
+The blocks are the old encoder's octet for octet: 60,000 blocks (random fields with rare
+octets, Huffman on and off, indexed or not, at every tier) encoded by both builds compared equal.
+
 **2026-11-27: phase H step 4, chunk sizes: a whole chunk at once.** The chunked decoder read
 its framing octet by octet through a state machine kept in memory (the state reloaded and
 compared each octet): 184 instructions per 16-octet chunk. At a chunk's first octet it now

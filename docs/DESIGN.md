@@ -699,6 +699,12 @@ HTTP/2, the drivers, the client):
      moves sized to each (no `rep movsb`, whose start-up cost was most of each short copy) and
      makes its decimal digits by multiplication. A 200 with six fields is written 1.17x faster.
      `tests/native/tiers` checks the token scan at every tier on 206,680 inputs against the RFC.
+   - **HPACK's Huffman encoding** (2026-11-27). The encoder summed each string's code
+     lengths octet by octet, then wrote the codes an octet per flush (7 instructions an
+     octet). The sum now takes four octets a step into two independent sums, and the codes go
+     out 32 bits at a time (one byte-swapped store): the browser request's 18 fields encode
+     1.67x faster at every tier, octet for octet the same block (60,000 blocks compared
+     between the two builds).
    - **Chunk sizes** (2026-11-27). The chunked decoder is a state machine that keeps its
      state between calls, octet by octet: about 20 instructions per octet of framing, most of a
      small chunk's cost. At a chunk's first octet it now takes a whole chunk at once when the
