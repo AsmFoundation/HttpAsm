@@ -144,6 +144,9 @@ internal sealed class CannedServer : IDisposable
     /// "Not listening" (CI, 2026-11-26). A listener stopped before any client was accepted ends
     /// the server quietly: the client never needed the accept (the kernel completes the
     /// handshake from the backlog), so there was nothing to serve.
+    /// Its socket sends without Nagle's delay (NoDelay), and <see cref="Settled"/> says when its
+    /// last act is done. A test that waited a fixed time for the later octets lost the race now
+    /// and then (1 run in 6, WSL, 2026-11-26): the client took them for the next answer.
     /// </remarks>
     public CannedServer(IReadOnlyList<string> answers, bool close, string? after = null)
     {
@@ -157,38 +160,54 @@ internal sealed class CannedServer : IDisposable
             }
             catch (Exception e) when (e is InvalidOperationException or SocketException or ObjectDisposedException)
             {
+                Settled.Set();
                 return;                                                 // stopped before a client came
             }
 
-            using Socket socket = accepted;
-            byte[] buffer = new byte[65536];
-            foreach (string answer in answers)
+            using (Socket socket = accepted)
             {
-                ReadHead(socket, buffer);
-                socket.Send(Encoding.Latin1.GetBytes(answer));
+                socket.NoDelay = true;                                  // each Send leaves at once
+                byte[] buffer = new byte[65536];
+                foreach (string answer in answers)
+                {
+                    ReadHead(socket, buffer);
+                    socket.Send(Encoding.Latin1.GetBytes(answer));
+                }
+
+                if (!string.IsNullOrEmpty(after))
+                {
+                    Thread.Sleep(200);
+                    socket.Send(Encoding.Latin1.GetBytes(after));
+                }
+
+                if (!close)
+                {
+                    Settled.Set();                                      // all sent; the connection stays
+                    Thread.Sleep(3000);
+                }
             }
 
-            if (!string.IsNullOrEmpty(after))
-            {
-                Thread.Sleep(200);
-                socket.Send(Encoding.Latin1.GetBytes(after));
-            }
-
-            if (!close)
-            {
-                Thread.Sleep(3000);
-            }
+            Settled.Set();                                              // closed (a second Set is harmless)
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
     /// <summary>The port.</summary>
     public int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
 
-    /// <summary>Stops listening.</summary>
+    /// <summary>
+    /// Set once the server's last act is done: the later octets sent (the connection kept), or
+    /// the connection closed. A test waits on it instead of guessing how long that takes.
+    /// </summary>
+    public ManualResetEventSlim Settled { get; } = new();
+
+    /// <summary>Stops listening, and waits for the server to finish (5 s at most).</summary>
     public void Dispose()
     {
         listener.Stop();
-        serving.Wait(TimeSpan.FromSeconds(5));
+        if (serving.Wait(TimeSpan.FromSeconds(5)))
+        {
+            Settled.Dispose();                                          // only once nothing can Set it
+        }
     }
 
     /// <summary>Reads until a request head's end (CRLF CRLF), and the body its Content-Length names.</summary>
@@ -369,7 +388,8 @@ public sealed class ClientTests
 
         ClientResult first = client.Send("GET", "/");
         Assert.Equal((0, 200, "ok"), (first.Result, first.Status, first.Text));
-        Thread.Sleep(400);                                          // what comes later has come
+        Assert.True(server.Settled.Wait(5000, TestContext.Current.CancellationToken), "the canned server did not finish");
+        Thread.Sleep(50);                                           // loopback delivery: what came has arrived
 
         Assert.Equal(second, client.Send("GET", "/").Result);
         Assert.Equal(-107, client.Send("GET", "/").Result);
