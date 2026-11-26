@@ -13,3 +13,6 @@ specs/documents.json text eol=lf
 
 # The fuzzers' seed inputs are octets, CRLF line ends included: never converted.
 tests/fuzz/seeds/** binary
+
+# The fuzzers' minimized corpora (tests/fuzz/run.sh merge) are octets too.
+tests/fuzz/corpus/** binary

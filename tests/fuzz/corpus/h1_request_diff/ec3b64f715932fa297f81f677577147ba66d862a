@@ -1,0 +1,4 @@
+GET /
+Connection:Upgrade
+Upgrade:o
+

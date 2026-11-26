@@ -14,6 +14,10 @@
 #      references; then run for SECONDS (default 60) on its corpus.
 #
 # Usage: tests/fuzz/run.sh [seconds per fuzzer] [fuzzer names...]   (default: 60, every fuzzer)
+#        tests/fuzz/run.sh merge [fuzzer names...]: no fuzzing; each fuzzer's committed corpus
+#        (tests/fuzz/corpus/<name>/) becomes the minimal set of inputs, from it, the working
+#        corpus and the seeds, that reaches everything they reach (libFuzzer -merge=1).
+#        tests/fuzz/replay.sh replays seeds and corpus as deterministic tests.
 #        HTTPASM_RUNNER=wsl|native as for tests/run-linux.sh.
 # Corpora: tests/fuzz/seeds/<name>/ (committed seeds) feeds a working corpus outside the
 # repository (WSL: ~/.cache/httpasm/fuzz/corpus/<name>; native: tests/fuzz/.work/), which grows
@@ -32,7 +36,8 @@ seconds="${1:-60}"
 shift || true
 fuzzers=("$@")
 if [ "${#fuzzers[@]}" -eq 0 ]; then
-  for f in "$here"/tests/fuzz/*.c; do fuzzers+=("$(basename "$f" .c)"); done
+  # replay.c is the replay driver (replay.sh), not a fuzzer.
+  for f in "$here"/tests/fuzz/*.c; do n="$(basename "$f" .c)"; [ "$n" = replay ] || fuzzers+=("$n"); done
 fi
 
 case "$(uname -s)" in

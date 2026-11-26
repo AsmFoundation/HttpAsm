@@ -100,6 +100,9 @@ or listed with its RFC reason in `tests/fuzz/*.triage`.
 - **runs `tests/native/tiers`:** every multi-version routine at every tier, against an oracle
   and a guard page. It runs natively, then under Intel SDE's AVX-512 emulation when the CPU
   has none, because SDE cannot run the .NET runtime;
+- **replays every input the fuzzers kept** (`tests/fuzz/seeds/`, and the minimized corpora in
+  `tests/fuzz/corpus/`) with every check of theirs, against the build's own objects
+  (`tests/fuzz/replay.sh`). In the coverage run, the replays add their share to the report;
 - **requires h2spec's 146 cases to pass.**
 
 `HTTPASM_CPU` caps the library's CPU tier in any program, as `OPENSSL_ia32cap` does for

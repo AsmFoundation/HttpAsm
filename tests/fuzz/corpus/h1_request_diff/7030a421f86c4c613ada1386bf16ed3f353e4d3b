@@ -1,0 +1,34 @@
+POST / HTTP/1.1
+Upgrade: .1
+Upgrade: /1.d .1
+Upgrade: é1
+Upgrade:arade: /1
+Upgrade: é1
+Upgrade:ÿÿÿ1
+Upgrade:de:ÿÿ¿ÿ
+Upgrade:ed 
+Upgrade: 6io.1
+Upgrade: rade:"0ion
+Upgrade:1
+Upgrade: de: 0ion1
+Upgrade:2
+Upgrade: é2······e: é1
+Upgrade: é1
+Upgrade: é1
+Upgrade:: /1.1
+Upgrade: é1
+Upgrade:ioé1
+Upgrade: é1
+Upgrade:: /1.1
+Upgrade: é1
+Upgrade: é1
+Upgrade:: /11
+Upgrade: 01
+Upgrade:ioéÿ1
+Upgrade: é$
+Upgrade: 0,ioéÿ1.1
+Upgrade: é1
+Upgrade:: p1.1
+Upgrade: é2ade: é$0hon1
+Upgrade:ÿÿ
+0-

@@ -15,7 +15,9 @@
 #      - the .NET suite at every CPU tier the runner's CPU has (HTTPASM_CPU=v1, v2, v3, and v4
 #        when it has AVX-512), each on epoll and then with every server asking for io_uring;
 #      - tests/native/tiers: every multi-version routine at every tier against oracles and
-#        guard pages, natively, and under Intel SDE (AVX-512) when the CPU has no AVX-512.
+#        guard pages, natively, and under Intel SDE (AVX-512) when the CPU has no AVX-512;
+#      - tests/fuzz/replay.sh: every input the fuzzers kept (seeds, minimized corpora),
+#        replayed with every check of theirs against the Release objects.
 #      HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails instead, so nothing passes
 #      by not running. h2spec and Intel SDE come from tests/tools.sh, pinned by version and
 #      SHA-256; h2spec's 146 cases are required. HTTPASM_REQUIRE_URING=1: the runner's kernel

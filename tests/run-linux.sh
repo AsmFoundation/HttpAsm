@@ -137,22 +137,35 @@ run_suite() {
 # under SDE when the CPU has no AVX-512. The SDE run must report v4 among its tiers, or it
 # proved nothing about the AVX-512 versions.
 run_native() {
-  local repo bin sde
+  # The status is kept by hand: run_native runs as "run_native || note", where bash ignores
+  # set -e inside the function, and a function's status is its last command's. Before this,
+  # on a CPU with AVX-512 the last command was an "if" whose condition was false, so a failing
+  # fallback or tier program returned 0 (found while adding the replays, 2026-11-26).
+  local repo bin sde replay code=0 c
   repo="$(lpath "$here")"
   bin='$HOME/.cache/httpasm/native'
   [ "$runner" = native ] && bin="$here/tests/native/bin"
   sde='$HOME/.cache/httpasm/sde'
   [ "$runner" = native ] && sde="$tools/sde"
+  replay='$HOME/.cache/httpasm/replay-'"$config"
+  [ "$runner" = native ] && replay="$here/tests/fuzz/.work/replay-$config"
   echo "run-linux.sh: tests/native/fallback and tests/native/tiers, natively" >&2
-  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers"
+  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers" || code=$?
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep
     # would report grep's), and only then searched for the v4 tier.
     on_linux "$linux_env set -e; s=$sde; if [ ! -x \$s/sde64 ]; then mkdir -p \$s; tar -xJf '$(lpath "$tools")/$sde_archive' -C \$s --strip-components=1; fi; \
       o=\$(\$s/sde64 -spr -- $bin/tiers); echo \"\$o\"; \
-      printf '%s\n' \"\$o\" | grep -Eq ' v4=0x[0-9a-f]*7$' || { echo 'run-linux.sh: the SDE run did not reach v4' >&2; exit 1; }"
+      printf '%s\n' \"\$o\" | grep -Eq ' v4=0x[0-9a-f]*7$' || { echo 'run-linux.sh: the SDE run did not reach v4' >&2; exit 1; }" \
+      || { c=$?; [ "$code" -ne 0 ] || code=$c; }
   fi
+  # Every input the fuzzers kept (seeds and minimized corpora), replayed with every check of
+  # theirs against this configuration's objects: deterministic tests from the fuzzing, and in
+  # the Coverage configuration their share of the coverage report.
+  echo "run-linux.sh: tests/fuzz/replay.sh: every fuzzer's seeds and corpus, against the $config objects" >&2
+  on_linux "$linux_env bash '$repo/tests/fuzz/replay.sh' $config $replay" || { c=$?; [ "$code" -ne 0 ] || code=$c; }
+  return "$code"
 }
 
 # Every tier on both backends, then the tier program; the exit status is the first failure's.

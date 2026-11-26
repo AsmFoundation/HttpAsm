@@ -1,0 +1,6 @@
+GET /1
+Connection:ma,close
+Connection::m,close
+Connection:close
+Connection:	,close
+Ho:

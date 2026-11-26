@@ -1,0 +1,38 @@
+TRET / HTTP/1.1
+Host:ex
+ HTTP/1.1
+Host: a
+dest: a
+X:/€//ostfst: a
+X:1
+Host:a
+X:€
+ 
+Hlhttp: httost: a
+X:H€o
+Host: a
+ HTTP/0.1
+Ht:a
+P:1.1
+Host: a
+X:1
+Host:a
+X:€
+ 
+Hlhttp: httost: a
+X:H€o
+Host: a
+ HTTP/0.1
+Ht:a
+P:1.1
+Host: a
+X:€
+ 
+Hlhttp: httost: a
+H:H€o
+Host: a
+ HTTP/1.1
+Ht:a
+P:1.: cepte€ÿ	v
+
+expect

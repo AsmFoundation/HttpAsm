@@ -15,7 +15,8 @@
 #      working corpus WORK/corpus/NAME. A finding lands in WORK/findings/STAMP-NAME-* and is
 #      printed in base64, so a CI log alone reproduces it.
 #
-# Usage: one.sh WORK NAME SECONDS STAMP
+# Usage: one.sh WORK NAME SECONDS STAMP        (SECONDS "merge": minimize into the committed
+#        corpus, tests/fuzz/corpus/NAME/, instead of fuzzing; see below)
 # Exit status: the fuzzer's (0: no finding; 77 for a crash, 70 for a hang, as libFuzzer
 # reports them), or the build's failure.
 # =============================================================================
@@ -106,6 +107,23 @@ dict=()
 if [ -f "$repo/tests/fuzz/$twin.dict" ]; then dict=("-dict=$repo/tests/fuzz/$twin.dict"); fi
 
 code=0
+if [ "$seconds" = merge ]; then
+  # The committed corpus, minimized: libFuzzer's merge keeps, from the committed corpus, the
+  # working corpus and the seeds, the smallest set of inputs that reaches every feature any of
+  # them reaches, into an empty directory, which then replaces tests/fuzz/corpus/NAME/.
+  # tests/fuzz/replay.sh runs it as tests; refreshing it is a commit of its own.
+  fresh="$work/merge-$name"
+  rm -rf "${fresh:?}"
+  mkdir -p "$fresh" "$repo/tests/fuzz/corpus/$name"
+  (cd "$work/bin" && "./$name" -merge=1 -max_len=65536 -timeout=10 "${dict[@]}" "$fresh" "$repo/tests/fuzz/corpus/$name" \
+    "$work/corpus/$name" "${seeds[@]}") || code=$?
+  if [ "$code" -eq 0 ]; then
+    rm -rf "${repo:?}/tests/fuzz/corpus/$name"
+    mv "$fresh" "$repo/tests/fuzz/corpus/$name"
+    echo "one.sh: tests/fuzz/corpus/$name: $(ls "$repo/tests/fuzz/corpus/$name" | wc -l) inputs"
+  fi
+  exit "$code"
+fi
 (cd "$work/bin" && "./$name" -max_len=65536 -max_total_time="$seconds" -timeout=10 -print_final_stats=1 "${dict[@]}" \
   "-artifact_prefix=$work/findings/$stamp-$name-" "$work/corpus/$name" "${seeds[@]}") || code=$?
 for f in "$work/findings/$stamp-$name-"*; do

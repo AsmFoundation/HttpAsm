@@ -1,0 +1,7 @@
+GET / HTTP/1.1
+P::
+t:a
+X:.
+Host:a
+X:
+

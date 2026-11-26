@@ -400,7 +400,15 @@ HTTP/2, the drivers, the client):
          `uri-host [ ":" port ]` with IP-literals held to IPv6's and IPvFuture's octets, and
          for CONNECT a port of 1 to 65535 (RFC 9110 9.3.6).
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
-       test once fixed. CI runs each fuzzer for 30 s;
+       test once fixed. CI runs each fuzzer for 30 s.
+     - **Replay:** `run.sh merge` minimizes each fuzzer's corpus into `tests/fuzz/corpus/<name>/`,
+       which is committed (2,940 inputs, 460 KB, on 2026-11-26). `replay.sh` builds each harness
+       with `replay.c` instead of libFuzzer and runs it on the seeds and the corpus, with every
+       check. `run-linux.sh` does this on every test run against the build's own objects, so
+       the fuzzers' findings stay deterministic tests. In the coverage run it does the same
+       against the Coverage objects, so what the fuzzers reached counts toward the gate.
+       Adding the replay exposed a bug in the test runner: `run_native`'s status was its last
+       command's, so on AVX-512 runners a failing tier or fallback program passed.
    - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,
      HTTP/2). Every difference in verdict or parsed fields is triaged against the RFC. Built
      2026-11-26, with the references pinned by SHA-256 in `tests/tools.sh` (nghttp2 1.71.0,
