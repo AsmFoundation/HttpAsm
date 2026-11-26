@@ -125,6 +125,12 @@ internal sealed unsafe class AsmClient : IDisposable
 /// </summary>
 internal sealed class CannedServer : IDisposable
 {
+    /// <summary>
+    /// Inside an answer, a pause: the octets before it are sent, then 100 ms pass before the
+    /// rest, so the client reads them apart (U+0001 never occurs in a canned answer otherwise).
+    /// </summary>
+    public const string Pause = "\u0001";
+
     /// <summary>The listener on 127.0.0.1.</summary>
     private readonly TcpListener listener = new(IPAddress.Loopback, 0);
 
@@ -138,6 +144,7 @@ internal sealed class CannedServer : IDisposable
     /// <param name="after">Octets sent 200 ms after the last answer, when no request is
     /// outstanding (null or empty: none): what a client must never take for a response.</param>
     /// <remarks>
+    /// An answer may hold <see cref="Pause"/>s: it is sent in pieces, 100 ms apart.
     /// The server runs on a thread of its own (LongRunning), not the thread pool: under load
     /// (the coverage run's instrumented build, tests in parallel) a pool task started after the
     /// test had ended and Dispose had stopped the listener, and its AcceptSocket then threw
@@ -168,16 +175,36 @@ internal sealed class CannedServer : IDisposable
             {
                 socket.NoDelay = true;                                  // each Send leaves at once
                 byte[] buffer = new byte[65536];
-                foreach (string answer in answers)
+                try
                 {
-                    ReadHead(socket, buffer);
-                    socket.Send(Encoding.Latin1.GetBytes(answer));
-                }
+                    foreach (string answer in answers)
+                    {
+                        ReadHead(socket, buffer);
+                        string[] pieces = answer.Split(Pause);
+                        for (int i = 0; i < pieces.Length; i++)
+                        {
+                            if (i > 0)
+                            {
+                                Thread.Sleep(100);                      // the client reads what came so far
+                            }
 
-                if (!string.IsNullOrEmpty(after))
+                            socket.Send(Encoding.Latin1.GetBytes(pieces[i]));
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(after))
+                    {
+                        Thread.Sleep(200);
+                        socket.Send(Encoding.Latin1.GetBytes(after));
+                    }
+                }
+                catch (SocketException)
                 {
-                    Thread.Sleep(200);
-                    socket.Send(Encoding.Latin1.GetBytes(after));
+                    // The client went away before the script's end (a test that failed, or one
+                    // whose client closes on purpose): nothing more to serve. Throwing here would
+                    // fault the task, and Dispose's wait would hide the test's own failure.
+                    Settled.Set();
+                    return;
                 }
 
                 if (!close)
@@ -279,6 +306,8 @@ public sealed class ClientTests
         Assert.Equal("GET /a  -", client.Send("GET", "/a").Text);
         Assert.Equal("POST /b hello 5", client.Send("POST", "/b", "hello").Text);
         Assert.Equal("POST /c  0", client.Send("POST", "/c").Text);           // a POST names its empty body
+        Assert.Equal("PUT /p  0", client.Send("PUT", "/p").Text);             // so do PUT and PATCH (RFC9110-8.6-5#1)
+        Assert.Equal("PATCH /q  0", client.Send("PATCH", "/q").Text);
         Assert.Equal("POST /g line\r\n 6", client.Send("POST", "/g", "line\r\n").Text);   // a final CRLF counts in the length
         ClientResult head = client.Send("HEAD", "/d");
         Assert.Equal(200, head.Status);
@@ -451,5 +480,173 @@ public sealed class ClientTests
         Assert.Equal("echo:hello kestrel", client.Send("POST", "/echo", "hello kestrel").Text);
 
         await app.StopAsync(ct);
+    }
+
+    /// <summary>
+    /// Answers that arrive in pieces are read across reads, whatever the framing: a body
+    /// delimited by the close, a chunk's data split between two reads (the second read is all
+    /// data, no framing), and a trailer section that comes after a pause. And a chunked body of
+    /// 300 KB with a trailer, longer than the client's first input buffer (16 KiB): the input
+    /// grows while the length is unknown, and the head's and the trailers' pointers follow it
+    /// when it moves.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-7.1-4", "RFC9112-7.1.2-3#2")]
+    public void ReadsAnswersThatArriveInPieces()
+    {
+        Platform.RequireLinuxX64();
+        string big = string.Concat(Enumerable.Range(0, 300).Select(i => new string((char)('a' + i % 26), 1000)));
+        string[] answers =
+        [
+            $"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n01234567{CannedServer.Pause}89abcdef\r\n0\r\n\r\n",
+            $"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n{CannedServer.Pause}X-Late: 1\r\n\r\n",
+            $"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{big.Length:x}\r\n{big}\r\n0\r\nX-Sum: 300\r\n\r\n",
+            $"HTTP/1.0 200 OK\r\nX-Kept: yes\r\n\r\nfirst{CannedServer.Pause} second",
+        ];
+        using var server = new CannedServer(answers, close: true);
+        using var client = new AsmClient(server.Port);
+
+        Assert.Equal("0123456789abcdef", client.Send("GET", "/").Text);
+        ClientResult late = client.Send("GET", "/");
+        Assert.Equal(("hello", "1"), (late.Text, Assert.Single(late.Trailers).Value));
+        ClientResult large = client.Send("GET", "/");
+        Assert.Equal(big, large.Text);
+        Assert.Equal("300", Assert.Single(large.Trailers).Value);
+        Assert.Equal("chunked", large.Field("Transfer-Encoding"));             // the head, re-parsed after the move
+        ClientResult closing = client.Send("GET", "/");
+        Assert.Equal(("first second", "yes"), (closing.Text, closing.Field("X-Kept")));
+        Assert.Equal(-107, client.Send("GET", "/").Result);
+    }
+
+    /// <summary>
+    /// A 2xx to CONNECT makes the connection a tunnel (RFC 9110 9.3.6): the answer is returned
+    /// with no body, its Content-Length ignored (RFC9110-9.3.6-12#2: what follows is the
+    /// tunnel's), and the connection is no longer the client's to use for HTTP (-ENOTCONN).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-9.3.6-12#2", "RFC9112-6.3-2.2")]
+    public void HandsOverATunnel()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new CannedServer(["HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\ntunnel octets"], close: false);
+        using var client = new AsmClient(server.Port);
+
+        ClientResult tunnel = client.Send("CONNECT", "example.com:443");
+
+        Assert.Equal((0, 200, ""), (tunnel.Result, tunnel.Status, tunnel.Text));
+        Assert.Equal(-107, client.Send("GET", "/").Result);
+    }
+
+    /// <summary>
+    /// A client that asked to close (HTTPASM_REQUEST_CLOSE) closes after the answer even when
+    /// the server's answer would keep the connection (RFC9112-9.6-5#2: it sends no further
+    /// request on it).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-9.6-5#2")]
+    public void ClosesAfterAskingToEvenWhenTheServerWouldKeepIt()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new CannedServer(["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"], close: false);
+        using var client = new AsmClient(server.Port);
+
+        Assert.Equal("ok", client.Send("GET", "/", "", 0x0080).Text);          // HTTPASM_REQUEST_CLOSE
+        Assert.Equal(-107, client.Send("GET", "/").Result);
+    }
+
+    /// <summary>
+    /// A request the writer refuses (a method with a space) is -HTTPASM_ERROR_METHOD with
+    /// nothing sent, and the connection stays usable; a head larger than the client's first
+    /// output buffer (4 KiB; fields of 8 KB here) is written whole, the buffer grown.
+    /// </summary>
+    [Fact]
+    public void RefusesWhatItCannotWriteAndGrowsForWhatItCan()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, x.Fields.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        using var client = new AsmClient(server.Port);
+
+        Assert.Equal(-(int)ParseError.Method, client.Send("G T", "/").Result);
+        (string, string)[] fields = [.. Enumerable.Range(0, 8).Select(i => ($"X-Large-{i}", new string('v', 1000)))];
+        Assert.Equal("9", client.Send("GET", "/", "", 0, fields).Text);         // Host and the eight
+    }
+
+    /// <summary>
+    /// A request larger than the socket takes at once is sent across several sendmsg calls:
+    /// an 8 MiB head (one field) to a server reading at most 64 KiB every 20 ms for its first 4
+    /// MiB, with a 500 ms timeout, so the first calls time out having sent part of the head and
+    /// the next one goes on from there; the server then reads the rest at full speed and answers. A server that reads nothing fails the
+    /// send with -ETIMEDOUT once the timeout passes with nothing sent.
+    /// </summary>
+    /// <remarks>
+    /// The listener's receive buffer is 64 KiB (accepted sockets inherit it): loopback
+    /// otherwise autotunes both ends' buffers to megabytes, enough to take most of the head
+    /// with the server reading nothing - no call would be cut short - and enough left in them
+    /// at the end that draining them outlasted the client's receive timeout.
+    /// </remarks>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task SendsWhatTheSocketTakesAndTimesOutOnWhatItWillNot()
+    {
+        Platform.RequireLinuxX64();
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Server.ReceiveBufferSize = 64 << 10;
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        long headLength = 0;
+        using var stalledDone = new ManualResetEventSlim();        // the silent connection's end
+        Task serving = Task.Factory.StartNew(() =>
+        {
+            using Socket slow = listener.AcceptSocket();
+            byte[] buffer = new byte[256 << 10];
+            var tail = new List<byte>();
+            while (true)
+            {
+                int n = slow.Receive(buffer);
+                if (n == 0)
+                {
+                    return;
+                }
+
+                Interlocked.Add(ref headLength, n);                     // read by the test's thread
+                tail.AddRange(buffer.AsSpan(0, n).ToArray());
+                if (tail.Count > 4)
+                {
+                    tail.RemoveRange(0, tail.Count - 4);
+                }
+
+                if (tail.SequenceEqual("\r\n\r\n"u8.ToArray()))
+                {
+                    slow.Send("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nsent"u8);
+                    using Socket silent = listener.AcceptSocket();     // the second client: never read
+                    stalledDone.Wait(TimeSpan.FromSeconds(10));        // open until its send has failed
+                    return;
+                }
+
+                // Slowly for the head's first 4 MiB (at most 64 KiB per 20 ms: the first send
+                // calls time out with part of it sent), then at full speed, so what the buffers
+                // hold at the end drains well within the client's receive timeout.
+                if (Interlocked.Read(ref headLength) < 4 << 20)
+                {
+                    Thread.Sleep(20);
+                }
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        using (var client = new AsmClient(port, timeoutMs: 500))
+        {
+            ClientResult huge = client.Send("GET", "/", "", 0, ("X-Huge", new string('h', 8 << 20)));
+            Assert.Equal((0, "sent"), (huge.Result, huge.Text));
+            Assert.True(Interlocked.Read(ref headLength) > 8 << 20);
+        }
+
+        using (var stalled = new AsmClient(port, timeoutMs: 300))
+        {
+            Assert.Equal(-110, stalled.Send("POST", "/", new byte[64 << 20]).Result);   // -ETIMEDOUT
+        }
+
+        stalledDone.Set();
+        listener.Stop();
+        await serving.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
     }
 }

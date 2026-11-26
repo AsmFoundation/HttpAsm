@@ -803,22 +803,14 @@ httpasm_client_send:
     mov     [rsp], rax
     call    httpasm_h1_parse_response
     add     rsp, 16
-    ; The trailers' pointers moved by the same distance.
-    mov     ecx, [r15 + httpasm_client_response.trailer_count]
-    test    ecx, ecx
-    jz      .reparsed
-    mov     rdx, [rbx + client.rbuf]
-    sub     rdx, [rsp + 16 + S_BASE]        ; the distance
-    mov     eax, [r15 + httpasm_client_response.head + httpasm_response_head.field_count]
-    shl     rax, 5
-    add     rax, [rbx + client.fields]
-.trailer_rebase:
-    add     [rax + httpasm_field.name], rdx
-    add     [rax + httpasm_field.value], rdx
-    add     rax, httpasm_field_size
-    dec     ecx
-    jnz     .trailer_rebase
-.reparsed:
+    ; The trailers need no such move: they are parsed last, into the input as it is at the end
+    ; (each retry after more octets arrived parses the section again from the current buffer,
+    ; .trailer_parse), so their records already point into it, and the head's re-parse leaves
+    ; them be (they follow the head's records). Moving them by the head's distance as well -
+    ; what this did until 2026-11-26 - pointed them outside the input whenever it moved during
+    ; the body: a chunked body past the first 16 KiB with a trailer handed the caller trailer
+    ; pointers into other memory, an out-of-bounds read for whoever read them
+    ; (ClientTests.ReadsAnswersThatArriveInPieces read "\0\0\0" for "300").
     add     rsp, 8
     pop     rcx
 .pointers_good:
