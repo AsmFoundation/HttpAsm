@@ -1361,24 +1361,44 @@ public sealed class ServerTests
     }
 
     /// <summary>
-    /// Three hundred connections at once on one worker, each with a request: all answered. On
-    /// io_uring one turn of the loop then wants more operations than the 256-entry submission
-    /// queue holds, so it submits the full queue and goes on filling it.
+    /// Three hundred connections on one worker, each with a request, all ready at once: the
+    /// requests are sent while a handler holds the worker (300 ms asleep in it), so when it
+    /// returns every one of them is waiting. On io_uring that turn of the loop wants more
+    /// operations than the 256-entry submission queue holds (a RECV each), so it submits the
+    /// full queue and goes on filling it. All are answered, each with its own target. (Sent
+    /// while the worker was free, as this test did before, they arrived over several turns, and
+    /// the queue never filled: the coverage report showed it, 2026-11-26.)
     /// </summary>
     [Fact]
     public void ServesThreeHundredConnectionsAtOnce()
     {
         Platform.RequireLinuxX64();
-        using var server = new TestServer(x => x.Respond(200, "ok"), workers: 1);
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/busy")
+            {
+                Thread.Sleep(300);                                  // the worker's thread: nothing else runs
+            }
+
+            x.Respond(200, x.Target);
+        }, workers: 1);
         var connections = Enumerable.Range(0, 300).Select(_ => new RawConnection(server.Port)).ToList();
         try
         {
-            foreach (RawConnection c in connections)
+            using var busy = new RawConnection(server.Port);
+            Thread.Sleep(200);                                      // every connection accepted and watched
+            busy.Send("GET /busy HTTP/1.1\r\nHost: t\r\n\r\n");
+            Thread.Sleep(50);                                       // the handler holds the worker
+            for (int i = 0; i < connections.Count; i++)
             {
-                c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+                connections[i].Send(CultureInfoInvariant($"GET /{i} HTTP/1.1\r\nHost: t\r\n\r\n"));
             }
 
-            Assert.All(connections, c => Assert.Equal("ok", c.ReadResponse().Text));
+            Assert.Equal("/busy", busy.ReadResponse().Text);
+            for (int i = 0; i < connections.Count; i++)
+            {
+                Assert.Equal(CultureInfoInvariant($"/{i}"), connections[i].ReadResponse().Text);
+            }
         }
         finally
         {
@@ -1387,9 +1407,43 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// A client that resets its connection while the handler is still working on its request:
+    /// the answer's send meets the reset (on io_uring, the SEND's completion carries the error)
+    /// and the connection closes; the server serves the next client.
+    /// </summary>
+    [Fact]
+    public void ServesOnWhenAPeerResetsBeforeItsAnswerIsSent()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/slow-handler")
+            {
+                Thread.Sleep(200);                                  // the reset arrives meanwhile
+            }
+
+            x.Respond(200, "answer");
+        }, workers: 1);
+        using (var gone = new RawConnection(server.Port))
+        {
+            gone.Send("GET /slow-handler HTTP/1.1\r\nHost: t\r\n\r\n");
+            Thread.Sleep(50);
+            gone.Abort();
+        }
+
+        Thread.Sleep(300);
+        using var next = new RawConnection(server.Port);
+        next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("answer", next.ReadResponse().Text);
+    }
+
+    /// <summary>
     /// A stop waits HA_STOP_GRACE_MS (5 s) for exchanges in flight; one its handler never
     /// answers is then forced closed, and the stop returns: the client sees its connection
-    /// closed, with no answer.
+    /// closed, with no answer. The exchange stays answerable all the same (its connection is
+    /// kept as a zombie, memory without a socket, until the answer): answered after the stop,
+    /// with no worker left to take it, the answer waits in the worker's queue, and destroying
+    /// the server frees it and the zombie (drain_queues).
     /// </summary>
     /// <returns>A task.</returns>
     [Fact]
@@ -1397,7 +1451,12 @@ public sealed class ServerTests
     {
         Platform.RequireLinuxX64();
         var ct = TestContext.Current.CancellationToken;
-        using var server = new TestServer(x => x.Defer(), workers: 1);
+        Exchange? held = null;
+        using var server = new TestServer(x =>                      // disposed last: frees the queued
+        {                                                           // answer and the zombie
+            held = x;
+            x.Defer();
+        }, workers: 1);
         using var c = new RawConnection(server.Port, timeoutMs: 15000);
         c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         Thread.Sleep(100);                                          // the handler has deferred it
@@ -1407,6 +1466,7 @@ public sealed class ServerTests
 
         Assert.InRange(clock.ElapsedMilliseconds, 4500, 10000);
         Assert.True(c.ServerClosed(1000));
+        Assert.Equal(0, held!.Respond(200, "after the stop"));       // queued for a worker that is gone
     }
 
     /// <summary>

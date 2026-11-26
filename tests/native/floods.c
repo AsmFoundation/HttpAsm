@@ -36,6 +36,14 @@
  *                      dynamic entry (each used to copy the entry)
  *   ping-unread        CVE-2019-9512 with a client that never reads: the heap must stay bounded
  *   settings-unread    CVE-2019-9515 likewise
+ *   refused-heads      RFC 9113 10.5: requests refused before any handler (417: an expectation
+ *                      the server cannot meet), each a head decoded and an answer for nothing
+ *                      (must end in ENHANCE_YOUR_CALM)
+ *   closed-stream-data RFC 9113 5.1: DATA on streams the client reset, each a stream error
+ *                      answered with RST_STREAM (likewise; plain GETs between keep the
+ *                      rapid-reset rule from ending it first)
+ *   oversized-uploads  RFC 9113 10.5: uploads past max_body (1,024 octets on this server),
+ *                      each refused 413 (likewise)
  *
  * The CPU figures are the fastest of FLOOD_RUNS runs (the host's noise only ever adds), and are
  * printed per KiB of flood. Exit status: 0 when every check held; 1 with the failures listed.
@@ -153,6 +161,9 @@ enum { END_STREAM = 1, ACK = 1, END_HEADERS = 4 };
 static const uint8_t head_get[] = { 0x82, 0x86, 0x84, 0x01, 0x01, 'a' };
 static const uint8_t head_post[] = { 0x83, 0x86, 0x84, 0x01, 0x01, 'a' };
 static const uint8_t head_big[] = { 0x82, 0x86, 0x04, 0x04, '/', 'b', 'i', 'g', 0x01, 0x01, 'a' };
+/* A GET with "expect: x" (a literal without indexing, new name): an expectation the server
+ * cannot meet, refused with 417 before any handler (RFC 9110 10.1.1). */
+static const uint8_t head_expect[] = { 0x82, 0x86, 0x84, 0x01, 0x01, 'a', 0x00, 0x06, 'e', 'x', 'p', 'e', 'c', 't', 0x01, 'x' };
 
 /* The closing PING's payload: its ACK says the server took everything before it. */
 static const uint8_t end_mark[8] = { 'F', 'L', 'O', 'O', 'D', 'E', 'N', 'D' };
@@ -524,6 +535,46 @@ static void make_hpack_blocks(bytes *b, uint8_t reference)
 }
 static void make_hpack_plain(bytes *b) { make_hpack_blocks(b, 0x82); }    /* :method GET, static */
 static void make_hpack_bomb(bytes *b) { make_hpack_blocks(b, 0xBE); }     /* dynamic entry 62 */
+static void make_refused_heads(bytes *b)
+{
+    /* Requests refused before any handler, each costing a decoded head and an answer (417 to
+     * an expectation; 431 and 413 are refused the same way), and moving nothing: a glitch each
+     * (h2_block_done's .refusal), so a stream of them must end in ENHANCE_YOUR_CALM. */
+    for (uint32_t i = 0; i < 20000; i++)
+        frame(b, HEADERS, END_HEADERS | END_STREAM, 3 + 2 * i, head_expect, sizeof head_expect);
+}
+static void make_closed_stream_data(bytes *b)
+{
+    /* DATA on a stream the client itself reset: a stream error STREAM_CLOSED the server must
+     * answer with RST_STREAM (RFC 9113 5.1), on a stream that frees no slot (it is not active
+     * any more): a glitch (h2_peer_stream_error). Only the first such frame is one: the
+     * server's RST_STREAM makes it a stream this side reset, whose later frames are in flight
+     * and ignored (RFC 9113 5.4.2), cheap as any frame. So each round uses a stream of its own:
+     * an upload opened and cancelled by the client, then one octet of DATA on it (an empty
+     * frame would be the empty-frames flood's glitch, counted before the stream is looked up).
+     * Two plain GETs a round keep the resets under one for every two streams opened, so the
+     * rapid-reset rule does not end it first: the glitches must. */
+    for (uint32_t i = 0; i < 12000; i++) {
+        uint32_t id = 1 + 6 * i;
+        frame(b, HEADERS, END_HEADERS | END_STREAM, id, head_get, sizeof head_get);
+        frame(b, HEADERS, END_HEADERS | END_STREAM, id + 2, head_get, sizeof head_get);
+        frame(b, HEADERS, END_HEADERS, id + 4, head_post, sizeof head_post);
+        u32_frame(b, RST_STREAM, id + 4, 8);                            /* CANCEL */
+        frame(b, DATA, 0, id + 4, "x", 1);
+    }
+}
+static void make_oversized_uploads(bytes *b)
+{
+    /* Uploads past the server's max_body (1,024 octets here): each refused 413 the moment its
+     * DATA goes past, a glitch each (h2_data's .too_large). Each ends its stream with that DATA,
+     * so none stays open to count against MAX_CONCURRENT_STREAMS. */
+    static uint8_t body[1025];
+    memset(body, 'u', sizeof body);
+    for (uint32_t i = 0; i < 12000; i++) {
+        frame(b, HEADERS, END_HEADERS, 3 + 2 * i, head_post, sizeof head_post);
+        frame(b, DATA, END_STREAM, 3 + 2 * i, body, sizeof body);
+    }
+}
 
 static const flood floods[] = {
     { "ping", "CVE-2019-9512", SERVED, 0, NULL, { 0 }, 0, NULL, make_ping },
@@ -543,6 +594,9 @@ static const flood floods[] = {
     { "empty-headers", "CVE-2019-9516", SERVED, 0, "hpack-plain", { 0 }, 0, NULL, make_empty_headers },
     { "ping-unread", "CVE-2019-9512", SERVED, 1, NULL, { 0 }, 0, NULL, make_ping },
     { "settings-unread", "CVE-2019-9515", SERVED, 1, NULL, { 0 }, 0, NULL, make_settings },
+    { "refused-heads", "RFC 9113 10.5", CALM, 0, NULL, { 0 }, 0, NULL, make_refused_heads },
+    { "closed-stream-data", "RFC 9113 5.1", CALM, 0, NULL, { 0 }, 0, NULL, make_closed_stream_data },
+    { "oversized-uploads", "RFC 9113 10.5", CALM, 0, NULL, { 0 }, 0, NULL, make_oversized_uploads },
 };
 #define FLOOD_COUNT ((int)(sizeof floods / sizeof floods[0]))
 
@@ -689,6 +743,7 @@ int main(int argc, char **argv)
     o.handler = handler;
     o.workers = 1;
     o.bind_address = htonl(INADDR_LOOPBACK);
+    o.max_body = 1024;          /* the oversized-uploads flood's limit; no other flood sends a body */
     const char *io = getenv("HTTPASM_TEST_IO");
     if (io != NULL && strcmp(io, "uring") == 0)
         o.flags = HTTPASM_SERVER_URING;

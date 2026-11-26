@@ -5,16 +5,26 @@
  *
  * The scenario: a server created and started (one worker by default, loopback), then on it:
  * an HTTP/1.1 request; a deferred one (answered from another thread); a chunked 40 KB upload
- * with a trailer, echoed (the input and the output grow); an HTTP/2 request; and an HTTP/2
+ * with a trailer, echoed (the input and the output grow); an HTTP/2 request; an HTTP/2
  * connection carrying a deferred request and an upload whose head continues in a CONTINUATION
- * frame, whose 20 KB body comes in two DATA frames and which ends with trailers; then the
- * httpasm client's own requests (a small answer and a 256 KiB one), the stop and the destroy.
+ * frame, whose 20 KB body comes in two DATA frames and which ends with trailers; and one asking
+ * for a 256 KiB answer past its stream's first window (the rest waits, copied, for the
+ * WINDOW_UPDATE that follows) and for an answer whose 64 KB head takes CONTINUATION frames;
+ * then the httpasm client's own requests (a small answer, a 256 KiB one, one whose 64 KB head
+ * outgrows the client's input, and one whose own 5 KB head outgrows its output), the stop and
+ * the destroy.
  *
  *   1. Allocation failures. This program defines malloc, calloc and realloc (they interpose on
  *      the C library's for the whole process, libhttpasm.so included) and counts the calls; the
  *      scenario runs once to count them, then once per allocation N in a child process where
  *      allocation N returns NULL. Every child must end by itself - the scenario succeeding, or
- *      an API call reporting the failure - never by a signal, and within 20 s.
+ *      an API call reporting the failure - never by a signal, and within 20 s. The calls are
+ *      counted per thread role: the scenario's own thread (the server's create, start, stop and
+ *      destroy, the client), and the others (the worker, the threads that answer deferred
+ *      requests). Each role's allocations come in one order every run; a count shared by both
+ *      raced (the worker accepts while the client still allocates), so the N-th allocation
+ *      named a different site from run to run and some were never failed (the client's third,
+ *      2026-11-26).
  *   2. System-call failures, lasting. For each system call the server and the client make, a
  *      child installs a seccomp filter that fails every call of it with an errno (EMFILE,
  *      ENOMEM, ENOBUFS, ...), then runs the scenario; again it must end by itself.
@@ -32,7 +42,10 @@
  *      descriptors, and 12 connections from another process. Accepting stops at the limit:
  *      the server must rest (its CPU over a second stays near zero, where a spinning worker
  *      uses the whole second), then take the waiting connections once descriptors free, and
- *      answer the request that waited in the backlog.
+ *      answer the request that waited in the backlog. And a stop that begins while the
+ *      listener rests: the stop closes the listener, the rest ends during the stop (a request
+ *      in progress holds it), and the resumed watch must not touch the closed listener; the
+ *      request is answered and the stop returns.
  *
  * Exit status: 0 when every child ended by itself and the exhaustion checks held; 1 with the
  * failing ones listed.
@@ -70,16 +83,29 @@ extern void *__libc_malloc(size_t);
 extern void *__libc_calloc(size_t, size_t);
 extern void *__libc_realloc(void *, size_t);
 
-static _Atomic long allocations;     /* every allocation so far */
-static long fail_at = -1;            /* the allocation that fails (1-based), -1: none */
+static _Atomic long allocations;     /* every allocation so far, both roles */
 
-/* fails: counts an allocation; whether this one is to fail (errno is then ENOMEM, as a real
- * allocator's failure leaves it: glibc's pthread_create asserts that it does). Atomic: the
- * scenario allocates on its worker, its own thread and the threads that answer deferred
- * requests at once, and a lost increment would make two allocations fail, or none. */
+/* main_thread: 1 on the thread that runs main and so the scenario (the server's create, start,
+ * stop and destroy, the client), 0 on every other (the worker, the threads answering deferred
+ * requests). A child inherits 1: fork copies only the calling thread, main's. */
+static _Thread_local int main_thread;
+
+/* Each role's allocations so far, and the one of them that fails (1-based; -1: none). The
+ * main thread's count is touched by that thread alone; the others' by several, atomically. */
+static long main_allocations;
+static long main_fail_at = -1;
+static _Atomic long other_allocations;
+static long other_fail_at = -1;
+
+/* fails: counts an allocation under its thread's role; whether this one is to fail (errno is
+ * then ENOMEM, as a real allocator's failure leaves it: glibc's pthread_create asserts that it
+ * does). The others' count is atomic: the worker and an answering thread may allocate at once,
+ * and a lost increment would make two allocations fail, or none. */
 static int fails(void)
 {
-    if (atomic_fetch_add(&allocations, 1) + 1 != fail_at)
+    atomic_fetch_add(&allocations, 1);
+    long n = main_thread ? ++main_allocations : atomic_fetch_add(&other_allocations, 1) + 1;
+    if (n != (main_thread ? main_fail_at : other_fail_at))
         return 0;
     errno = ENOMEM;
     return 1;
@@ -136,10 +162,15 @@ static int target_is(const httpasm_request *r, const char *path)
     return r->target_length == n && memcmp(r->target, path, n) == 0;
 }
 
-/* handler: "/echo" answers the body it got, "/big" big_body, "/defer" and "/defer-big" defer
- * and answer from a thread of their own, small or big_body (inline when no thread can be made:
- * under injection pthread_create fails, and a deferred exchange nobody answers would hold its
- * connection until the stop); anything else "ok". */
+/* /large-head's field value: 64,000 octets, a head past the client's 16 KiB input and the
+ * connection's 16 KiB output (HTTP/1.1), and past one HTTP/2 frame (CONTINUATION follows). */
+static uint8_t large_value[64000];
+
+/* handler: "/echo" answers the body it got, "/big" big_body, "/large-head" "ok" under a 64 KB
+ * field, "/defer" and "/defer-big" defer and answer from a thread of their own, small or
+ * big_body (inline when no thread can be made: under injection pthread_create fails, and a
+ * deferred exchange nobody answers would hold its connection until the stop); anything else
+ * "ok". */
 static void handler(void *context, httpasm_exchange *exchange)
 {
     (void)context;
@@ -151,6 +182,9 @@ static void handler(void *context, httpasm_exchange *exchange)
         httpasm_exchange_respond(exchange, 200, NULL, 0, body, length);
     } else if (target_is(r, "/big")) {
         httpasm_exchange_respond(exchange, 200, NULL, 0, big_body, sizeof big_body);
+    } else if (target_is(r, "/large-head")) {
+        static const httpasm_field large = { (const uint8_t *)"x-large", large_value, 7, sizeof large_value, 0, 0, 0 };
+        httpasm_exchange_respond(exchange, 200, &large, 1, (const uint8_t *)"ok", 2);
     } else if (later != NULL && httpasm_exchange_defer(exchange) == 0) {
         pthread_t t;
         if (pthread_create(&t, NULL, later, exchange) == 0)
@@ -203,6 +237,31 @@ static char too_large[101 << 10];           /* a body past max_body: 413, then t
 static size_t too_large_length;
 static unsigned char h2_more[21 << 10];
 static size_t h2_more_length;
+static unsigned char h2_window[256];
+static size_t h2_window_length;
+
+/* put_frame_into: appends an HTTP/2 frame (RFC 9113 4.1) to a message being built.
+ *   message, length  the message and its length so far (advanced past the frame);
+ *   type, flags, stream  the frame header's fields; payload, size  its payload (NULL: size
+ *   octets of 'y'). The callers size the messages for their frames. */
+static void put_frame_into(unsigned char *message, size_t *length, int type, int flags, int stream, const void *payload, size_t size)
+{
+    unsigned char *at = message + *length;
+    at[0] = (unsigned char)(size >> 16);
+    at[1] = (unsigned char)(size >> 8);
+    at[2] = (unsigned char)size;
+    at[3] = (unsigned char)type;
+    at[4] = (unsigned char)flags;
+    at[5] = 0;
+    at[6] = 0;
+    at[7] = 0;
+    at[8] = (unsigned char)stream;
+    if (payload != NULL)
+        memcpy(at + 9, payload, size);
+    else
+        memset(at + 9, 'y', size);
+    *length += 9 + size;
+}
 
 /* put_frame: appends an HTTP/2 frame (RFC 9113 4.1) to h2_more.
  *   type, flags, stream  its header's fields; payload, length  its payload (NULL: length
@@ -272,6 +331,24 @@ static void build_messages(void)
     put_frame(0, 0, 3, NULL, 3616);                                                 /* DATA */
     static const unsigned char trailers[] = { 0x00, 3, 'x', '-', 't', 1, '1' };
     put_frame(1, 0x05, 3, trailers, sizeof trailers);                               /* HEADERS: trailers, END_STREAM */
+
+    /* The second HTTP/2 connection: the connection's window raised by 1 MiB; stream 1 GET /big,
+     * whose 256 KiB answer outruns the stream's first window (65,535: the server sends that,
+     * then keeps a copy of the rest); stream 3 GET /large-head, whose 64 KB answer head takes
+     * HEADERS and CONTINUATION frames, each growing the output; then stream 1's window raised
+     * by 1 MiB, which lets the rest of /big go. */
+    for (size_t i = 0; i < sizeof large_value; i++)
+        large_value[i] = 'l';
+    static const unsigned char raise[] = { 0x00, 0x10, 0x00, 0x00 };              /* 1 MiB */
+    memcpy(h2_window, preface, sizeof preface - 1);
+    h2_window_length = sizeof preface - 1;
+    put_frame_into(h2_window, &h2_window_length, 4, 0, 0, "", 0);                   /* SETTINGS */
+    put_frame_into(h2_window, &h2_window_length, 8, 0, 0, raise, sizeof raise);     /* WINDOW_UPDATE, the connection */
+    static const unsigned char big[] = { 0x82, 0x86, 0x04, 4, '/', 'b', 'i', 'g', 0x41, 1, 'a' };
+    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 1, big, sizeof big);      /* HEADERS, END_STREAM */
+    static const unsigned char large[] = { 0x82, 0x86, 0x04, 11, '/', 'l', 'a', 'r', 'g', 'e', '-', 'h', 'e', 'a', 'd', 0xbe };
+    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 3, large, sizeof large);  /* HEADERS, END_STREAM */
+    put_frame_into(h2_window, &h2_window_length, 8, 0, 1, raise, sizeof raise);     /* WINDOW_UPDATE, stream 1 */
 }
 
 /* client_get: one GET by the httpasm client. Returns httpasm_client_send's result. */
@@ -285,6 +362,28 @@ static int client_get(httpasm_client *c, const char *target)
     q.target_length = (uint32_t)strlen(target);
     q.authority = (const uint8_t *)"a";
     q.authority_length = 1;
+    httpasm_client_response r;
+    return httpasm_client_send(c, &q, NULL, 0, &r);
+}
+
+/* client_get_padded: a GET of "/" whose head carries a 5,000-octet field: past the client's
+ * 4 KiB head buffer, which grows to write it. Returns httpasm_client_send's result. */
+static int client_get_padded(httpasm_client *c)
+{
+    static uint8_t pad[5000];
+    memset(pad, 'p', sizeof pad);
+    static const uint8_t name[] = "x-pad";
+    httpasm_field field = { name, pad, sizeof name - 1, sizeof pad, 0, 0, 0 };
+    httpasm_request q;
+    memset(&q, 0, sizeof q);
+    q.method = (const uint8_t *)"GET";
+    q.method_length = 3;
+    q.target = (const uint8_t *)"/";
+    q.target_length = 1;
+    q.authority = (const uint8_t *)"a";
+    q.authority_length = 1;
+    q.fields = &field;
+    q.field_count = 1;
     httpasm_client_response r;
     return httpasm_client_send(c, &q, NULL, 0, &r);
 }
@@ -329,12 +428,13 @@ static int scenario(void)
     exchange_raw(port, chunked_upload, chunked_upload_length);
     exchange_raw(port, h2, sizeof h2 - 1);
     exchange_raw(port, h2_more, h2_more_length);
+    exchange_raw(port, h2_window, h2_window_length);
     int result = 0;
     httpasm_client *c = httpasm_client_connect(htonl(INADDR_LOOPBACK), port, 3000, &error);
     if (c == NULL) {
         result = 3;
     } else {
-        if (client_get(c, "/") != 0 || client_get(c, "/big") != 0)
+        if (client_get(c, "/") != 0 || client_get(c, "/big") != 0 || client_get(c, "/large-head") != 0 || client_get_padded(c) != 0)
             result = 4;
         httpasm_client_close(c);
     }
@@ -652,6 +752,84 @@ done:
     return failed;
 }
 
+/* stop_while_resting: a stop that begins while the listener rests (see this file's header).
+ * The server's process takes EXHAUST_ROOM of the connections, the first with a request head
+ * in progress (so the stop waits for it: it is not idle), and rests; the stop then begins
+ * ("s": exhaustion_server stops on any command but 'c'), closing the listener; the rest's end
+ * (HA_ACCEPT_PAUSE_MS, 100 ms) comes during the stop and must leave the closed listener alone;
+ * the head is finished 300 ms in, and its request is answered; then the stop returns and the
+ * process exits 0. Returns 0 when it held, else 1 with the failure printed. */
+static int stop_while_resting(uint16_t flags, const char *backend)
+{
+    int down[2], up[2];
+    if (pipe(down) != 0 || pipe(up) != 0)
+        return fprintf(stderr, "faults: stop while resting (%s): no pipe\n", backend), 1;
+    fflush(NULL);                               /* the child ends with exit(): see in_child */
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(30);
+        close(down[1]);
+        close(up[0]);
+        exhaustion_server(down[0], up[1], flags, 0);
+    }
+    close(down[0]);
+    close(up[1]);
+    int failed = 0;
+    int fds[EXHAUST_CONNECTIONS];
+    int made = 0;
+    uint16_t port = 0;
+    if (pid < 0 || read(up[0], &port, sizeof port) != sizeof port) {
+        fprintf(stderr, "faults: stop while resting (%s): the server did not start\n", backend);
+        failed = 1;
+        goto done;
+    }
+    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    for (; made < EXHAUST_CONNECTIONS; made++) {
+        fds[made] = socket(AF_INET, SOCK_STREAM, 0);
+        if (fds[made] < 0 || connect(fds[made], (struct sockaddr *)&to, sizeof to) != 0) {
+            fprintf(stderr, "faults: stop while resting (%s): connection %d failed: %s\n", backend, made, strerror(errno));
+            if (fds[made] >= 0)
+                close(fds[made]);
+            failed = 1;
+            goto done;
+        }
+    }
+    /* The first connection is among those accepted (the backlog is taken in order). */
+    static const char start[] = "GET / HTTP/1.1\r\nHo", rest[] = "st: a\r\n\r\n";
+    if (send(fds[0], start, sizeof start - 1, MSG_NOSIGNAL) != (ssize_t)(sizeof start - 1)) {
+        fprintf(stderr, "faults: stop while resting (%s): the head was not sent\n", backend);
+        failed = 1;
+        goto done;
+    }
+    usleep(200000);                         /* accepted, the head read, and resting since EMFILE */
+    if (write(down[1], "s", 1) != 1) {
+        fprintf(stderr, "faults: stop while resting (%s): the stop was not asked for\n", backend);
+        failed = 1;
+        goto done;
+    }
+    usleep(300000);                         /* the rest ends during the stop */
+    char reply[64] = { 0 };
+    struct pollfd p = { .fd = fds[0], .events = POLLIN };
+    if (send(fds[0], rest, sizeof rest - 1, MSG_NOSIGNAL) != (ssize_t)(sizeof rest - 1) || poll(&p, 1, 3000) != 1
+        || recv(fds[0], reply, sizeof reply - 1, 0) < 12 || memcmp(reply, "HTTP/1.1 200", 12) != 0) {
+        fprintf(stderr, "faults: stop while resting (%s): the request in progress was not answered during the stop\n", backend);
+        failed = 1;
+    }
+    printf("faults: stop while resting (%s): the listener closed and the rest ended during the stop; the request in "
+           "progress was answered\n", backend);
+done:
+    for (int i = 0; i < made; i++)
+        close(fds[i]);
+    close(down[1]);
+    int status = 0;
+    if (pid > 0 && (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)) {
+        fprintf(stderr, "faults: stop while resting (%s): the server's process ended badly (status 0x%x)\n", backend, status);
+        failed = 1;
+    }
+    close(up[0]);
+    return failed;
+}
+
 static void set_syscall(long packed)
 {
     if (fail_syscall((int)(packed >> 16), (int)(packed & 0xFFFF)) != 0)
@@ -809,11 +987,18 @@ static int sweep(const struct sweep_entry *entry, long *runs)
     return failed;
 }
 
-/* set_fail_index: a failing allocation run's setup in the child: the (i + 1)-th allocation of
- * its scenario fails (the child's count, at its fork, is the parent's). */
-static void set_fail_index(long i)
+/* set_main_fail_index: a failing allocation run's setup in the child: the (i + 1)-th allocation
+ * its scenario makes on its own thread fails (the child's count, at its fork, is the parent's). */
+static void set_main_fail_index(long i)
 {
-    fail_at = atomic_load(&allocations) + i + 1;
+    main_fail_at = main_allocations + i + 1;
+}
+
+/* set_other_fail_index: as set_main_fail_index, for the (i + 1)-th allocation of the other
+ * threads (the worker, the answering threads). */
+static void set_other_fail_index(long i)
+{
+    other_fail_at = atomic_load(&other_allocations) + i + 1;
 }
 
 /* configure_nothing: the allocation runs need no state set before their fork. */
@@ -822,41 +1007,62 @@ static void configure_nothing(long i)
     (void)i;
 }
 
-/* The allocation runs' count, for report_allocation. */
-static long allocation_count;
+/* Each role's allocation runs, for the reports. */
+static long main_allocation_count;
+static long other_allocation_count;
 
-/* report_allocation: prints failing allocation run i, which did not end by itself. */
-static void report_allocation(long i, const char *how)
+/* report_main_allocation: prints failing allocation run i of the scenario's own thread, which
+ * did not end by itself. */
+static void report_main_allocation(long i, const char *how)
 {
-    fprintf(stderr, "faults: allocation %ld of %ld failing: %s\n", i + 1, allocation_count, how);
+    fprintf(stderr, "faults: allocation %ld of %ld on the scenario's thread failing: %s\n", i + 1, main_allocation_count, how);
+}
+
+/* report_other_allocation: as report_main_allocation, for the other threads. */
+static void report_other_allocation(long i, const char *how)
+{
+    fprintf(stderr, "faults: allocation %ld of %ld on the other threads failing: %s\n", i + 1, other_allocation_count, how);
 }
 
 /* main: counts the scenario's allocations, fails each, then each system call for good, then
  * each call of each system call in turn, then exhausts the descriptors.
- * "faults alloc N" runs the scenario once in this process with allocation N failing (no
- * child): for a debugger, when a child ended by a signal. */
+ * "faults alloc-main N" and "faults alloc-other N" run the scenario once in this process with
+ * the N-th allocation of that role failing (no child): for a debugger, when a child ended by a
+ * signal. */
 int main(int argc, char **argv)
 {
     int failures = 0;
     char how[128];
+    main_thread = 1;
     build_messages();
-    if (argc == 3 && strcmp(argv[1], "alloc") == 0) {
-        fail_at = atol(argv[2]);
+    if (argc == 3 && (strcmp(argv[1], "alloc-main") == 0 || strcmp(argv[1], "alloc-other") == 0)) {
+        long n = atol(argv[2]);
+        if (argv[1][6] == 'm')
+            main_fail_at = n;
+        else
+            other_fail_at = n;
         int r = scenario();
-        printf("faults: the scenario with allocation %ld failing returned %d\n", fail_at, r);
+        printf("faults: the scenario with allocation %ld (%s) failing returned %d\n", n, argv[1], r);
         return 0;
     }
     /* The count, in a child too: the parent's own allocations stay out of it. */
-    long before = allocations;
+    long before = allocations, main_before = main_allocations, other_before = atomic_load(&other_allocations);
     int r = scenario();
     long count = allocations - before;
-    printf("faults: the scenario runs whole (%d) with %ld allocations\n", r, count);
+    long main_count = main_allocations - main_before, other_count = atomic_load(&other_allocations) - other_before;
+    printf("faults: the scenario runs whole (%d) with %ld allocations, %ld on its own thread and %ld on the others\n", r, count,
+           main_count, other_count);
     if (r != 0)
         return 1;
-    /* Eight more than counted: the threads' order moves some allocations between runs. */
-    allocation_count = count + 8;
-    failures += run_parallel(allocation_count, configure_nothing, set_fail_index, report_allocation);
-    printf("faults: each of %ld allocations failed in turn: %d children did not end by themselves\n", allocation_count, failures);
+    /* A margin past each count: the scenario's own thread allocates in one order every run (two
+     * more is plenty); the others' count can move by a few (a thread made or not, a buffer
+     * grown in one step or two as the socket happens to take the octets): eight more. */
+    main_allocation_count = main_count + 2;
+    other_allocation_count = other_count + 8;
+    failures += run_parallel(main_allocation_count, configure_nothing, set_main_fail_index, report_main_allocation);
+    failures += run_parallel(other_allocation_count, configure_nothing, set_other_fail_index, report_other_allocation);
+    printf("faults: each of %ld allocations of the scenario's thread and %ld of the others failed in turn: %d children did not "
+           "end by themselves\n", main_allocation_count, other_allocation_count, failures);
 
     static const struct { int nr; int err; const char *name; } calls[] = {
         { SYS_socket, EMFILE, "socket EMFILE" },         { SYS_bind, EADDRINUSE, "bind EADDRINUSE" },
@@ -942,6 +1148,7 @@ int main(int argc, char **argv)
            outcomes[0], outcomes[1], outcomes[2], outcomes[3], outcomes[4], outcomes[100], child_cpu_most, CHILD_CPU_LIMIT);
 
     int exhausted = exhaustion(0, "epoll", 0) + exhaustion(HTTPASM_SERVER_URING, "io_uring", 0)
-                    + exhaustion(0, "epoll, 50 ms idle", 50) + exhaustion(HTTPASM_SERVER_URING, "io_uring, 50 ms idle", 50);
+                    + exhaustion(0, "epoll, 50 ms idle", 50) + exhaustion(HTTPASM_SERVER_URING, "io_uring, 50 ms idle", 50)
+                    + stop_while_resting(0, "epoll") + stop_while_resting(HTTPASM_SERVER_URING, "io_uring");
     return failures + syscall_failures + sweep_failures + exhausted == 0 ? 0 : 1;
 }
