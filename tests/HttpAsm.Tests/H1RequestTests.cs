@@ -511,7 +511,14 @@ public sealed class H1RequestTests
         Assert.Equal(ParseError.ContentLength, H1Parsing.Parse($"POST / HTTP/1.1\r\n{Host}Content-Length: 5, 6\r\n\r\n").Error);
     }
 
-    /// <summary>Transfer-Encoding: chunked as the final coding, once, in HTTP/1.1, without Content-Length.</summary>
+    /// <summary>
+    /// Transfer-Encoding: chunked as the final coding, once, in HTTP/1.1, without Content-Length.
+    /// Each coding's token must end its element (OWS, then ",", ";" or the end): "chunked x"
+    /// and "chunked" with an obs-text octet stuck to it name no coding this side knows, and are
+    /// refused. tests/fuzz/h1_request_diff found "chunked\xD8" read as chunked where llhttp
+    /// reads another coding (2026-11-26): two parties that disagree on chunked frame the body
+    /// differently.
+    /// </summary>
     /// <param name="fields">The framing field lines.</param>
     /// <param name="version">The HTTP-version.</param>
     /// <param name="expected">The negative status, or 1 for chunked.</param>
@@ -532,6 +539,12 @@ public sealed class H1RequestTests
     [InlineData("Transfer-Encoding: chunkedx\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
     [InlineData("Transfer-Encoding: chunked;x=1\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
     [InlineData("Transfer-Encoding: gzip;q=1, chunked\r\n", "HTTP/1.1", -501, ParseError.TeUnknown)]
+    [InlineData("Transfer-Encoding: chunkedØ\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
+    [InlineData("Transfer-Encoding: chunked x\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
+    [InlineData("Transfer-Encoding: chunked /\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
+    [InlineData("Transfer-Encoding: gzip x, chunked\r\n", "HTTP/1.1", -400, ParseError.TeNotChunked)]
+    [InlineData("Transfer-Encoding: chunked \t\r\n", "HTTP/1.1", 1, ParseError.None)]
+    [InlineData("Transfer-Encoding: gzip ;q=1 , chunked\r\n", "HTTP/1.1", -501, ParseError.TeUnknown)]
     [Requirement("RFC9112-6.1-2", "RFC9112-6.1-4#2", "RFC9112-6.1-11", "RFC9112-6.1-15#1", "RFC9112-6.1-15#2", "RFC9112-6.1-16", "RFC9112-6.3-2.4.3", "RFC9110-5.6.1.2-1#1",
         "RFC9110-5.6.1.2-1#2", "RFC9112-7.1-6", "RFC9112-7.2-3")]
     public void JudgesTransferEncoding(string fields, string version, int expected, ParseError error)

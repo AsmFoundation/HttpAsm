@@ -86,7 +86,10 @@ tests/fuzz/run.sh 60                               # each fuzzer for 60 s (clang
 coverage instrument's markers go into libFuzzer's extra counters, and the fuzzer steers by the
 assembly's own blocks and branch edges. Every input runs at every CPU tier against a guard page,
 and each fuzzer checks the parser's invariants: the result's documented forms, pointers inside
-the input, and the same result whether the input arrives whole or in two reads.
+the input, and the same result whether the input arrives whole or in reads. The differential
+fuzzers compare HttpAsm with nghttp2's HPACK decoder, and with llhttp and picohttpparser for
+HTTP/1.1 requests, all pinned by `tests/tools.sh`. Every difference between them is either a bug
+or listed with its RFC reason in `tests/fuzz/*.triage`.
 
 `tests/run-linux.sh` fetches h2spec and Intel SDE (each pinned by SHA-256), then:
 - **runs the .NET suite at every CPU tier this machine has** (`HTTPASM_CPU=v1`, `v2`, `v3`,

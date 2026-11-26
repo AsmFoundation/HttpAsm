@@ -281,6 +281,23 @@ ha_h1_fields:
     or      dword [r12 + h1ctx.seen], HA_SEEN_BAD_CODING
     jmp     .next_line
 .te_named:
+    ; The token must end its element: OWS, then the value's end, "," or ";" (RFC 9112 6.1:
+    ; transfer-coding = token *( OWS ";" OWS transfer-parameter )). Anything else after it,
+    ; as in "chunked x" or "chunked" with an obs-text octet stuck to it, makes the coding one
+    ; this side cannot name: refused like any malformed coding. Skipping to the next comma, as
+    ; this once did, read "chunked\xD8" as chunked where llhttp reads another coding, and two
+    ; parties that disagree on chunked frame the body differently (tests/fuzz/h1_request_diff,
+    ; 2026-11-26). rdi is free here; rax keeps the token's length.
+    lea     rdi, [r15 + rax]
+    SKIP_OWS rdi, r14
+    cmp     rdi, r14
+    jae     .te_delimited
+    cmp     byte [rdi], ','
+    je      .te_delimited
+    cmp     byte [rdi], ';'
+    je      .te_delimited
+    or      dword [r12 + h1ctx.seen], HA_SEEN_BAD_CODING
+.te_delimited:
     test    dword [r12 + h1ctx.seen], HA_SEEN_CHUNKED
     jz      .te_which
     or      dword [r12 + h1ctx.seen], HA_SEEN_AFTER_CHUNKED     ; chunked was not the last

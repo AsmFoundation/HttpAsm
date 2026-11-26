@@ -4,11 +4,14 @@
 # coverage-guided fuzzing of every parser).
 #
 #   1. On the host: the Fuzz configuration (Directory.Build.props), whose objects carry the
-#      coverage markers in libFuzzer's __libfuzzer_extra_counters section.
-#   2. On Linux (natively, or in WSL from Windows): each tests/fuzz/<name>.c is compiled by clang
-#      with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer (for the C harness), and
-#      linked with the core's objects and libhttpasm.so's cpu_abi.o (the tiers and their
-#      constructor); then run for SECONDS (default 60) on its corpus.
+#      coverage markers in libFuzzer's __libfuzzer_extra_counters section; and tests/tools.sh,
+#      which fetches the differential fuzzers' pinned references (nghttp2, llhttp,
+#      picohttpparser).
+#   2. On Linux (natively, or in WSL from Windows), per fuzzer, tests/fuzz/one.sh: each
+#      tests/fuzz/<name>.c is compiled by clang with libFuzzer, AddressSanitizer and
+#      UndefinedBehaviorSanitizer (for the C harness and the references), and linked with the
+#      core's objects, libhttpasm.so's cpu_abi.o (the tiers and their constructor) and its
+#      references; then run for SECONDS (default 60) on its corpus.
 #
 # Usage: tests/fuzz/run.sh [seconds per fuzzer] [fuzzer names...]   (default: 60, every fuzzer)
 #        HTTPASM_RUNNER=wsl|native as for tests/run-linux.sh.
@@ -48,6 +51,7 @@ export HTTPASM_COVERAGE_AR="$(native_path "$toolchain/llvm-ar$exe")"
 for d in src/HttpAsm.Core src/HttpAsm; do rm -rf "${here:?}/$d/obj/Fuzz" "${here:?}/$d/bin/Fuzz"; done
 echo "run.sh: building the Fuzz configuration" >&2
 dotnet build "$here/src/HttpAsm/HttpAsm.asmproj" -c Fuzz -nologo -v q
+bash "$here/tests/tools.sh" >/dev/null
 
 # lpath PATH: the path as the Linux side sees it (K:/source/... is /mnt/k/source/... in WSL).
 lpath() {
@@ -74,31 +78,13 @@ stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 status=0
 for name in "${fuzzers[@]}"; do
   echo "run.sh: $name, $seconds s" >&2
-  # The objects: every core object, and cpu_abi.o (httpasm_cpu_limit and the constructor that
-  # applies HTTPASM_CPU). They are freestanding or libc code, linked straight into the fuzzer.
-  # -timeout=10: a parser call takes microseconds, so an input that runs 10 s is a hang (a loop
-  # that never ends), reported like a crash. A finding's input goes to findings/ under this run's
-  # time stamp, and only this run's are printed, so older ones never pose as new. set +e comes
-  # before the final exit: WSL's shell is a login shell (bash -l), whose exit runs
-  # ~/.bash_logout, and Ubuntu's ends in a failing test ([ -x /usr/bin/clear_console ]); under
-  # set -e that failure replaces the status, so "exit 0" ended with 1 and "exit 3" with 1
-  # (measured, Ubuntu 24.04's bash 5.2).
-  on_linux "set -e; w=$work; mkdir -p \$w/corpus/$name \$w/bin \$w/findings; cd '$repo'
-    core=\$(find src/HttpAsm.Core/obj/Fuzz -name '*.o' | sort)
-    lib=\$(find src/HttpAsm/obj/Fuzz -name 'cpu_abi.o')
-    clang -g -O1 -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -fsanitize=fuzzer,address,undefined \
-      -Wl,-z,noexecstack -I src/HttpAsm/include tests/fuzz/$name.c \$core \$lib -o \$w/bin/$name
-    seeds='$repo'/tests/fuzz/seeds/$name; [ -d \$seeds ] || seeds=
-    dict='$repo'/tests/fuzz/$name.dict; if [ -f \$dict ]; then dict=-dict=\$dict; else dict=; fi
-    code=0
-    cd \$w/bin && ./$name -max_len=65536 -max_total_time=$seconds -timeout=10 -print_final_stats=1 \$dict \
-      -artifact_prefix=\$w/findings/$stamp-$name- \$w/corpus/$name \$seeds || code=\$?
-    for f in \$w/findings/$stamp-$name-*; do
-      if [ -f \$f ]; then
-        echo 'run.sh: finding' \$f, \$(stat -c %s \$f) 'octets, in base64:'
-        base64 -w 0 \$f; echo
-      fi
-    done
-    set +e; exit \$code" || { code=$?; [ "$status" -ne 0 ] || status=$code; }
+  # one.sh builds and runs it (its header says how). A finding's input goes to findings/ under
+  # this run's time stamp, and only this run's are printed, so older ones never pose as new.
+  # The command is one.sh alone, with no set -e around it: WSL's shell is a login shell
+  # (bash -l), whose exit runs ~/.bash_logout, and Ubuntu's ends in a failing test
+  # ([ -x /usr/bin/clear_console ]); under set -e that failure replaced the status, so "exit 0"
+  # ended with 1 and "exit 3" with 1 (measured, Ubuntu 24.04's bash 5.2). Without set -e the
+  # login shell ends with one.sh's own status.
+  on_linux "bash '$repo/tests/fuzz/one.sh' $work $name $seconds $stamp" || { code=$?; [ "$status" -ne 0 ] || status=$code; }
 done
 exit "$status"

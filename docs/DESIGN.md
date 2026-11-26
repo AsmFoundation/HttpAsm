@@ -395,7 +395,22 @@ HTTP/2, the drivers, the client):
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
        test once fixed. CI runs each fuzzer for 30 s;
    - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,
-     HTTP/2). Every difference in verdict or parsed fields is triaged against the RFC;
+     HTTP/2). Every difference in verdict or parsed fields is triaged against the RFC. Built
+     2026-11-26, with the references pinned by SHA-256 in `tests/tools.sh` (nghttp2 1.71.0,
+     llhttp 9.4.4, picohttpparser dd573d8) and compiled into the fuzzers only (`one.sh`):
+     - `hpack_nghttp2`: block sequences through HttpAsm's decoder and nghttp2's inflater. Same
+       verdict, same fields and never-indexed marks, same table size after every block.
+       Limits under 4096 are left out on purpose: HttpAsm's decoder then starts at the limit,
+       nghttp2's at 4096 waiting for a size update. 1.34 million inputs, no difference;
+     - `h1_request_diff`: request heads through HttpAsm, llhttp (strict) and picohttpparser.
+       Where two accept, everything both report must agree: head length, method, target,
+       version, fields, and llhttp's framing. Where one refuses what the other accepts, the
+       class must be listed in `h1_request_diff.triage` with its RFC reason. 36 classes
+       triaged from a 19-million-input survey (`HTTPASM_FUZZ_SURVEY`): HTTP/0.9 lines llhttp
+       takes, bare LF, Host and framing rules the references leave to the application, and
+       others. It found one real difference: `Transfer-Encoding: chunked\xD8` (an obs-text
+       octet after the token, or `chunked x`) was read as chunked, where llhttp reads another
+       coding. A coding's token must now end its element (OWS, then `,`, `;` or the end).
    - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per
      call and bytes per cycle, paired A/B with an A/A control, against picohttpparser, llhttp
      and nghttp2;

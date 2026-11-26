@@ -215,6 +215,8 @@ public sealed class H1MessageTests
     [InlineData("HTTP/1.1 300 Multiple Choices\r\nContent-Length: 5\r\n\r\n", "CONNECT", 0x21u)]
     [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", "GET", 0x22u)]
     [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", "GET", 0x04u)]
+    [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked x\r\n\r\n", "GET", 0x04u)]
+    [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunkedØ\r\n\r\n", "GET", 0x04u)]
     [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", "GET", 0x21u)]
     [InlineData("HTTP/1.1 200 OK\r\n\r\n", "GET", 0x04u)]
     [InlineData("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 1\r\n\r\n", "GET", 0x01u)]

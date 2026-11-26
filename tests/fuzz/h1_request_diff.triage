@@ -1,0 +1,57 @@
+# h1_request_diff.triage - the verdict differences tests/fuzz/h1_request_diff.c allows, each
+# triaged against the RFCs (docs/DESIGN.md phase H step 2: "every difference in verdict ... is
+# triaged against the RFC"). One line per class: "<class> | <reason>". The fuzzer aborts on any
+# class not listed here, so a new difference is always looked at before it is accepted.
+#
+# The classes come from a survey campaign (HTTPASM_FUZZ_SURVEY): 19.1 million inputs on
+# 2026-11-26 against llhttp 9.4.4 (strict: no lenient flag) and picohttpparser dd573d8. Each
+# reason was checked on the class's example input. Where both parsers accept a head, nothing
+# is allowed to differ (head length, method, target, version, fields, framing); those
+# comparisons are not listed because no difference there is ever right.
+#
+# "httpasm=X ref=accepted" means HttpAsm refuses with HTTPASM_ERROR_X what the reference takes;
+# "httpasm=accepted ref=X" the opposite.
+
+# ---- HttpAsm refuses, llhttp accepts
+llhttp: httpasm=BARE_LF ref=accepted | llhttp reads a request-line without HTTP-version as HTTP/0.9 ("CONNECT x" LF): RFC 9112 3 requires HTTP-version and CRLF, and HttpAsm refuses bare LF line ends, which RFC 9112 2.2 only lets a recipient accept (MAY) and which smuggling plays on
+llhttp: httpasm=METHOD ref=accepted | llhttp skips stray CRs before the request-line ("\r\r\n") and reads a request-line without a version as HTTP/0.9; RFC 9112 2.2 lets a server ignore empty lines (CRLF) only, and a line holding a lone CR is a request-line whose method is no token (RFC 9110 9.1)
+llhttp: httpasm=REQUEST_LINE ref=accepted | llhttp reads "POST /x" CRLF, with no HTTP-version, as HTTP/0.9; RFC 9112 3: request-line = method SP request-target SP HTTP-version, so it is malformed (400)
+llhttp: httpasm=TARGET ref=accepted | the example is an HTTP/0.9 line to llhttp, and its target holds "#": RFC 9112 3.2 builds the target URI without a fragment, so "#" has no place in a request-target (RFC 3986 octets only)
+llhttp: httpasm=TARGET_FORM ref=accepted | llhttp takes any target for CONNECT; RFC 9112 3.2.3: CONNECT's target is the authority-form, uri-host ":" port, and "host:4/43" is not one (semantics/authority.inc)
+llhttp: httpasm=VERSION ref=accepted | "GET /  HTTP/1.1" with two SPs: RFC 9112 3 requires one SP between the elements; a recipient MAY parse on whitespace, but the RFC warns that this leniency is a smuggling vector, so HttpAsm refuses
+llhttp: httpasm=VERSION_UNSUPPORTED ref=accepted | HTTP/2.0 in HTTP/1.1 syntax: a major version HttpAsm does not implement over HTTP/1.1's syntax, answered 505 (RFC 9112 2.3, RFC 9110 15.6.6)
+llhttp: httpasm=HOST_MISSING ref=accepted | llhttp leaves Host to the application; RFC 9112 3.2: a server MUST answer 400 to an HTTP/1.1 request without Host
+llhttp: httpasm=HOST_DUPLICATE ref=accepted | llhttp leaves Host to the application; RFC 9112 3.2: a server MUST answer 400 to a request with more than one Host
+llhttp: httpasm=HOST_INVALID ref=accepted | llhttp leaves Host to the application; RFC 9112 3.2: a server MUST answer 400 to a Host whose value is not uri-host [ ":" port ]
+llhttp: httpasm=EXPECT ref=accepted | llhttp does not read Expect; RFC 9110 10.1.1: a server MAY answer 417 to an expectation other than 100-continue, which HttpAsm does
+llhttp: httpasm=TE_NOT_CHUNKED ref=accepted | a Transfer-Encoding whose value is not a list of transfer-codings ("cPOST / chunzip, ..., chunked"): llhttp looks only at the last element; HttpAsm refuses a framing field it cannot read whole (RFC 9112 6.1 grammar; RFC 9112 6.3: unreliable framing is a 400)
+llhttp: httpasm=TE_UNKNOWN ref=accepted | a transfer coding before chunked that HttpAsm does not implement ("nnked, chunked"): RFC 9112 6.1: a server that receives a transfer coding it does not understand SHOULD answer 501; llhttp ignores codings before the last
+llhttp: httpasm=TE_HTTP10 ref=accepted | Transfer-Encoding in an HTTP/1.0 request: RFC 9112 6.1 says the recipient MUST treat the framing as faulty; llhttp frames it as chunked
+llhttp: httpasm=TOO_MANY_FIELDS ref=accepted | HttpAsm's limit of 128 field lines (httpasm_h1_limits.max_fields), answered 431 (RFC 6585 5); llhttp has no limit
+
+# ---- HttpAsm accepts, llhttp refuses
+llhttp: httpasm=accepted ref=HPE_INVALID_METHOD | llhttp knows a fixed list of methods; RFC 9110 9.1: method = token, and extension methods are valid (HttpAsm reports them with method_id 0)
+llhttp: httpasm=accepted ref=HPE_INVALID_CONSTANT | "PAUSE / HTTP/1.1": llhttp also parses RTSP, takes PAUSE (an RTSP method) for RTSP and then expects "RTSP/" as the version; to HTTP, PAUSE is an extension method like any token (RFC 9110 9.1)
+llhttp: httpasm=accepted ref=HPE_INVALID_URL | an absolute-form target such as "Host:/" (scheme "Host", path "/") is a valid absolute-URI (RFC 3986 4.3, RFC 9112 3.2.2) that llhttp's URL scanner refuses; what to do with a scheme it does not serve is the handler's decision
+llhttp: httpasm=accepted ref=HPE_INVALID_VERSION | HTTP/1.2 and later minors: RFC 9110 2.5: a recipient SHOULD process a higher minor version as the highest it implements, HTTP/1.1
+llhttp: httpasm=accepted ref=HPE_UNEXPECTED_CONTENT_LENGTH | two Content-Length fields with the same value: RFC 9112 6.3 item 5 lets the recipient either reject the message or use the one value; HttpAsm uses it (llhttp rejects), and both frame the same length
+
+# ---- HttpAsm refuses, picohttpparser accepts (it reads the head's syntax only: no framing, Host or Expect rules)
+picohttpparser: httpasm=BARE_LF ref=accepted | picohttpparser takes LF alone as a line end; RFC 9112 2.2 only lets a recipient accept it (MAY), and HttpAsm refuses it as a smuggling vector
+picohttpparser: httpasm=REQUEST_LINE ref=accepted | "GET  / HTTP/1.1" with two SPs: picohttpparser skips repeated SP; RFC 9112 3 requires one SP, and its leniency (MAY) is a named smuggling vector
+picohttpparser: httpasm=VERSION ref=accepted | two SPs before the version: as above (RFC 9112 3)
+picohttpparser: httpasm=TARGET ref=accepted | picohttpparser takes any non-space octet in a target; RFC 9112 3.2 and RFC 3986 allow URI octets only (0xD6 is none)
+picohttpparser: httpasm=TARGET_FORM ref=accepted | "OPTIONS *," : RFC 9112 3.2.4: the asterisk-form is "*" alone, for OPTIONS only
+picohttpparser: httpasm=OBS_FOLD ref=accepted | picohttpparser keeps obs-fold continuation lines; RFC 9112 5.2: a server MUST reject an obs-fold in a request (400) or replace it with SP, and HttpAsm rejects
+picohttpparser: httpasm=HOST_MISSING ref=accepted | picohttpparser does not read Host; RFC 9112 3.2: 400 to an HTTP/1.1 request without Host
+picohttpparser: httpasm=HOST_DUPLICATE ref=accepted | picohttpparser does not read Host; RFC 9112 3.2: 400 to more than one Host
+picohttpparser: httpasm=HOST_INVALID ref=accepted | picohttpparser does not read Host; RFC 9112 3.2: 400 to a Host that is not uri-host [ ":" port ]
+picohttpparser: httpasm=EXPECT ref=accepted | picohttpparser does not read Expect; RFC 9110 10.1.1: 417 MAY answer an expectation other than 100-continue
+picohttpparser: httpasm=CONTENT_LENGTH ref=accepted | picohttpparser does not read Content-Length; RFC 9112 6.3 item 5: an invalid Content-Length makes the framing invalid: 400
+picohttpparser: httpasm=TE_AND_CL ref=accepted | picohttpparser does not read framing fields; RFC 9112 6.1: a server MAY reject a request with both Transfer-Encoding and Content-Length, and HttpAsm does (the classic smuggling pair)
+picohttpparser: httpasm=TE_HTTP10 ref=accepted | picohttpparser does not read framing fields; RFC 9112 6.1: Transfer-Encoding in HTTP/1.0 is faulty framing
+picohttpparser: httpasm=TE_NOT_CHUNKED ref=accepted | picohttpparser does not read framing fields; RFC 9112 6.3: a request whose final coding is not chunked (or cannot be read) is a 400
+picohttpparser: httpasm=TE_UNKNOWN ref=accepted | picohttpparser does not read framing fields; RFC 9112 6.1: a coding the server does not understand SHOULD be a 501
+
+# ---- HttpAsm accepts, picohttpparser refuses
+picohttpparser: httpasm=accepted ref=refused-empty-lines | picohttpparser skips one empty line before the request-line, HttpAsm any number up to its head limit: RFC 9112 2.2 says a server SHOULD ignore "at least one" empty line (CRLF) before it
