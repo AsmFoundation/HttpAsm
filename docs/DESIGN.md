@@ -462,6 +462,27 @@ HTTP/2, the drivers, the client):
    Known open item: an IP-literal's IPv6 structure (eight groups, one "::", the IPv4 tail's
    dec-octets) is not checked yet, only its octets (`semantics/authority.inc`); RFC 3986's
    grammar and its published test vectors close it.
+
+   Progress, 2026-11-26:
+   - **Coverage:** the fuzz corpora replayed in the coverage run raised it to 94.2% of blocks
+     and 88.0% of branch edges. Where coverage was thin, new fuzzers were written:
+     - `h1_write`: the writers emitted a Content-Length and target forms that HttpAsm's own
+       parsers refuse;
+     - `client`: connect failed on EINTR;
+     - `server` on io_uring too.
+   - **Stops and races:** a graceful stop now waits for one measured round trip on every
+     HTTP/2 connection, idle ones included. It sends GOAWAY(2^31 - 1), then a PING, and
+     sends the final GOAWAY after the ACK. Closing idle connections at once refused requests
+     already on their way, which CI's coverage run caught (`ShutsDownGracefully`). The
+     client tests' fake server no longer races its own test's end.
+   - **CPU detection:** `tests/native/cpu` checks `httpasm_cpu_found()` against an independent
+     reading of CPUID and XGETBV, natively and under 13 of SDE's CPU models (from SSE3-only to
+     AVX-512 with SHA512), each with the x86-64 level it must reach. All 22 models SDE offers
+     matched when first run.
+   - **Still to do:**
+     - the drivers' error paths (allocation and system-call failures);
+     - the published attack corpora;
+     - then `unreachable.tsv` and the gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,
    chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.

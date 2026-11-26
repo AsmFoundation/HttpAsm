@@ -20,7 +20,7 @@ lib="$here/src/HttpAsm/bin/$config/libc/linux-x64"
 [ -f "$lib/libhttpasm.so" ] || { echo "build.sh: $lib/libhttpasm.so is missing: build $config first" >&2; exit 2; }
 mkdir -p "$out"
 
-for source in tests/native/tiers.c tests/native/fallback.c tests/native/signals.c benchmarks/micro/micro.c; do
+for source in tests/native/tiers.c tests/native/fallback.c tests/native/signals.c tests/native/cpu.c benchmarks/micro/micro.c; do
   program="$(basename "$source" .c)"
   cc -O2 -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
     -I "$here/src/HttpAsm/include" \

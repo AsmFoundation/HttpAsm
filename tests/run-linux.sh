@@ -149,8 +149,17 @@ run_native() {
   [ "$runner" = native ] && sde="$tools/sde"
   replay='$HOME/.cache/httpasm/replay-'"$config"
   [ "$runner" = native ] && replay="$here/tests/fuzz/.work/replay-$config"
-  echo "run-linux.sh: tests/native/fallback, signals and tiers, natively" >&2
-  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/tiers" || code=$?
+  echo "run-linux.sh: tests/native/fallback, signals, cpu and tiers, natively" >&2
+  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/cpu; \$b/tiers" || code=$?
+  # The CPU detection on CPUs this machine is not: tests/native/cpu under SDE's models, each
+  # with the x86-64 level it must reach exactly, from SSE3-only (p4p) to AVX-512 with SHA512
+  # (future), the AVX-512-less hybrids (adl, arl) included. Every branch of cpu.asm's
+  # detection meets a CPU that takes it, on every runner (SDE runs on AVX-512 hardware too).
+  echo "run-linux.sh: tests/native/cpu under Intel SDE's CPU models" >&2
+  on_linux "$linux_env set -e; s=$sde; if [ ! -x \$s/sde64 ]; then mkdir -p \$s; tar -xJf '$(lpath "$tools")/$sde_archive' -C \$s --strip-components=1; fi; \
+    for m in p4p:v1 pnr:v1 nhm:v2 wsm:v2 snb:v2 hsw:v3 bdw:v3 skx:v4 icl:v4 adl:v3 spr:v4 arl:v3 future:v4; do \
+      \$s/sde64 -\${m%%:*} -- $bin/cpu \${m##*:} >/dev/null || { echo run-linux.sh: the CPU detection failed under SDE -\$m >&2; exit 1; }; \
+    done; echo run-linux.sh: the CPU detection matched on 13 SDE models" || { c=$?; [ "$code" -ne 0 ] || code=$c; }
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep
