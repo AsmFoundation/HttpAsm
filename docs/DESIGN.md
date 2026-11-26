@@ -612,6 +612,12 @@ HTTP/2, the drivers, the client):
        (the expiry now flushes what the sweep answered), the client writing a request into a
        CONNECT tunnel, a connect timeout reported as EINPROGRESS, and a server that could not
        answer during the epoch's first second;
+     - a half-closed client losing answers: an HTTP/2 connection closed at the end of the
+       stream without its deferred streams' answers, and a FIN seen while an HTTP/1.1
+       exchange was deferred counted as the end read, so the requests sent before it were
+       never read (the connection closed over them, a reset). Found when CI's gate saw
+       markers run in one run and not the next: the faults scenario's deferred HTTP/2 answer
+       was encoded only when its thread beat the client's FIN;
      - tests whose comments claimed paths they never reached (each made to reach it, or its
        claim corrected).
      Fault injection became deterministic on the way (`tests/native/faults`). On the

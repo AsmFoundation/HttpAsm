@@ -1317,6 +1317,52 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// A request sent while an earlier one is deferred, then the client's half-close: the
+    /// second request waits in the socket (a deferred connection reads nothing more), and the
+    /// end of the stream is seen behind it (EPOLLRDHUP, or io_uring's POLLRDHUP) before it is
+    /// read. That end is not the end of the requests: once the deferred answer went, the
+    /// second request is read and answered, and only the end read after it closes the
+    /// connection. Both answers come, in order, then the close.
+    /// </summary>
+    /// <remarks>
+    /// Until 2026-11-26 the end seen while deferred counted as read (C_PEER_DONE): the deferred
+    /// answer went, the processing found nothing more in the input, and the connection closed
+    /// with the second request unread in its socket (a close over unread octets resets the
+    /// connection, which may cost the client the first answer too, RFC 9112 9.6).
+    /// </remarks>
+    [Fact]
+    public void AnswersARequestThatCameWhileDeferredBeforeTheHalfClose()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var server = new TestServer(x =>
+        {
+            if (x.Target != "/defer")
+            {
+                x.Respond(200, x.Target);
+                return;
+            }
+
+            x.Defer();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(300, ct);
+                x.Respond(200, "deferred");
+            }, ct);
+        }, workers: 1);
+        using var c = new RawConnection(server.Port);
+
+        c.Send("GET /defer HTTP/1.1\r\nHost: t\r\n\r\n");
+        Thread.Sleep(100);                          // deferred by now: the server reads nothing more
+        c.Send("GET /second HTTP/1.1\r\nHost: t\r\n\r\n");
+        c.ShutdownSend();                           // the end, seen while the first is deferred
+
+        Assert.Equal("deferred", c.ReadResponse().Text);
+        Assert.Equal("/second", c.ReadResponse().Text);
+        Assert.True(c.ServerClosed());
+    }
+
+    /// <summary>
     /// An answer's head larger than the room the connection's output has is written whole: the
     /// room it reserves (512 octets at first) doubles until the head fits, the output growing
     /// with it. 40 fields of 1,000 octets each, about 40 KB: past the output's first 16 KiB, so

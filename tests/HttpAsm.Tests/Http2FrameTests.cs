@@ -24,6 +24,14 @@ public sealed class Http2FrameTests
     private static readonly byte[] Big = MakeBig();
 
     /// <summary>
+    /// /slow-mid's answer: <see cref="Big"/>'s first 900 KiB, below the server's 1 MiB
+    /// back-pressure mark with its frames' headers (so the answer is queued whole and the
+    /// connection's processing goes on past it), yet more than a socket of small segments takes
+    /// in one send.
+    /// </summary>
+    private static readonly byte[] Mid = Big[..(900 << 10)];
+
+    /// <summary>
     /// /large-head's fields: 40 of 1,000 octets each, a field block larger than the 16,384
     /// octets one frame may carry, so the answer's head needs HEADERS and CONTINUATION frames.
     /// </summary>
@@ -32,7 +40,9 @@ public sealed class Http2FrameTests
 
     /// <summary>
     /// A server whose answers the tests can steer by path: /slow answers a second later (its
-    /// stream stays half-closed (remote) meanwhile), /echo echoes the body, /cookie answers the
+    /// stream stays half-closed (remote) meanwhile), /slow-big answers <see cref="Big"/> and
+    /// /slow-mid <see cref="Mid"/> 300 ms later (deferred too), /echo echoes the body, /cookie
+    /// answers the
     /// cookie field it saw, /mixed answers with a mixed-case field name, /big answers
     /// <see cref="Big"/>, "*" (OPTIONS for the server as a whole) answers "asterisk" and the
     /// method, /reset answers 205 (first with a body, which is refused, then empty), /trailers
@@ -68,6 +78,22 @@ public sealed class Http2FrameTests
                     {
                         await Task.Delay(1000, ct);
                         x.Respond(200, "late");
+                    }, ct);
+                    break;
+                case "/slow-big":
+                    x.Defer();
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(300, ct);
+                        x.Respond(200, Big);
+                    }, ct);
+                    break;
+                case "/slow-mid":
+                    x.Defer();
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(300, ct);
+                        x.Respond(200, Mid);
                     }, ct);
                     break;
                 case "/echo":
@@ -1801,6 +1827,107 @@ public sealed class Http2FrameTests
         H2Response response = c.ReadResponse(1);
         Assert.Equal((200, "late"), (response.Status, Encoding.ASCII.GetString(response.Body)));
         Assert.Equal(0, c.GoAwayCount);
+    }
+
+    /// <summary>
+    /// A client that half-closes after its requests (shutdown SHUT_WR: it finished sending,
+    /// not reading) still gets every answer, a deferred one included, as an HTTP/1.1 client
+    /// does (ServerTests.AnswersAfterTheClientHalfClosesWhileDeferred): stream 1's answer at
+    /// once, /slow's on stream 3 a second after the server read the end of the stream; then
+    /// GOAWAY (NO_ERROR, last stream 3) and the close.
+    /// </summary>
+    /// <remarks>
+    /// Until 2026-11-26 the end of the stream closed an HTTP/2 connection once its output was
+    /// sent, and a deferred stream's answer was dropped when it came: a deferred stream counts
+    /// in conn.deferred, while what kept a half-closed connection open was the HTTP/1.1
+    /// exchange's C_DEFERRED. tests/native/faults met it as a site whose calls came and went
+    /// with the answering thread's pace (its /defer answer on HTTP/2 encoded in some runs, never
+    /// in others), and CI's coverage gate as markers that ran in one run and not the next.
+    /// </remarks>
+    [Fact]
+    public void AnswersADeferredStreamAfterTheClientHalfCloses()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1);
+        c.SendRequest(3, path: "/slow");
+        c.ShutdownSend();
+
+        H2Response first = c.ReadResponse(1);
+        Assert.Equal((200, "ok"), (first.Status, Encoding.ASCII.GetString(first.Body)));
+        H2Response late = c.ReadResponse(3);
+        Assert.Equal((200, "late"), (late.Status, Encoding.ASCII.GetString(late.Body)));
+        Assert.Equal((3u, NoError, 8), c.ReadGoAway());
+        Assert.Null(c.ReadFrame());                     // then the close
+    }
+
+    /// <summary>
+    /// A deferred stream's large answer to a client that half-closed: the server reads the end
+    /// of the stream while the answer is owed (the deferred stream keeps the connection), and
+    /// /slow-big's 8 MiB then outgrows the socket (the client reads through a 64 KiB receive
+    /// buffer, its windows wide open), so the connection waits for room with the end already
+    /// read. Every octet arrives; then GOAWAY (NO_ERROR, last stream 1) and the close, which
+    /// comes as the last octet leaves: the end was read, so there is nothing to linger for.
+    /// </summary>
+    /// <remarks>
+    /// The epoll worker's writer path closes the connection from its flush here (server.asm,
+    /// worker_main: "jnz .event ; closed"). Before 2026-11-26 an HTTP/1.1 FIN seen while
+    /// deferred reached that close too, as if the end had been read; it now closes from the
+    /// read of the end, and this HTTP/2 path is the one that waits for room with the end read.
+    /// </remarks>
+    [Fact]
+    public void SendsALargeDeferredAnswerWholeAfterTheClientHalfCloses()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port, 65536, (4, 0x7FFFFFFF));
+        c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);             // the connection's window too
+
+        c.SendRequest(1, path: "/slow-big");
+        c.ShutdownSend();                                           // read by the server well before the answer
+
+        H2Response response = c.ReadResponse(1);
+        Assert.Equal(200, response.Status);
+        Assert.True(Big.AsSpan().SequenceEqual(response.Body), "the whole answer");
+        Assert.Equal((1u, NoError, 8), c.ReadGoAway());
+        Assert.Null(c.ReadFrame());                                 // then the close
+    }
+
+    /// <summary>
+    /// The last deferred answer of a connection whose end was read, too large for the socket
+    /// to take at once: the connection closes after it (the client is done, nothing more is
+    /// owed), so the close comes from the flush that sends its last octet once the socket has
+    /// room again, with no linger (the end was read). The client advertises 1 KiB segments, so
+    /// the server's send buffer stays a few hundred KiB, and /slow-mid's 900 KiB, below the
+    /// 1 MiB back-pressure mark (queued whole, the processing goes on to the close's
+    /// decision), come 300 ms after the half-close was read; the client reads nothing for 700
+    /// ms. Every octet arrives, then GOAWAY (NO_ERROR, last stream 1) and the close.
+    /// </summary>
+    /// <remarks>
+    /// The epoll worker's writer path then closes the connection from its flush (server.asm,
+    /// worker_main: "jnz .event ; closed"). <see cref="SendsALargeDeferredAnswerWholeAfterTheClientHalfCloses"/>
+    /// does not reach it: its 8 MiB stop the processing for back-pressure, the decision waits
+    /// for the output to drain, and the close comes from a flush with nothing left to send.
+    /// </remarks>
+    [Fact]
+    public void ClosesAsTheLastDeferredAnswerLeavesAFullSocket()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = H2Connection.WithSmallSegments(server.Port, 65536, 1024, (4, 0x7FFFFFFF));
+        c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);             // the connection's window too
+
+        c.SendRequest(1, path: "/slow-mid");
+        c.ShutdownSend();
+        Thread.Sleep(700);                                          // the answer meets a full socket
+
+        H2Response response = c.ReadResponse(1);
+        Assert.Equal(200, response.Status);
+        Assert.True(Mid.AsSpan().SequenceEqual(response.Body), "the whole answer");
+        Assert.Equal((1u, NoError, 8), c.ReadGoAway());
+        Assert.Null(c.ReadFrame());                                 // then the close
     }
 
     /// <summary>

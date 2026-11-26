@@ -124,19 +124,47 @@ internal sealed class H2Connection : IDisposable
     {
     }
 
+    /// <summary>
+    /// Connects advertising a small maximum segment size, with a receive buffer of a given size,
+    /// then does the handshake. The server's kernel sizes its send buffer from the segments it
+    /// may send (about two segments' memory for each segment of its congestion window), so
+    /// small segments keep that buffer to a few hundred KiB, where loopback's 64 KiB segments
+    /// let it grow past a megabyte: an answer below the server's 1 MiB back-pressure mark then
+    /// cannot leave in one send, and the server waits for room with it.
+    /// </summary>
+    /// <param name="port">The server's port.</param>
+    /// <param name="receiveBuffer">The socket's receive buffer, set before connecting.</param>
+    /// <param name="maxSegment">The MSS this side advertises (TCP_MAXSEG before the connect).</param>
+    /// <param name="settings">This side's SETTINGS.</param>
+    /// <returns>The connection, its handshake done.</returns>
+    /// <exception cref="IOException">The server closed the connection during the handshake.</exception>
+    /// <exception cref="SocketException">The connection was refused, a read timed out, or the kernel
+    /// refused the segment size.</exception>
+    public static H2Connection WithSmallSegments(int port, int receiveBuffer, int maxSegment, params (int Id, uint Value)[] settings) =>
+        new(port, receiveBuffer, true, settings, maxSegment);
+
     /// <summary>The constructors' common part.</summary>
     /// <param name="port">The server's port.</param>
     /// <param name="receiveBuffer">The receive buffer (0: the kernel's default).</param>
     /// <param name="handshake">Whether to do the handshake now.</param>
     /// <param name="settings">This side's SETTINGS.</param>
+    /// <param name="maxSegment">The MSS to advertise (0: the kernel's own, from the route).</param>
     /// <exception cref="IOException">The server closed the connection during the handshake.</exception>
-    /// <exception cref="SocketException">The connection was refused, or a read timed out.</exception>
-    private H2Connection(int port, int receiveBuffer, bool handshake, (int Id, uint Value)[] settings)
+    /// <exception cref="SocketException">The connection was refused, a read timed out, or the kernel
+    /// refused the segment size.</exception>
+    private H2Connection(int port, int receiveBuffer, bool handshake, (int Id, uint Value)[] settings, int maxSegment = 0)
     {
         socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true, ReceiveTimeout = 5000 };
         if (receiveBuffer > 0)
         {
             socket.ReceiveBufferSize = receiveBuffer;   // before the connect: the window it offers
+        }
+
+        if (maxSegment > 0)
+        {
+            // TCP_MAXSEG (2) at IPPROTO_TCP (6), before the connect: the MSS this side's SYN
+            // advertises, which caps the segments the server may send it.
+            socket.SetRawSocketOption(6, 2, BitConverter.GetBytes(maxSegment));
         }
 
         socket.Connect(IPAddress.Loopback, port);
@@ -609,6 +637,14 @@ internal sealed class H2Connection : IDisposable
 
         return frames;
     }
+
+    /// <summary>
+    /// Half-closes the TCP connection (shutdown SHUT_WR): the server reads the end of the
+    /// stream, and this side can still read all it sends. An HTTP/2 client usually says GOAWAY
+    /// instead, but TCP allows the half-close, and what the server already took is still owed:
+    /// a finished send is not a client gone.
+    /// </summary>
+    public void ShutdownSend() => socket.Shutdown(SocketShutdown.Send);
 
     /// <summary>
     /// Resets the TCP connection (SO_LINGER 0, then the close): the server sees RST, a peer gone

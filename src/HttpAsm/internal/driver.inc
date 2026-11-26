@@ -208,12 +208,12 @@ C_DEFERRED          equ 0x0008  ; an exchange is deferred: the connection waits 
 C_ZOMBIE            equ 0x0010  ; closed while deferred: freed when the response arrives
 C_CONTINUE_SENT     equ 0x0020  ; 100 Continue went out for the current request
 C_READ_PAUSED       equ 0x0040  ; EPOLLIN is off (deferred, or output past HA_OUTPUT_HIGH)
-; The peer finished sending (its FIN was read, or EPOLLRDHUP came while deferred). EPOLLRDHUP is
-; level-triggered and stays raised from the FIN on: asking for it again would wake the worker in
-; a loop while the connection cannot act. So it is never asked for once this flag is set, nor
-; while output waits for EPOLLOUT (the FIN may sit behind input the processing cannot take
-; then: ha_interest_mask). The connection answers what it holds and closes; nothing more can
-; arrive, so it closes without lingering.
+; The end of the peer's stream was read (a recv returned 0): every octet it sent is in the
+; input, and nothing more can arrive. Neither EPOLLIN nor EPOLLRDHUP is asked for again: both
+; stay raised at the end of the stream, and asking would wake the worker in a loop while the
+; connection cannot act (ha_interest_mask). The connection answers what it holds, its deferred
+; answers included (an HTTP/1.1 exchange's C_DEFERRED, HTTP/2's conn.deferred), then closes;
+; no request octet can be left unread, so it closes without lingering (ha_conn_flush).
 C_PEER_DONE         equ 0x0080
 ; Closed and on its worker's closed list: the memory stays until the end of the event batch,
 ; because a later event of the same batch (epoll_wait's events, or io_uring's completions) may
@@ -228,6 +228,14 @@ C_SPOKE             equ 0x0200
 ; and its completion not handled yet). Its completion continues what ha_conn_flush does under
 ; epoll; meanwhile ha_conn_drive stops, as it does for C_WANT_WRITE. Never set under epoll.
 C_SEND_QUEUED       equ 0x0400
+; The peer's FIN arrived (EPOLLRDHUP, or io_uring's POLLRDHUP, while a deferred exchange stopped
+; the reading) but the end of the stream was not read: requests the client sent before its
+; half-close may still wait in the socket ahead of it. EPOLLRDHUP stays raised from the FIN on,
+; so it is not asked for again; EPOLLIN still is, once the reading resumes, and the octets
+; before the end are read and answered in order, then the end itself (C_PEER_DONE). Counting
+; this as the end read closed the connection over those unread requests, a reset that could
+; cost the client the answer already sent (RFC 9112 9.6), until 2026-11-26.
+C_FIN_SEEN          equ 0x0800
 
 ; conn.uflags (io_uring only)
 U_PENDING           equ 0x01    ; on the worker's pending list

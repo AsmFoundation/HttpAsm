@@ -953,8 +953,9 @@ read_ready:
 .eof:
     ; The peer finished sending (it may have half-closed after its last request and still
     ; read the answer): whatever it sent is answered first, then the connection closes
-    ; (ha_conn_drive sees C_PEER_DONE). A deferred answer is waited for; nothing more can
-    ; arrive, so EPOLLRDHUP is not asked again (every interest update now leaves it out).
+    ; (ha_conn_drive sees C_PEER_DONE). Deferred answers are waited for, an HTTP/2
+    ; connection's included; nothing more can arrive, so neither EPOLLIN nor EPOLLRDHUP is
+    ; asked again (both stay raised at the end; ha_conn_drive's flush updates the interest).
     or      dword [r13 + conn.flags], C_PEER_DONE
     mov     rdi, r13
     call    ha_conn_drive
@@ -982,11 +983,13 @@ read_ready:
     jmp     .close
 .deferred_event:
     ; Deferred: only EPOLLRDHUP was asked for. The peer finished sending, but may still read
-    ; the answer (a half-close after the request): keep the connection, stop asking. A reset
-    ; peer comes as EPOLLERR/EPOLLHUP instead, and closes it (a zombie until the answer).
+    ; the answer (a half-close after the request): keep the connection, stop asking. Its FIN
+    ; was seen, not read (C_FIN_SEEN, not C_PEER_DONE): requests it sent after this one wait in
+    ; the socket ahead of it, and are read once the answer went. A reset peer comes as
+    ; EPOLLERR/EPOLLHUP instead, and closes it (a zombie until the answer).
     test    esi, EPOLLRDHUP
     jz      .out                            ; anything else is stale: nothing to do while deferred
-    or      dword [r13 + conn.flags], C_PEER_DONE
+    or      dword [r13 + conn.flags], C_FIN_SEEN
     mov     rdi, r13
     call    ha_set_interest
 .out:

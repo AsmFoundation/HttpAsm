@@ -36,11 +36,15 @@ section .text
 ; ha_interest_mask: the events a connection should wait for, from its flags; the one rule set
 ; for both backends (epoll's ha_set_interest, io_uring's poll in uring.asm; EPOLL* and POLL*
 ; share their values). Closed connections and zombies wait for nothing (their descriptor is
-; gone). While output waits for the socket: OUT, and nothing else. Otherwise: RDHUP until the
-; peer's end was seen (a peer's close is noticed even while deferred; once seen, asking again
+; gone). While output waits for the socket: OUT, and nothing else. Once the end of the peer's
+; stream was read (C_PEER_DONE): nothing at all (0: only errors and hang-ups, which are always
+; reported), since IN and RDHUP both stay raised at the end and nothing more can come; the
+; connection still waits for its deferred answers then (an HTTP/2 one does: its deferred
+; streams keep it, ha_conn_drive). Otherwise: RDHUP until the peer's FIN was seen (a peer's
+; close is noticed even while deferred; once seen, C_FIN_SEEN or C_PEER_DONE, asking again
 ; would wake the worker in a loop, since it stays raised), and IN unless an exchange is
-; deferred or reading is paused. A deferred connection whose peer is done waits for nothing at
-; all (0: only errors and hang-ups, which are always reported).
+; deferred or reading is paused. A deferred connection whose FIN was seen waits for nothing
+; until its answer; then IN again, for the requests still ahead of the end.
 ;   Why not RDHUP while output waits: RDHUP stays raised from the peer's FIN on, and is cleared
 ;   only by reading the end of the stream (C_PEER_DONE). Output past HA_OUTPUT_HIGH stops the
 ;   processing, so pipelined requests can fill the input; the FIN behind them then cannot be
@@ -62,7 +66,9 @@ ha_interest_mask:
     test    ecx, C_WANT_WRITE
     jnz     .writing
     test    ecx, C_PEER_DONE
-    jnz     .rdhup_set
+    jnz     .out                            ; the end was read: neither IN nor RDHUP (see above)
+    test    ecx, C_FIN_SEEN
+    jnz     .rdhup_set                      ; the FIN came: RDHUP no more, IN still
     mov     esi, EPOLLRDHUP
 .rdhup_set:
     test    ecx, C_DEFERRED | C_READ_PAUSED
@@ -869,8 +875,11 @@ send_continue:
 ; ha_conn_drive: answers what the input holds and sends it. Process, flush, and again while
 ; the processing stopped only for back-pressure and the flush emptied the output: pipelined
 ; requests held back that way are already read, so no event would ever bring them back. Once
-; the peer's end was seen (C_PEER_DONE) and no complete request is left, nothing more can come:
-; the connection closes after its last answer (an incomplete message is dropped, RFC9112-6.3-2.6).
+; the end of the peer's stream was read (C_PEER_DONE) and no complete request is left, nothing
+; more can come: the connection closes after its last answer (an incomplete message is dropped,
+; RFC9112-6.3-2.6), its deferred ones included: an HTTP/1.1 exchange (C_DEFERRED) or an HTTP/2
+; stream (conn.deferred) still owed an answer keeps it open, and the answer's completion drives
+; it again. A FIN only seen (C_FIN_SEEN) closes nothing: requests may still wait ahead of it.
 ;   In: rdi = conn (open: neither closed nor a zombie). Clobbers every caller-saved register.
 ;   Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
@@ -892,6 +901,8 @@ ha_conn_drive:
     jz      .flush
     test    eax, C_DEFERRED | C_DRAINING
     jnz     .flush                          ; the deferred answer comes first; draining closes anyway
+    cmp     dword [rbx + conn.deferred], 0
+    jne     .flush                          ; HTTP/2: its deferred streams' answers come first too
     or      dword [rbx + conn.flags], C_CLOSE_AFTER
 .flush:
     mov     rdi, rbx

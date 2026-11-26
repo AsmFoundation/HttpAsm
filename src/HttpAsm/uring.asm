@@ -855,10 +855,12 @@ ha_uring_conn:
     jmp     .out
 .deferred:
     ; Deferred: only the peer's end was asked for. It finished sending, but may still read the
-    ; answer: noted, and not asked again (ha_interest_mask leaves it out from now on).
+    ; answer: noted, and not asked again (ha_interest_mask leaves it out from now on). Seen,
+    ; not read (C_FIN_SEEN): requests sent after this one wait in the socket ahead of the end,
+    ; and are read once the answer went, as under epoll.
     test    r13d, EPOLLRDHUP
     jz      .rearm
-    or      dword [rbx + conn.flags], C_PEER_DONE
+    or      dword [rbx + conn.flags], C_FIN_SEEN
     jmp     .rearm
 .error:
     mov     rdi, rbx
