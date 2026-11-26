@@ -10,3 +10,6 @@ specs/documents.json text eol=lf
 
 # Shell scripts run in Linux containers and on Linux CI runners.
 *.sh text eol=lf
+
+# The fuzzers' seed inputs are octets, CRLF line ends included: never converted.
+tests/fuzz/seeds/** binary

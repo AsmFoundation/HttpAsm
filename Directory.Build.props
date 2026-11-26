@@ -56,4 +56,18 @@
   <ItemGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'Coverage' and '$(MSBuildProjectName)' == 'HttpAsm'">
     <AsmSource Include="$(MSBuildThisFileDirectory)tests/coverage/coverage_rt.asm" />
   </ItemGroup>
+
+  <!--
+    The Fuzz configuration (tests/fuzz/run.sh builds it; nothing ships it): the Coverage
+    configuration's markers, put in libFuzzer's "__libfuzzer_extra_counters" section instead.
+    libFuzzer reads every octet of that section as a coverage counter of its own, so a fuzzer
+    linked with these objects steers by the assembly's blocks and branch edges. No coverage_rt:
+    libFuzzer reads (and clears) the counters itself.
+  -->
+  <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'Fuzz'">
+    <AsmToolchain>System</AsmToolchain>
+    <AsmNasmCommand>dotnet run --file "$(MSBuildThisFileDirectory)tests/coverage/instrument.cs" -- --section __libfuzzer_extra_counters --nasm "$(HTTPASM_COVERAGE_NASM)"</AsmNasmCommand>
+    <AsmLinkerCommand>"$(HTTPASM_COVERAGE_LLD)" -flavor gnu</AsmLinkerCommand>
+    <AsmArchiverCommand>"$(HTTPASM_COVERAGE_AR)"</AsmArchiverCommand>
+  </PropertyGroup>
 </Project>

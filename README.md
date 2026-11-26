@@ -79,7 +79,14 @@ dotnet run specs/generate.cs -- --check            # the generated tables match 
 benchmarks/run.sh                                  # HttpAsm, nginx and h2o, side by side (Linux)
 $(bash tests/native/build.sh Release)/micro        # each routine's CPU tiers, single-threaded
 tests/coverage/run.sh                              # every block and branch edge the tests run, and the gate
+tests/fuzz/run.sh 60                               # each fuzzer for 60 s (clang with libFuzzer, Linux or WSL)
 ```
+
+`tests/fuzz/` holds the coverage-guided fuzzers. Assembly has no compiler instrumentation, so the
+coverage instrument's markers go into libFuzzer's extra counters, and the fuzzer steers by the
+assembly's own blocks and branch edges. Every input runs at every CPU tier against a guard page,
+and each fuzzer checks the parser's invariants: the result's documented forms, pointers inside
+the input, and the same result whether the input arrives whole or in two reads.
 
 `tests/run-linux.sh` fetches h2spec and Intel SDE (each pinned by SHA-256), then:
 - **runs the .NET suite at every CPU tier this machine has** (`HTTPASM_CPU=v1`, `v2`, `v3`,

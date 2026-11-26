@@ -13,3 +13,6 @@ tests/.tools/
 
 # The coverage run's marks (tests/coverage/run.sh)
 tests/coverage/.dumps/
+
+# The fuzzers' working corpora and findings when run natively (tests/fuzz/run.sh)
+tests/fuzz/.work/

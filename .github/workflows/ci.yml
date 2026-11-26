@@ -27,7 +27,10 @@
 #   4. tests/coverage/run.sh: the Coverage build (every block and branch edge marked by
 #      tests/coverage/instrument.cs), the same runs as step 3 against it, and the report - for
 #      now report-only, until tests/coverage/unreachable.tsv and the tests make the gate pass.
-#   5. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
+#   5. tests/fuzz/run.sh: each fuzzer for 30 s with libFuzzer, AddressSanitizer and
+#      UndefinedBehaviorSanitizer, steered by the assembly's own branch edges. A finding fails
+#      the run and is printed in base64, so the log alone reproduces it.
+#   6. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
 #      written to the job summary with the runner's CPU. Informational: a shared runner is no
 #      measuring machine, but it is where AVX-512 versions get timed when the runner has it.
 #
@@ -98,6 +101,25 @@ jobs:
           bash tests/coverage/run.sh --report-only > coverage.md
           { echo "### Coverage of libhttpasm.so"; echo; sed -n '/^Coverage of/,/^Not run/p' coverage.md | sed '$d'; tail -1 coverage.md; } >> "$GITHUB_STEP_SUMMARY"
           tail -1 coverage.md
+
+      - name: Fuzzing tools - clang with libFuzzer
+        # The runner image's clang may come without its sanitizer runtimes (libclang-rt-*-dev);
+        # a probe link says, and only then is the package installed for that clang's major.
+        run: |
+          clang --version | head -1
+          probe="$RUNNER_TEMP/probe"
+          printf 'int LLVMFuzzerTestOneInput(const unsigned char *d, unsigned long n) { (void)d; (void)n; return 0; }\n' > "$probe.c"
+          if ! clang -fsanitize=fuzzer,address,undefined "$probe.c" -o "$probe" 2>/dev/null; then
+            major="$(clang -dumpversion | cut -d. -f1)"
+            sudo apt-get update -q
+            sudo apt-get install -y -q "libclang-rt-$major-dev"
+            clang -fsanitize=fuzzer,address,undefined "$probe.c" -o "$probe"
+          fi
+
+      - name: Fuzzing - each fuzzer 30 s at every CPU tier (a finding fails the run)
+        env:
+          HTTPASM_RUNNER: native
+        run: bash tests/fuzz/run.sh 30
 
       - name: Single-thread measurements per tier (informational, to the job summary)
         run: |

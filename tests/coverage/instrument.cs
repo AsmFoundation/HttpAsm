@@ -5,7 +5,7 @@
 // with the reason it cannot").
 //
 // It stands in for NASM in AsmFoundation.Sdk's build (AsmToolchain=System, AsmNasmCommand; see
-// tests/coverage/build.sh). For each HttpAsm source it:
+// tests/coverage/run.sh and tests/fuzz/run.sh). For each HttpAsm source it:
 //   1. runs the real NASM with -E: macros expanded (each expansion is code of its own, with its
 //      own markers), includes inlined, and %line directives that keep every line's origin;
 //   2. inserts markers into the executable sections:
@@ -20,14 +20,17 @@
 //   3. appends the trampolines, then a "ha_cov" data section: a 24-octet header ("HACOV001", a
 //      hash of the source path, the marker count) and one octet per marker; the linker gathers
 //      every object's region into one section, and tests/coverage/coverage_rt.asm writes it to
-//      a file when the process exits;
+//      a file when the process exits. The Fuzz configuration names the section
+//      "__libfuzzer_extra_counters" instead (--section): libFuzzer then reads the markers as
+//      coverage counters of its own, so the fuzzers steer by the assembly's blocks and edges;
 //   4. writes <object>.covmap beside the object: one line per marker (id, kind, the original
 //      file and line, the scope label, and the label or jump it stands for);
 //   5. assembles the instrumented text with the real NASM and the build's own arguments.
 // Other sources the SDK assembles (its libc stubs) pass through untouched.
 //
-// Usage (as AsmNasmCommand): dotnet run --file tests/coverage/instrument.cs -- --nasm <real nasm>
-//   <the SDK's NASM arguments: ... -o <object> <source>>
+// Usage (as AsmNasmCommand): dotnet run --file tests/coverage/instrument.cs --
+//   [--section <name>] --nasm <real nasm> <the SDK's NASM arguments: ... -o <object> <source>>
+//   (--section defaults to ha_cov)
 // Exit status: NASM's, or 2 for a usage error or an instruction this tool cannot instrument.
 // =============================================================================
 using System.Diagnostics;
@@ -78,9 +81,18 @@ internal static partial class Instrumenter
     /// <returns>The process exit status: NASM's, or 2 for a usage or instrumentation error.</returns>
     public static int Run(string[] args)
     {
+        // An optional "--section <name>" first: where the markers go (ha_cov, or libFuzzer's
+        // __libfuzzer_extra_counters for the Fuzz configuration).
+        string section = "ha_cov";
+        if (args.Length >= 2 && args[0] == "--section")
+        {
+            section = args[1];
+            args = args[2..];
+        }
+
         if (args.Length < 4 || args[0] != "--nasm")
         {
-            Console.Error.WriteLine("instrument.cs: usage: --nasm <real nasm> <nasm arguments> -o <object> <source>");
+            Console.Error.WriteLine("instrument.cs: usage: [--section <name>] --nasm <real nasm> <nasm arguments> -o <object> <source>");
             return 2;
         }
 
@@ -121,7 +133,7 @@ internal static partial class Instrumenter
 
         try
         {
-            var result = Instrument(File.ReadAllLines(preprocessed), normalizedSource);
+            var result = Instrument(File.ReadAllLines(preprocessed), normalizedSource, section);
             File.WriteAllLines(instrumented, result.Lines);
             // The header names the region this map describes: the report matches it to the
             // dumps by the hash, which the region's own header carries too.
@@ -211,18 +223,20 @@ internal static partial class Instrumenter
     /// </summary>
     /// <param name="input">NASM -E output.</param>
     /// <param name="source">The source's path, hashed into the region header.</param>
+    /// <param name="section">The section the markers go into (ha_cov, or libFuzzer's
+    /// __libfuzzer_extra_counters).</param>
     /// <returns>The instrumented lines and the map.</returns>
     /// <exception cref="InstrumentationException">A short-only jump (jrcxz, loop), whose
     /// trampoline could be out of its 8-bit reach, or a conditional jump whose target is not a
     /// plain label.</exception>
-    internal static Result Instrument(string[] input, string source)
+    internal static Result Instrument(string[] input, string source, string section)
     {
         var output = new List<string>(input.Length * 2);
         var map = new List<string>();
         var trampolines = new List<string>();
         string file = source;
         int line = 0, increment = 1;
-        string section = ".text";
+        string currentSection = ".text";
         bool code = true;                   // the current section is executable
         string scope = "";                  // the last non-local label: what ".x" means
         string? pendingLabel = null;        // labels seen, no instruction yet (a block start)
@@ -264,10 +278,10 @@ internal static partial class Instrumenter
             Match sectionDirective = SectionDirective().Match(text);
             if (sectionDirective.Success)
             {
-                section = sectionDirective.Groups[2].Value;
+                currentSection = sectionDirective.Groups[2].Value;
                 code = sectionDirective.Groups[1].Value.Equals("absolute", StringComparison.OrdinalIgnoreCase)
                     ? false
-                    : section.StartsWith(".text", StringComparison.Ordinal);
+                    : currentSection.StartsWith(".text", StringComparison.Ordinal);
                 pendingLabel = null;        // a label right before a section change is no block
                 afterTerminator = false;
                 output.Add(raw);
@@ -372,7 +386,7 @@ internal static partial class Instrumenter
         // The trampolines, in the text section; then this object's region of markers.
         output.Add("[section .text]");
         output.AddRange(trampolines);
-        output.Add("[section ha_cov progbits alloc write noexec align=8]");
+        output.Add($"[section {section} progbits alloc write noexec align=8]");
         output.Add($"{Base}:");
         output.Add(" db \"HACOV001\"");
         output.Add($" dq 0x{Fnv1a(source):X16}");

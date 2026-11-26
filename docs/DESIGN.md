@@ -350,9 +350,24 @@ HTTP/2, the drivers, the client):
        which every test sets explicitly. `semantics/tables.asm` is data only and cannot be
        preprocessed alone (an `%if` over symbols), so it is listed as not instrumented.
    - **coverage-guided fuzzing** of every parser and state machine (HTTP/1.1 requests and
-     responses, chunked bodies, HPACK, HTTP/2 frames and connections). It uses AFL++ in
-     binary-instrumentation mode, since assembly has no compiler instrumentation. The seed
-     corpora come from the tests, and every crash or hang becomes a regression test;
+     responses, chunked bodies, HPACK, HTTP/2 frames and connections). Built 2026-11-26
+     (`tests/fuzz/`), starting with HTTP/1.1 requests:
+     - **How it steers:** assembly has no compiler instrumentation, so the Fuzz configuration
+       reuses the coverage instrument: the same markers, placed in libFuzzer's
+       `__libfuzzer_extra_counters` section (`instrument.cs --section`). libFuzzer then steers
+       by the core's own 2,389 blocks and branch edges, not only by the C harness's. This
+       replaces the first plan, AFL++ in binary-instrumentation mode: it needs no emulator and
+       runs at native speed. libFuzzer cannot see what the assembly compares against, so each
+       fuzzer has a dictionary of the words its parser compares (`<name>.dict`).
+     - **What each fuzzer checks,** with clang's libFuzzer, AddressSanitizer and
+       UndefinedBehaviorSanitizer: every input at every CPU tier, with identical results; the
+       input against an inaccessible page, so a read past it crashes; the result's documented
+       forms; every pointer returned lies inside the input; and a parse that resumes after a
+       prefix equals the one-shot parse.
+     - **The first campaigns:** `h1_request`, 60 s, 10.7 million inputs at 175,000 a second, no
+       finding; a planted failure was found within seconds and printed in base64.
+     - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
+       test once fixed. CI runs each fuzzer for 30 s;
    - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,
      HTTP/2). Every difference in verdict or parsed fields is triaged against the RFC;
    - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per
