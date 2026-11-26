@@ -2178,9 +2178,13 @@ h2_keep_head:
 ; .rebase: rdi = a pointer; if it points into the scratch's strings, the same place in the
 ; copy. Uses rbx (the output) and rbp (the copy's strings). Clobbers rax.
 .rebase:
+    ; Outside the scratch (the static table's text) the pointer stays; inside, it moves. One
+    ; unsigned comparison for both sides, as REBASE_TAIL says why: below the space the
+    ; subtraction wraps past any space_used, and which side the static table lies on is the
+    ; address layout's (below the scratch in the .NET test host, above it in a C program whose
+    ; heap sits under its libraries), not a test's.
     mov     rax, rdi
     sub     rax, [rbx + httpasm_hpack_output.space]
-    jb      .rebase_out                     ; below the scratch: the static table's text
     cmp     rax, [rbx + httpasm_hpack_output.space_used]
     jae     .rebase_out
     lea     rdi, [rbp + rax]

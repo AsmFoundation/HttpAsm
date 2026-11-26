@@ -28,8 +28,8 @@ public sealed class Http2FrameTests
     /// stream stays half-closed (remote) meanwhile), /echo echoes the body, /cookie answers the
     /// cookie field it saw, /mixed answers with a mixed-case field name, /big answers
     /// <see cref="Big"/>, "*" (OPTIONS for the server as a whole) answers "asterisk" and the
-    /// method, /reset answers 205 (first with a body, which is refused, then empty), anything
-    /// else "ok".
+    /// method, /reset answers 205 (first with a body, which is refused, then empty), /trailers
+    /// answers the trailer fields it got ("name=value" joined by ";"), anything else "ok".
     /// </summary>
     /// <param name="idleMs">The idle timeout (0: the library's default).</param>
     /// <param name="limits">The head limits (zeros: the library's defaults).</param>
@@ -71,6 +71,9 @@ public sealed class Http2FrameTests
                     break;
                 case "/big":
                     x.Respond(200, Big);
+                    break;
+                case "/trailers":
+                    x.Respond(200, string.Join(";", x.Trailers.Select(t => t.Name + "=" + t.Value)));
                     break;
                 default:
                     x.Respond(200, "ok");
@@ -1786,6 +1789,28 @@ public sealed class Http2FrameTests
 
         H2Response response = c.ReadResponse(1);
         Assert.Equal((200, 1500), (response.Status, response.Body.Length));
+    }
+
+    /// <summary>
+    /// Trailers that name the static table - "accept-encoding: gzip, deflate" is its entry 16,
+    /// name and value; "etag" its entry 34, a name - reach the handler whole: the decoder points
+    /// such names and values at the table's own text, and keeping the trailers past the
+    /// worker's scratch must leave those pointers be while it moves the others. Trailers in the
+    /// tests so far were all literals, so the keep path had never run.
+    /// </summary>
+    [Fact]
+    public void KeepsTrailersThatNameTheStaticTable()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/trailers");
+        c.SendFrame(Data, 0, 1, "body"u8);
+        c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("accept-encoding", "gzip, deflate"), ("etag", "\"v1\""), ("x-own", "literal")));
+        H2Response response = c.ReadResponse(1);
+
+        Assert.Equal((200, "accept-encoding=gzip, deflate;etag=\"v1\";x-own=literal"), (response.Status, Encoding.ASCII.GetString(response.Body)));
     }
 
     /// <summary>Reads a stream's final status (its HEADERS), without waiting for its end.</summary>
