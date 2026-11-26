@@ -72,7 +72,17 @@ section .text
 ;        or eax = 1 with .error and .status set. Records written before a failure stay.
 ;   Requires that every line from rsi to .head_end ends in CRLF, which the callers check when
 ;   they find the head's end.
-;   Keeps rbx, rbp and r12-r15. Clobbers the other general registers, xmm0-xmm5 and the flags.
+;   Keeps rbx, rbp and r12-r15. Clobbers the other general registers, xmm0-xmm6 and the flags.
+;
+;   Two versions of each line's scanning, chosen per line (HA_CPU_PICK1: one test, never per
+;   octet), the rest of the line's work shared:
+;     v1  the name octet by octet (HA_TOKEN_SCAN), the value's end by ha_find_lf, the value
+;         by HA_FIELD_VALUE_SCAN: three passes and a call;
+;     v2  16 octets a step (.name_v2, .value_v2): the name's octets classified by two pshufb
+;         lookups, the value's CR and the octets it may not hold found in one pass.
+;   Both give every line the same outcome, octet for octet and error for error; a step that
+;   could read into a page past the head's end gives the line to v1 (.name_scalar,
+;   .value_scalar), so no version reads memory the caller did not hand over.
 ; -----------------------------------------------------------------------------
 global ha_h1_fields:function hidden (ha_h1_fields.end - ha_h1_fields)
 align 16
@@ -99,11 +109,14 @@ ha_h1_fields:
     cmp     al, 9
     je      .obs_fold
 
-    ; The name: a token that the colon follows at once.
+    ; The name: a token that the colon follows at once. r14 = its length.
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .name_v2
+.name_scalar:
     lea     rdi, [rbx + r13]
     mov     rsi, rbp
     sub     rsi, r13
     HA_TOKEN_SCAN rdi, rsi, r14, rcx, rdx
+.name_scanned:
     test    r14, r14
     jz      .bad_name
     lea     rcx, [r13 + r14]
@@ -139,6 +152,8 @@ ha_h1_fields:
     inc     r15
     jmp     .leading_ows
 .find_end:
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .value_v2
+.value_scalar:
     lea     rdi, [rbx + r15]
     lea     rsi, [rbp + 2]
     sub     rsi, r15
@@ -165,6 +180,7 @@ ha_h1_fields:
     HA_FIELD_VALUE_SCAN rdi, rsi, rax, rcx, ecx, rdx, xmm0, xmm1, xmm2, xmm3, xmm4, xmm5
     cmp     rax, rsi
     jne     .bad_value                      ; a CTL other than HTAB (RFC9110-5.5-5#1, -5#2)
+.value_checked:                             ; rdi, rsi = the value; .line_lf = its line's LF
     mov     r8, [r12 + h1ctx.record]
     mov     [r8 + httpasm_field.value], rdi
     mov     [r8 + httpasm_field.value_length], esi
@@ -221,6 +237,123 @@ ha_h1_fields:
 .failed:
     mov     eax, 1
     jmp     .out
+
+; ---- v2: a line's name and value, 16 octets a step (SSSE3's pshufb; every v2 CPU has it).
+;
+; A 16-octet load at a stays in the caller's memory when it does not cross into the next 4 KiB
+; page (the page that holds a's first octet is mapped, so all of it is), or when it ends within
+; the head (the head is the caller's to the last octet). Otherwise the line goes to v1, which
+; reads octet by octet: only in the last 15 octets of a page that is the head's last.
+
+; .name_v2: r14 = the length of the token at the line's start (as HA_TOKEN_SCAN), then the
+; checks after .name_scanned. Each step classifies 16 octets: an octet's low nibble indexes
+; ha_tchar_lo, its high nibble ha_tchar_hi, and the two entries share a bit exactly for a tchar
+; (tables.asm proves it at assembly time). The first octet that is not one ends the name; there
+; is always one, the line's CR at the latest, so the steps end before the head does.
+.name_v2:
+    movdqa  xmm3, [rel ha_tchar_lo]
+    movdqa  xmm4, [rel ha_tchar_hi]
+    movdqa  xmm5, [rel ha_x16_0f]
+    pxor    xmm6, xmm6
+    lea     rdi, [rbx + r13]                ; the name's first octet
+    lea     rsi, [rbx + rbp + 2]            ; the head's end
+    xor     r14d, r14d
+.name_v2_step:
+    lea     rax, [rdi + r14]
+    mov     ecx, eax
+    and     ecx, 4095
+    cmp     ecx, 4096 - 16
+    jbe     .name_v2_load                   ; within its page
+    lea     rcx, [rax + 16]
+    cmp     rcx, rsi
+    ja      .name_scalar                    ; into a page past the head: octet by octet
+.name_v2_load:
+    movdqu  xmm0, [rax]
+    movdqa  xmm1, xmm0
+    psrlw   xmm1, 4
+    pand    xmm1, xmm5                      ; each octet's high nibble
+    pand    xmm0, xmm5                      ; and its low nibble
+    movdqa  xmm2, xmm4
+    pshufb  xmm2, xmm1                      ; ha_tchar_hi[high]
+    movdqa  xmm1, xmm3
+    pshufb  xmm1, xmm0                      ; ha_tchar_lo[low]
+    pand    xmm1, xmm2                      ; nonzero exactly for a tchar
+    pcmpeqb xmm1, xmm6                      ; 0xFF where the octet is not one
+    pmovmskb ecx, xmm1
+    test    ecx, ecx
+    jnz     .name_v2_end
+    add     r14, 16                         ; 16 tchars: the name goes on
+    jmp     .name_v2_step
+.name_v2_end:
+    bsf     ecx, ecx                        ; the first octet that is not a tchar
+    add     r14, rcx
+    jmp     .name_scanned
+
+; .value_v2: from the value's first octet (r15, past the colon and OWS) to its line's CR, 16
+; octets a step: the first CR in the line is its end when the LF follows it, and every octet
+; before that CR must be one a field value may hold (HA_FIELD_VALUE_CLASSIFY: no CTL but HTAB).
+; A CR the LF does not follow is a bare CR: a CTL inside the value, refused as v1 refuses it
+; (ha_find_lf finds the line's LF beyond it, and HA_FIELD_VALUE_SCAN meets the CR). The OWS
+; between the value and the CR is valid, so checking up to the CR checks the trimmed value.
+; Then the trailing OWS is trimmed as v1 trims it, and the line joins .value_checked with rdi,
+; rsi and .line_lf as v1 leaves them.
+.value_v2:
+    movdqa  xmm3, [rel ha_x16_1f]
+    movdqa  xmm4, [rel ha_x16_09]
+    movdqa  xmm5, [rel ha_x16_7f]
+    movdqa  xmm6, [rel ha_x16_0d]
+    lea     rsi, [rbx + rbp + 2]            ; the head's end
+    mov     rdx, r15                        ; the step's offset
+.value_v2_step:
+    lea     rax, [rbx + rdx]
+    mov     ecx, eax
+    and     ecx, 4095
+    cmp     ecx, 4096 - 16
+    jbe     .value_v2_load                  ; within its page
+    lea     rcx, [rax + 16]
+    cmp     rcx, rsi
+    ja      .value_scalar                   ; into a page past the head: v1 takes the value
+.value_v2_load:
+    movdqu  xmm0, [rax]
+    movdqa  xmm1, xmm0
+    pcmpeqb xmm1, xmm6                      ; CR
+    pmovmskb r8d, xmm1
+    HA_FIELD_VALUE_CLASSIFY xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, edi
+    test    r8d, r8d
+    jnz     .value_v2_cr
+    test    edi, edi
+    jnz     .bad_value                      ; an octet a value may not hold, before any CR
+    add     rdx, 16
+    jmp     .value_v2_step
+.value_v2_cr:
+    bsf     ecx, r8d                        ; the first CR from here
+    mov     eax, 1
+    shl     eax, cl
+    dec     eax                             ; the octets before it
+    test    edi, eax
+    jnz     .bad_value                      ; a CTL other than HTAB (RFC9110-5.5-5#1, -5#2)
+    add     rdx, rcx                        ; the CR's offset
+    cmp     byte [rbx + rdx + 1], 10
+    jne     .bad_value                      ; a bare CR: a CTL inside the value
+    lea     rax, [rdx + 1]
+    mov     [r12 + h1ctx.line_lf], rax
+.value_v2_trailing:                         ; as .trailing_ows: OWS before the CR is not value
+    cmp     rdx, r15
+    jbe     .value_v2_trimmed
+    movzx   ecx, byte [rbx + rdx - 1]
+    cmp     cl, ' '
+    je      .value_v2_one
+    cmp     cl, 9
+    jne     .value_v2_trimmed
+.value_v2_one:
+    dec     rdx
+    jmp     .value_v2_trailing
+.value_v2_trimmed:
+    mov     r14, rdx                        ; the value's end, as v1 leaves it
+    lea     rdi, [rbx + r15]
+    mov     rsi, rdx
+    sub     rsi, r15
+    jmp     .value_checked
 
 ; ---- Content-Length = 1*DIGIT; a list of identical values is accepted as one (RFC 9112 6.3).
 .content_length:

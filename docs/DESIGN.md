@@ -636,6 +636,20 @@ HTTP/2, the drivers, the client):
    field scanning, token and value validation, header-name lookup and case folding,
    chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.
    Each is measured against its v1 version and the rivals.
+   - **How each change is chosen and proven** (the owner's decisions, 2026-11-26): the
+     benchmark framework (`benchmarks/bench.sh`) profiles a routine exactly (SDE's
+     instruction counts per function), the change is kept only when its tier verdict, or an
+     A/B against the commit before it in 3 processes that agree, proves it faster. Nothing
+     AVX-512 is written where it cannot be measured (this machine has none), so the versions
+     are v2 (SSE4.2, SSSE3) and v3 (AVX2).
+   - **The HTTP/1.1 field lines** (2026-11-26), the first: 55% of a browser request's
+     instructions. `ha_h1_fields` scans each line 16 octets a step at v2: the name's octets
+     classified as tchar by two pshufb lookups (tables computed from the RFC's definition and
+     proven at assembly time for all 256 octets), the value's CR and its forbidden octets
+     found in one pass. Request heads parse 1.10-1.18x faster than at v1; picohttpparser's
+     lead fell from 2.5x to 1.8x, and llhttp is now slower on every head measured.
+     `tests/native/tiers` compares every tier with v1 on 44,850 heads that end against an
+     inaccessible page.
 
 *H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
 in CI); differential fuzzing has no untriaged difference; every row passes on every tier and

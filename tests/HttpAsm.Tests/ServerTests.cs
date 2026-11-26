@@ -1762,7 +1762,13 @@ public sealed class ServerTests
         Assert.Equal("bye", c.ReadResponse().Text);
         Assert.True(c.ServerClosed(1000), "the server's half-close");
         Assert.True(TrySend(c, new string('x', 100_000)), "a write during the linger is taken");
-        Thread.Sleep(Math.Max(0, 2700 - (int)clock.ElapsedMilliseconds));
+        // Past the linger by the stopwatch itself, which reads CLOCK_MONOTONIC as the server's
+        // deadlines do. One sleep of the remaining time once ended early under WSL2, whose clock
+        // Hyper-V's time sync steps: the assertion below then read 1630 ms (2026-11-26).
+        while (clock.ElapsedMilliseconds < 2700)
+        {
+            Thread.Sleep(10);
+        }
 
         bool reset = false;
         for (int i = 0; i < 20 && !reset; i++)

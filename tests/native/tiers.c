@@ -158,6 +158,175 @@ static int field_value_scan_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_h1_parse_request: its field lines are scanned by versions (ha_h1_fields) ------ */
+
+#define PARSE_FIELDS 64
+
+/* parse_result: everything one parse hands back: its return value, the scan position, the
+ * request and every field record (whose pointers point into the one input every tier parses,
+ * so equal results have equal pointers). */
+typedef struct parse_result {
+    int64_t ret;
+    size_t scan;
+    httpasm_request request;
+    httpasm_field fields[PARSE_FIELDS];
+} parse_result;
+
+/* parse_at: parses buf[0..len) at the tier now set, into *out (zeroed first, so unset parts
+ * compare equal). */
+static void parse_at(const uint8_t *buf, size_t len, parse_result *out)
+{
+    memset(out, 0, sizeof *out);
+    httpasm_h1_limits limits = { .max_fields = PARSE_FIELDS };
+    out->ret = httpasm_h1_parse_request(buf, len, &out->scan, &limits, &out->request, out->fields);
+}
+
+/* parse_same: whether two parses agree on everything: the return, the scan position, every
+ * field of the request but its fields pointer (each parse has its own array), and the records
+ * the request counts. Returns 1 when they agree, 0 otherwise. */
+static int parse_same(const parse_result *a, const parse_result *b)
+{
+    if (a->ret != b->ret || a->scan != b->scan)
+        return 0;
+    httpasm_request ra = a->request, rb = b->request;
+    ra.fields = rb.fields = NULL;
+    if (memcmp(&ra, &rb, sizeof ra) != 0)
+        return 0;
+    uint32_t n = a->request.field_count < PARSE_FIELDS ? a->request.field_count : PARSE_FIELDS;
+    return memcmp(a->fields, b->fields, n * sizeof a->fields[0]) == 0;
+}
+
+/* parse_check: one head at every tier, ending `gap` octets before the guard page (the octets
+ * between are part of buf: the start of a body, as the caller would hand them over), so a version
+ * that reads past the head into the unmapped page dies with SIGSEGV. Every tier must agree with
+ * v1, which the .NET suite proves against the RFC.
+ *   head, n  the head (n <= PAGE - gap); gap  the octets after it, before the guard page.
+ * Returns 0 when every tier agrees; 1, after reporting the tier and the head, otherwise. Leaves
+ * the last tier set. */
+static int parse_check(const uint8_t *head, size_t n, size_t gap)
+{
+    static parse_result expected, actual;
+    uint8_t *buf = page_end - n - gap;
+    memcpy(buf, head, n);
+    for (size_t i = 0; i < gap; i++)
+        buf[n + i] = (uint8_t)rng();                   /* whatever follows a head */
+    httpasm_cpu_limit(caps[0]);
+    parse_at(buf, n + gap, &expected);
+    for (size_t t = 1; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        parse_at(buf, n + gap, &actual);
+        if (!parse_same(&expected, &actual)) {
+            fprintf(stderr, "httpasm_h1_parse_request at %s (features %#llx) differs from v1: returned %lld (error %u, %u fields), "
+                            "v1 %lld (error %u, %u fields); the head ends %zu octets before the guard page\n",
+                    cap_names[t], (unsigned long long)features, (long long)actual.ret, actual.request.error, actual.request.field_count,
+                    (long long)expected.ret, expected.request.error, expected.request.field_count, gap);
+            dump("head", buf, n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* put: appends text to a head being built. h, n: the head and its length so far (advanced);
+ * the callers keep heads within their buffer. */
+static void put(uint8_t *h, size_t *n, const char *text)
+{
+    size_t k = strlen(text);
+    memcpy(h + *n, text, k);
+    *n += k;
+}
+
+/* tchar_pick: a random tchar (RFC9110-5.6.2-2): mostly letters, digits and '-', which names are
+ * made of, and every punctuation tchar now and then. */
+static uint8_t tchar_pick(void)
+{
+    static const char tchars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-!#$%&'*+.^_`|~";
+    unsigned r = (unsigned)(rng() % 100);
+    if (r < 85)
+        return (uint8_t)tchars[rng() % 26];
+    if (r < 95)
+        return (uint8_t)(r < 90 ? '-' : tchars[52 + rng() % 10]);
+    return (uint8_t)tchars[rng() % (sizeof tchars - 1)];
+}
+
+/* field_line: appends one field line to h (advancing *n): a name of 1-40 tchars (sometimes 0,
+ * or with a non-tchar, or whitespace before the colon), the colon, OWS, a value of up to 200
+ * octets a value may hold (sometimes with a CTL, a bare CR, or nothing but OWS), OWS, CRLF; or,
+ * now and then, an obs-fold line. Every outcome of ha_h1_fields' checks is drawn this way. */
+static void field_line(uint8_t *h, size_t *n)
+{
+    if (rng() % 40 == 0) {                              /* obs-fold: a line starting with SP / HTAB */
+        put(h, n, rng() % 2 ? " folded" : "\tfolded");
+        put(h, n, "\r\n");
+        return;
+    }
+    size_t name = rng() % 60 == 0 ? 0 : 1 + (size_t)(rng() % (rng() % 4 == 0 ? 40 : 16));
+    for (size_t i = 0; i < name; i++)
+        h[(*n)++] = tchar_pick();
+    if (name > 0 && rng() % 50 == 0)                    /* a non-tchar inside the name */
+        h[*n - 1 - rng() % name] = (uint8_t)" \"(),/;<=>?@[\\]{}\x7f\x80"[rng() % 18];
+    if (rng() % 50 == 0)                                /* whitespace before the colon */
+        h[(*n)++] = rng() % 2 ? ' ' : '\t';
+    h[(*n)++] = ':';
+    for (size_t k = rng() % 4; k > 0; k--)              /* leading OWS */
+        h[(*n)++] = rng() % 3 ? ' ' : '\t';
+    size_t value = rng() % 10 == 0 ? 0 : (size_t)(rng() % (rng() % 4 == 0 ? 200 : 48));
+    size_t start = *n;
+    field_value_valid(h + *n, value);
+    *n += value;
+    if (value > 0 && rng() % 25 == 0) {                 /* a CTL inside the value */
+        static const uint8_t ctls[] = { 0x00, 0x01, 0x0B, 0x1F, 0x7F, 0x0D, 0x0D, 0x0A };
+        h[start + rng() % value] = ctls[rng() % sizeof ctls];
+    }
+    for (size_t k = rng() % 4; k > 0; k--)              /* trailing OWS */
+        h[(*n)++] = rng() % 3 ? ' ' : '\t';
+    put(h, n, "\r\n");
+}
+
+/* parse_tiers: request heads with 0-30 field lines drawn by field_line, each parsed at every
+ * tier ending 0, 1, 15, 16 and 17 octets before the guard page (a 16-octet step from the head's
+ * last lines then reaches into it unless it falls back), plus every length of one field's name
+ * and value up to 70 octets, so each vector width's edges are met. Returns 0 when every head
+ * agreed at every tier, 1 at the first that did not. */
+static int parse_tiers(long randoms)
+{
+    static uint8_t h[PAGE];
+    static const size_t gaps[] = { 0, 1, 15, 16, 17 };
+    long checked = 0;
+    for (size_t name = 1; name <= 70; name++) {
+        for (size_t value = 0; value <= 70; value++) {
+            size_t n = 0;
+            put(h, &n, "GET / HTTP/1.1\r\nHost: a\r\n");
+            for (size_t i = 0; i < name; i++)
+                h[n++] = (uint8_t)('a' + i % 26);
+            put(h, &n, ": ");
+            field_value_valid(h + n, value);
+            n += value;
+            put(h, &n, "\r\n\r\n");
+            for (size_t g = 0; g < sizeof gaps / sizeof gaps[0]; g++) {
+                if (parse_check(h, n, gaps[g]))
+                    return 1;
+                checked++;
+            }
+        }
+    }
+    for (long i = 0; i < randoms; i++) {
+        size_t n = 0;
+        put(h, &n, rng() % 2 ? "GET /index.html HTTP/1.1\r\n" : "POST /api/items?id=7 HTTP/1.1\r\n");
+        if (rng() % 4 != 0)                             /* most heads valid: Host is required */
+            put(h, &n, "Host: example.com\r\n");
+        size_t lines = (size_t)(rng() % 31);
+        for (size_t l = 0; l < lines && n < PAGE - 512; l++)
+            field_line(h, &n);
+        put(h, &n, "\r\n");
+        if (parse_check(h, n, gaps[rng() % (sizeof gaps / sizeof gaps[0])]))
+            return 1;
+        checked++;
+    }
+    printf("httpasm_h1_parse_request: %ld heads, every tier agrees with v1\n", checked);
+    return 0;
+}
+
 /* main: sets up the guard page, prints the tiers this CPU (or SDE) gives, and runs every
  * routine's comparison. Returns 0, 1 on a mismatch, or 2 on a usage or setup error. */
 int main(int argc, char **argv)
@@ -182,6 +351,8 @@ int main(int argc, char **argv)
     printf("\n");
 
     int failed = field_value_scan_tiers(randoms);
+    if (!failed)
+        failed = parse_tiers(randoms / 10);
 
     httpasm_cpu_limit(HTTPASM_CPU_ALL);
     (void)start_features;

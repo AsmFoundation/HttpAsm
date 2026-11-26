@@ -189,6 +189,23 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, the HTTP/1.1 field lines at v2.** SDE's profile of the browser
+request (7,653 instructions per call) put 55% in `ha_h1_fields`, which now scans each line 16
+octets a step at v2 (docs/DESIGN.md, step 4). On the i9-13900K under WSL2:
+
+| Request head | Instructions, v1 -> v2 | v2 over v1 (paired, 41 rounds) | picohttpparser's lead, before -> after |
+|---|---:|---:|---:|
+| small GET (37 octets) | 861 -> 832 | 1.10x | 2.15x -> 1.96x |
+| browser GET (846 octets) | 7,717 -> 6,536 | 1.17x | 2.49x -> 1.79x |
+| API POST (511 octets) | 4,032 -> 3,548 | 1.18x | 2.73x -> 1.88x |
+
+Against the commit before the change (`bench.sh ab fd9a354`, 3 processes, all agreeing), the best
+tier measured 1.08x, 1.43x and 1.37x. v1 itself measured 1.23x and 1.14x faster on the two larger
+heads, though it runs slightly more instructions (two dispatch tests per line). The inserted code
+moved the scalar loop to a placement this CPU runs faster. That is the code-placement effect the
+validation measured, so only the tier verdict above is the vector code's own. llhttp is now
+slower than HttpAsm on all three heads.
+
 - 2026-11-26, `results/2026-11-26-rivals.md` (i9-13900K under WSL2, the first run, by the
   earlier `rivals` harness and its fastest-sample rule): the baseline for phase H step 4. The
   framework's rivals suite confirms it (paired, 2026-11-26): picohttpparser 2.1-2.5x faster
