@@ -8,7 +8,9 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 [AsmSdk](https://asmfoundation.github.io/AsmSdk/).
 
 > **Status: in development; nothing is released.** Milestone 1 (the shared semantics, HTTP/1.1
-> and HTTP/2) is complete; TLS 1.3 (M2) is next. What works today, on Linux x64:
+> and HTTP/2) is complete. Next: hardening and CPU acceleration of all of it, then our own
+> crypto with TLS 1.3 (M2), then TLS 1.2 and certificates (M3) ([docs/DESIGN.md](docs/DESIGN.md)
+> section 7). What works today, on Linux x64:
 > - **a server** (`httpasm_server_*`): HTTP/1.1 and HTTP/2 (h2c with prior knowledge) on one
 >   port, one worker per core on epoll, or on its own io_uring when asked
 >   (`HTTPASM_SERVER_URING`; epoll measured as cheap or cheaper, so it is the default),

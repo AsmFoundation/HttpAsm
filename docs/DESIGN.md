@@ -9,8 +9,9 @@ This file is the single plan: the decisions, the architecture and the milestones
 decisions are made. Evidence (measurements, test reports) lives next to the code that produced
 it.
 
-**Status (2026-11-23):** in development; M1 is complete (section 7), M2 is next. Working on
-Linux x64:
+**Status (2026-11-26):** in development. M1 is complete. Next, to full completion (section 7):
+phase H, which hardens and accelerates M1's code, then M2 (crypto and TLS 1.3) and M3 (TLS 1.2
+and certificates). Working on Linux x64:
 - the server: HTTP/1.1 and HTTP/2 (h2c with prior knowledge, h2spec 146/146) on one port,
   per-core workers on epoll (io_uring on request; epoll measured as cheap or cheaper),
   handlers that answer at once or later from any thread;
@@ -40,6 +41,23 @@ The owner's decisions, from the brainstorm of 2026-11-21 to 2026-11-23:
 | 2026-11-23 | **Consumers: .NET's standard interfaces first** (an ASP.NET Core server, an `HttpClient` handler). The design must be ready for a C API, Python and native consumers too: all of them bind to one C ABI. |
 | 2026-11-23 | **Shared source, separate code** between the HTTP versions (section 4). |
 | 2026-11-23 | **Milestone 1: the shared semantics + HTTP/1.1 + HTTP/2** (section 7). |
+| 2026-11-25 | **Next: harden and accelerate everything built so far, then M2 and M3 to full completion.** Every requirement is tested from every angle, security included; extreme single-thread performance through CPU acceleration (SIMD: SSE, AVX2, AVX-512, and the AES, carry-less multiply and SHA instructions), chosen at run time, with a complete fallback (section 7, phase H). |
+| 2026-11-26 | **TLS extensions in M2/M3, beyond RFC 9846's own:** Encrypted Client Hello (RFC 9849, with HPKE, RFC 9180), ticket requests (RFC 9149), SSLKEYLOGFILE output (RFC 9850), certificate compression (RFC 8879: zlib, brotli and zstd), delegated credentials (RFC 9345). |
+| 2026-11-26 | **Revocation and transparency, the fullest option:** stapled OCSP and supplied CRLs, fetching by the library (CRL distribution points, OCSP, missing intermediates through AIA), and Certificate Transparency (SCTs checked against a supplied log list and policy). |
+
+Documents that moved since the decisions above (RFC Editor, read 2026-11-25):
+- **TLS 1.3 is RFC 9846** (July 2026). It obsoletes RFC 8446, so by the "current documents
+  only" rule M2 is written from RFC 9846.
+- **TLS 1.2's own documents are obsoleted** (RFC 5246 by RFC 8446 and 9846; RFC 7627 and 8422 by
+  RFC 9846). A current document still requires TLS 1.2: BCP 195 (RFC 9325, section 3.1.1)
+  says "Implementations MUST support TLS 1.2". Read with the owner's TLS 1.2 decision, M3
+  implements TLS 1.2 from RFC 5246, 7627 and 8422 within the current documents' bounds:
+  RFC 9325 (as updated by RFC 9852), RFC 10015 (no finite-field DH or RSA key exchange in TLS
+  1.2), RFC 9155 (no MD5 or SHA-1 signatures) and RFC 9851 (TLS 1.2 is feature-frozen). That
+  leaves ECDHE with AEAD cipher suites only.
+- **Post-quantum key exchange is standard:** RFC 10024 (August 2026) defines X25519MLKEM768,
+  SecP256r1MLKEM768 and SecP384r1MLKEM1024 over ML-KEM (FIPS 203). RFC 9963 (April 2026)
+  defines the legacy RSASSA-PKCS1-v1_5 code points for TLS 1.3. Both are in M2.
 
 Open, not decided yet:
 - **Where "complete" ends.** The same documents define proxies, gateways and caches (all of
@@ -65,6 +83,27 @@ Open, not decided yet:
 - **Safety by proof.** Nothing checks assembly for us. We use requirement tests, guard pages
   around buffers, fuzzing, differential fuzzing against reference stacks, and constant-time
   checks for crypto.
+- **Tested from every angle** (2026-11-25). Each requirement is tested for:
+  - the rule kept, and each way to break it;
+  - every limit and boundary, at the value and one past it;
+  - every split of its input;
+  - the published attacks on it (smuggling, floods, oracles, downgrades);
+  - running out of memory and time;
+  - both I/O backends, and every CPU tier.
+
+  Around the requirement tests:
+  - coverage-guided fuzzing of every parser and state machine;
+  - differential fuzzing against reference stacks;
+  - an instruction-coverage gate: every block of `libhttpasm.so` runs under the tests, or is
+    listed with the reason it cannot;
+  - constant-time checks wherever a secret is handled.
+- **Fastest tier, every tier proven** (2026-11-25):
+  - Each hot routine has a baseline x86-64 version and accelerated versions: SSSE3 and SSE4.2;
+    AVX2; AVX-512; and the AES, carry-less multiply, SHA, GFNI, BMI2/ADX and IFMA instructions,
+    each where it pays.
+  - The version is chosen once, at load, from CPUID.
+  - The tests force every tier, so the fallback is as proven as the fastest path.
+  - An accelerated version stays only when a single-thread measurement shows it pays.
 
 ## 3. Architecture
 
@@ -107,10 +146,20 @@ Open, not decided yet:
     probed at startup and used when present: they are the levers that may make io_uring the
     default (section 7, step 4).
   - CI runs a newer kernel (7.0 on 2026-11-23), so the paths that need one run there.
-- **CPU baseline:**
-  - SSE2 in the first code.
-  - Faster paths (SSSE3, AVX2, AVX-512) come with run-time dispatch, each kept only when a
-    paired measurement shows it pays.
+- **CPU tiers** (section 2, "Fastest tier"; built in phase H, step H1):
+  - **The levels:**
+    - v1 is the baseline, any x86-64 (SSE2): every routine has a v1 version, and every
+      routine that touches secrets has a constant-time one;
+    - v2 adds SSSE3, SSE4.1/4.2 and POPCNT;
+    - v3 adds AVX2, BMI1/2, FMA and MOVBE;
+    - v4 adds AVX-512 F/BW/CD/DQ/VL.
+  - **Instruction groups** are detected on their own: AES-NI, PCLMULQDQ, SHA-NI,
+    VAES/VPCLMULQDQ, GFNI, ADX, AVX512-IFMA/VBMI/VBMI2.
+  - **Choosing:** CPUID is read once, at load, and each routine's best version is chosen then.
+    An environment variable caps the level and drops groups, for tests and measurements.
+  - **This machine** is an i9-13900K: v3 with VAES, VPCLMULQDQ, SHA-NI and GFNI, and no
+    AVX-512. The AVX-512 paths are proven under Intel SDE's emulation, and measured on CI
+    hardware that has AVX-512.
 
 ## 4. Sharing between the HTTP versions
 
@@ -138,9 +187,12 @@ stays only if the difference is within noise.
 
 - **`specs/documents.json`** pins the official files by SHA-256: the prepped RFCXML v3 for RFCs
   from 2019 on, the text for older ones.
-  - Today: RFC 9110, 9111, 9112, 9113, 7541, 8446, 9000, 9001, 9002, 9114 and 9204.
-  - Each milestone adds its documents: TLS 1.2 (RFC 5246, 9325, ...), X.509 (RFC 5280), the
-    extensions.
+  - Today: RFC 9110, 9111, 9112, 9113, 7541, 6585, 8446, 9000, 9001, 9002, 9114 and 9204.
+  - Each milestone adds its documents (section 7 lists M2's and M3's). M2 starts by replacing
+    RFC 8446 with RFC 9846, which obsoleted it in July 2026.
+  - NIST's standards and the ITU-T's X.680 and X.690 are published as PDF, not RFCXML. Their
+    requirements enter as rows per algorithm, parameter set and direction, each proven by the
+    official test vectors.
 - **`specs/specs.cs`** (a .NET file-based app):
   - `fetch` downloads the files and checks their hashes;
   - `extract` writes `specs/requirements.tsv`;
@@ -179,7 +231,7 @@ stays only if the difference is within noise.
 
 ## 7. Milestones
 
-**M1: the shared semantics + HTTP/1.1 + HTTP/2** (in progress):
+**M1: the shared semantics + HTTP/1.1 + HTTP/2** (complete, 2026-11-23):
 1. *Scaffolding (done):* the repository, `specs/` and the registry, the core and library
    projects, the C ABI, the tests and CI.
 2. *Shared rules (done):* tokens and field values (`httpasm_token_length`,
@@ -256,9 +308,120 @@ chunked not last, Transfer-Encoding in HTTP/1.0, bare LF, obs-fold, two Hosts; a
 parser's own cases in `H1RequestTests`), and the measurements are recorded in
 `benchmarks/results/` (the isolation question, step 5; io_uring against epoll, step 4).
 
-**Then, in order:**
-- **M2:** crypto in assembly + TLS 1.3 (RFC 8446).
-- **M3:** TLS 1.2 + certificates (RFC 5280, X.509/ASN.1/DER).
+**Then, to full completion (the owner, 2026-11-25): phase H, M2, M3.** Every step ends with
+its tests from every angle (section 2), on every CPU tier and both backends, and with its
+single-thread measurements recorded.
+
+**Phase H: hardening and acceleration of M1's code** (HTTP/1.1, chunked bodies, HPACK,
+HTTP/2, the drivers, the client):
+1. *The CPU tier framework* (section 3, "CPU tiers"): CPUID detection, per-routine dispatch,
+   the environment cap. The suite runs at every tier this machine has; the AVX-512 tier runs
+   under Intel SDE; CI does the same.
+2. *The instruments:*
+   - **instruction coverage** of `libhttpasm.so` under the tests, and its gate: every block
+     runs, or is listed with the reason it cannot;
+   - **coverage-guided fuzzing** of every parser and state machine (HTTP/1.1 requests and
+     responses, chunked bodies, HPACK, HTTP/2 frames and connections). It uses AFL++ in
+     binary-instrumentation mode, since assembly has no compiler instrumentation. The seed
+     corpora come from the tests, and every crash or hang becomes a regression test;
+   - **differential fuzzing** against llhttp and picohttpparser (HTTP/1.1) and nghttp2 (HPACK,
+     HTTP/2). Every difference in verdict or parsed fields is triaged against the RFC;
+   - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per
+     call and bytes per cycle, paired A/B with an A/A control, against picohttpparser, llhttp
+     and nghttp2;
+   - **constant-time checks**, for M2: valgrind with secrets marked undefined, and statistical
+     timing tests.
+3. *Tests from every angle* for M1's rows: section 2's matrix for each proven row. Also the
+   published attack corpora (request smuggling, HTTP/2 floods, HPACK bombs, slowloris on both
+   versions), memory and connection exhaustion, and races between deferred answers and stops.
+4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
+   field scanning, token and value validation, header-name lookup and case folding,
+   chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.
+   Each is measured against its v1 version and the rivals.
+
+*H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
+in CI); differential fuzzing has no untriaged difference; every row passes on every tier and
+both backends; the measurements are recorded.
+
+**M2: crypto in assembly + TLS 1.3 (RFC 9846)**:
+1. *Documents:*
+   - re-pin RFC 9846 in place of RFC 8446;
+   - TLS: RFC 10024, 9963, 8449, 7301, 6066, 7919, 9849 with 9180, 9149, 9850, 9345;
+   - certificate compression: RFC 8879 with 1950, 1951, 7932 and 8878;
+   - crypto standards: FIPS 180-4, 202, 197, 198-1, 186-5 and 203; SP 800-38D and 800-186;
+     RFC 7748, 8032, 8439, 5869 and 8017;
+   - their official test vectors (NIST CAVP/ACVP, the documents' own), and Project
+     Wycheproof's.
+2. *Crypto primitives,* each with a constant-time v1 version and accelerated tiers:
+   - **hashes:** SHA-256, SHA-384/512, SHA-3 and SHAKE;
+   - **MACs and KDFs:** HMAC, HKDF;
+   - **AEADs:** AES-128/256-GCM (AES-NI, VAES and VPCLMULQDQ at 256 and 512 bits, a bitsliced
+     fallback), ChaCha20-Poly1305;
+   - **key exchange:** X25519, X448, ECDH on P-256/384/521, FFDHE 2048-8192, ML-KEM-768/1024,
+     and RFC 10024's hybrids;
+   - **signatures:** ECDSA P-256/384/521, Ed25519, Ed448, RSA-PSS and PKCS#1 v1.5
+     (2048-8192 bits);
+   - **randomness:** getrandom.
+
+   Proof: every official vector and Wycheproof's, differential fuzzing against OpenSSL,
+   constant-time checks, every tier. Measured single-threaded against OpenSSL, BoringSSL and
+   AWS-LC.
+3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
+   (PEM, PKCS#8).
+4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
+   - the record layer, the handshake and its key schedule, HelloRetryRequest;
+   - PSK resumption, tickets and ticket requests; 0-RTT with anti-replay;
+   - KeyUpdate and post-handshake authentication;
+   - every group and signature scheme of RFC 9846, and the post-quantum hybrids;
+   - SNI, ALPN, record size limit, delegated credentials, ECH (HPKE), the key log;
+   - certificate compression, with zlib, brotli and zstd codecs in assembly.
+5. *HTTPS:*
+   - TLS in the drivers on both backends, with h2 or http/1.1 chosen by ALPN;
+   - TLS in the C ABI client;
+   - the C ABI for certificates, keys and configurations.
+6. *Proof:*
+   - the registry gate for M2's documents;
+   - RFC 8448's example handshakes, where they still hold under RFC 9846;
+   - BoringSSL's test runner (BoGo) through a shim; tlsfuzzer;
+   - interop with OpenSSL, BoringSSL, GnuTLS, rustls, .NET's SslStream, curl, and Chrome and
+     Firefox on claude-desktops;
+   - h2spec over TLS; fuzzing of every TLS parser;
+   - handshakes per second and bulk throughput, single-threaded, against OpenSSL (alone and
+     in nginx and h2o).
+
+**M3: TLS 1.2 + certificates**:
+1. *Documents:*
+   - certificates: RFC 5280 with its updates; X.680 and X.690 (ITU-T); RFC 5480, 4055,
+     8410, 9525, 5958, 7468; RFC 7292 with 9579 and 9879; RFC 8018;
+   - revocation and transparency: RFC 6960 with 8954 and 9654; RFC 6962 and 9162;
+   - TLS 1.2: RFC 5246, 7627, 8422, 5288, 5289, 7905, 5746, 9325, 10015, 9155, 9851, 9852.
+2. *Encodings:*
+   - ASN.1 DER: a strict reader and a writer;
+   - X.509 certificates and CRLs;
+   - PEM and PKCS#8;
+   - PKCS#12, with PBES2, PBKDF2 and PBMAC1, and decryption of the legacy 3DES and RC2
+     encryption of older .pfx files.
+3. *Verification:*
+   - path building and validation (RFC 5280 section 6: name constraints, policies, key
+     usage), service identity (RFC 9525), the system trust store;
+   - revocation: stapled OCSP, supplied CRLs, and the library's own fetching (CRL
+     distribution points, OCSP, AIA intermediates) through our client, with a cache and a
+     policy;
+   - Certificate Transparency: SCTs from the certificate, the TLS extension or OCSP, checked
+     against a supplied log list and policy.
+4. *TLS 1.2,* server and client:
+   - ECDHE (X25519, X448, P-256/384/521) with AES-GCM and ChaCha20-Poly1305 only;
+   - extended master secret required; renegotiation_info without renegotiation;
+   - session resumption, OCSP stapling, SCTs;
+   - RFC 9113 section 9.2's rules for HTTP/2.
+5. *Proof:*
+   - the registry gate for M3's documents;
+   - x509-limbo, Wycheproof, and BoGo's and tlsfuzzer's TLS 1.2 tests;
+   - interop with Windows' SChannel (claude-desktops) and the rest;
+   - fuzzing of the DER, X.509, PKCS#12, OCSP and CRL parsers;
+   - differential verification against OpenSSL.
+
+**After M3, in order:**
 - **M4:** QUIC + HTTP/3 + QPACK (RFC 9000, 9001, 9002, 9114, 9204), and server push, built
   once for HTTP/2 and HTTP/3 with the stream logic they share (section 4).
 - **M5:** the .NET standard interfaces (ASP.NET Core `IServer`, an `HttpClient` handler). The
