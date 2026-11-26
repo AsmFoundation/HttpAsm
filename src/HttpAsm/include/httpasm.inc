@@ -52,6 +52,9 @@ endstruc
 
 extern httpasm_abi_version          ; uint32_t (void)
 extern httpasm_struct_size          ; uint32_t (uint32_t which)
+extern httpasm_cpu_found            ; uint64_t (void): HTTPASM_CPU_* bits the CPU and OS offer
+extern httpasm_cpu_features         ; uint64_t (void): the bits the library uses
+extern httpasm_cpu_limit            ; uint64_t (uint64_t cap): replaces the cap, returns the bits used
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)

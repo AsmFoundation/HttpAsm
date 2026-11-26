@@ -330,6 +330,47 @@ internal static unsafe partial class Native
     [LibraryImport(Libc, EntryPoint = "munmap", SetLastError = true)]
     internal static partial int Munmap(nint addr, nuint length);
 
+    /// <summary>uint64_t httpasm_cpu_found(void).</summary>
+    /// <returns>The HTTPASM_CPU_* bits the CPU and the OS offer.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_cpu_found")]
+    internal static partial ulong CpuFound();
+
+    /// <summary>uint64_t httpasm_cpu_features(void).</summary>
+    /// <returns>The HTTPASM_CPU_* bits the library uses.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_cpu_features")]
+    internal static partial ulong CpuFeatures();
+
+    /// <summary>uint64_t httpasm_cpu_limit(uint64_t cap).</summary>
+    /// <param name="cap">The new cap (it replaces HTTPASM_CPU's).</param>
+    /// <returns>The bits the library uses from now on.</returns>
+    /// <remarks>
+    /// Process-wide. Every tier computes the same results, so other tests are unaffected, but a
+    /// test that reads the features back must not run beside another that changes them: such
+    /// tests live in <see cref="SerialCollection"/> and restore the cap they found.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "httpasm_cpu_limit")]
+    internal static partial ulong CpuLimit(ulong cap);
+
+    /// <summary>int setenv(const char *name, const char *value, int overwrite).</summary>
+    /// <param name="name">The variable.</param>
+    /// <param name="value">Its value.</param>
+    /// <param name="overwrite">Nonzero to replace an existing value.</param>
+    /// <returns>0, or -1 with errno set.</returns>
+    /// <remarks>
+    /// The C library's own environment, which a native library's getenv reads: .NET's
+    /// Environment.SetEnvironmentVariable changes only the managed copy on Linux. Not safe while
+    /// another thread calls getenv: callers run in <see cref="SerialCollection"/>.
+    /// </remarks>
+    [LibraryImport(Libc, EntryPoint = "setenv", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int SetEnv(string name, string value, int overwrite);
+
+    /// <summary>int unsetenv(const char *name).</summary>
+    /// <param name="name">The variable.</param>
+    /// <returns>0, or -1 with errno set.</returns>
+    /// <remarks>Same caveat as <see cref="SetEnv"/>.</remarks>
+    [LibraryImport(Libc, EntryPoint = "unsetenv", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int UnsetEnv(string name);
+
     /// <summary>getrlimit's and setrlimit's RLIMIT_MEMLOCK on Linux x64.</summary>
     internal const int RlimitMemlock = 8;
 

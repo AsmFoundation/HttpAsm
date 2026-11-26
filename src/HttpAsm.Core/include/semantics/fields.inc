@@ -159,4 +159,107 @@
 %%done:
 %endmacro
 
+; -----------------------------------------------------------------------------
+; HA_FIELD_VALUE_CLASSIFY_V3 data, tmp, eq, low, tab, del, mask
+;   HA_FIELD_VALUE_CLASSIFY on 32 octets (AVX2): the registers are YMM registers, the constants
+;   are broadcast to all 32 lanes, and bit i of mask (a 32-bit register) is octet i.
+; -----------------------------------------------------------------------------
+%macro HA_FIELD_VALUE_CLASSIFY_V3 7
+    vpminub %2, %1, %4                      ; min(octet, 0x1F)
+    vpcmpeqb %2, %2, %1                     ; 0xFF where the octet is 0x00-0x1F
+    vpcmpeqb %3, %1, %5                     ; 0xFF where the octet is HTAB
+    vpandn  %3, %3, %2                      ; CTLs below SP, except HTAB
+    vpcmpeqb %1, %1, %6                     ; 0xFF where the octet is DEL
+    vpor    %1, %1, %3
+    vpmovmskb %7, %1
+%endmacro
+
+; -----------------------------------------------------------------------------
+; HA_FIELD_VALUE_SCAN_V3 ptr, len, out, t0, t0d, t1, data, tmp, eq, low, tab, del
+;   HA_FIELD_VALUE_SCAN's result, 32 octets at a time (v3: AVX2, BMI1). The vector registers
+;   are YMM registers; the rest is as in HA_FIELD_VALUE_SCAN.
+;   Requires len >= 32: a shorter value is the 16-octet version's work (it reads one vector
+;   either way). Like it, this never reads outside ptr[0..len): the last vector overlaps the one
+;   before, whose octets are already known to be valid.
+;   The caller ends its routine with vzeroupper (cpu.inc's conventions).
+; -----------------------------------------------------------------------------
+%macro HA_FIELD_VALUE_SCAN_V3 12
+    vpbroadcastb %10, [rel ha_x16_1f]
+    vpbroadcastb %11, [rel ha_x16_09]
+    vpbroadcastb %12, [rel ha_x16_7f]
+    xor     %3, %3                          ; out: the offset of the next vector
+%%vector:                                   ; invariant: out + 32 <= len
+    vmovdqu %7, [%1 + %3]
+    HA_FIELD_VALUE_CLASSIFY_V3 %7, %8, %9, %10, %11, %12, %5
+    test    %4, %4
+    jnz     %%found
+    add     %3, 32
+    lea     %6, [%3 + 32]
+    cmp     %6, %2
+    jbe     %%vector
+    cmp     %3, %2
+    je      %%done                          ; len was a multiple of 32: out == len
+    mov     %3, %2                          ; 1 to 31 octets remain: the last 32, overlapping
+    sub     %3, 32
+    vmovdqu %7, [%1 + %3]
+    HA_FIELD_VALUE_CLASSIFY_V3 %7, %8, %9, %10, %11, %12, %5
+    test    %4, %4
+    jnz     %%found
+    mov     %3, %2
+    jmp     %%done
+%%found:                                    ; t0 holds the flags of the vector at out
+    tzcnt   %4, %4
+    add     %3, %4
+%%done:
+%endmacro
+
+; -----------------------------------------------------------------------------
+; HA_FIELD_VALUE_SCAN_V4 ptr, len, out, t0, t1, data, low, tab, del, klen, kflag, ktmp
+;   HA_FIELD_VALUE_SCAN's result, 64 octets at a time (v4: AVX-512 BW; BMI2 comes with v3).
+;   Any length: the last vector is loaded under a mask of the octets that remain, and AVX-512
+;   suppresses faults on masked-off octets, so it never touches memory outside ptr[0..len), not
+;   even within the same page, and needs no overlap and no page check.
+;
+;   ptr, len   64-bit registers, unchanged.
+;   out        a 64-bit register: the result.
+;   t0, t1     64-bit scratch registers.
+;   data, low, tab, del  ZMM scratch registers; the last three receive the constants.
+;   klen, kflag, ktmp    opmask scratch registers (k1-k7).
+;   Flags are clobbered. The caller ends its routine with vzeroupper.
+; -----------------------------------------------------------------------------
+%macro HA_FIELD_VALUE_SCAN_V4 12
+    vpbroadcastb %7, [rel ha_x16_1f]
+    vpbroadcastb %8, [rel ha_x16_09]
+    vpbroadcastb %9, [rel ha_x16_7f]
+    xor     %3, %3                          ; out: the offset of the next vector
+%%vector:
+    mov     %4, %2
+    sub     %4, %3                          ; octets left
+    jbe     %%all                           ; none (the last vector may have run past len)
+    mov     %5, -1
+    cmp     %4, 64
+    jae     %%load                          ; a whole vector
+    bzhi    %5, %5, %4                      ; one bit per octet left
+%%load:
+    kmovq   %10, %5
+    vmovdqu8 %6{%10}{z}, [%1 + %3]
+    vpcmpub %11{%10}, %6, %7, 2             ; octet <= 0x1F, among the octets loaded
+    vpcmpeqb %12{%10}, %6, %8               ; HTAB
+    kandnq  %11, %12, %11                   ; CTLs below SP, except HTAB
+    vpcmpeqb %12{%10}, %6, %9               ; DEL
+    korq    %11, %11, %12
+    kortestq %11, %11
+    jnz     %%found
+    add     %3, 64
+    jmp     %%vector
+%%found:
+    kmovq   %5, %11
+    tzcnt   %5, %5
+    add     %3, %5
+    jmp     %%done
+%%all:
+    mov     %3, %2
+%%done:
+%endmacro
+
 %endif

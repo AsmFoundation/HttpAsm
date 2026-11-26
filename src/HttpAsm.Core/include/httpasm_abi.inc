@@ -241,4 +241,34 @@ HTTPASM_HPACK_INDEX_ALL         equ 0x0002
 HTTPASM_HPACK_MAX_LIMIT         equ 0x1000000   ; the largest table limit (16 MiB) httpasm_hpack_init takes
 HA_HPACK_INITIAL_SIZE           equ 4096        ; SETTINGS_HEADER_TABLE_SIZE's initial value (RFC 9113 6.5.2)
 
+; -----------------------------------------------------------------------------
+; CPU features: the bits of httpasm_cpu_found, httpasm_cpu_features and httpasm_cpu_limit, and
+; of the core's ha_cpu. Levels are the x86-64 psABI's; groups are instructions that CPUs of one
+; level may or may not have. cpu.inc has the rules (what each level adds, which group needs
+; which level, how a routine picks its version).
+; -----------------------------------------------------------------------------
+HTTPASM_CPU_V2          equ 1 << 0      ; x86-64-v2: SSE3, SSSE3, SSE4.1/4.2, POPCNT, CX16, LAHF
+HTTPASM_CPU_V3          equ 1 << 1      ; x86-64-v3: AVX, AVX2, BMI1/2, F16C, FMA, LZCNT, MOVBE
+HTTPASM_CPU_V4          equ 1 << 2      ; x86-64-v4: AVX-512 F, BW, CD, DQ, VL
+HTTPASM_CPU_AESNI       equ 1 << 8      ; AES-NI
+HTTPASM_CPU_CLMUL       equ 1 << 9      ; PCLMULQDQ: carry-less multiplication
+HTTPASM_CPU_SHA         equ 1 << 10     ; SHA extensions: SHA-1 and SHA-256 rounds
+HTTPASM_CPU_GFNI        equ 1 << 11     ; Galois-field instructions
+HTTPASM_CPU_BMI2        equ 1 << 12     ; MULX, SHRX, PDEP, ... (counted with v3)
+HTTPASM_CPU_ADX         equ 1 << 13     ; ADCX/ADOX (counted with v3)
+HTTPASM_CPU_VAES        equ 1 << 14     ; VAES: AES on YMM (v3) and ZMM (v4)
+HTTPASM_CPU_VCLMUL      equ 1 << 15     ; VPCLMULQDQ: carry-less multiplication on YMM and ZMM
+HTTPASM_CPU_SHA512      equ 1 << 16     ; SHA512 extensions (VEX encoded: needs v3)
+HTTPASM_CPU_IFMA        equ 1 << 17     ; AVX512-IFMA (needs v4)
+HTTPASM_CPU_VBMI        equ 1 << 18     ; AVX512-VBMI (needs v4)
+HTTPASM_CPU_VBMI2       equ 1 << 19     ; AVX512-VBMI2 (needs v4)
+
+HTTPASM_CPU_ALL         equ HTTPASM_CPU_V2 | HTTPASM_CPU_V3 | HTTPASM_CPU_V4 | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_SHA | HTTPASM_CPU_GFNI | HTTPASM_CPU_BMI2 | HTTPASM_CPU_ADX | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_SHA512 | HTTPASM_CPU_IFMA | HTTPASM_CPU_VBMI | HTTPASM_CPU_VBMI2
+; The caps of the levels, as HTTPASM_CPU=v1..v4 sets them: each keeps the groups its level's
+; encodings allow (v1: none at all, the pure baseline; v2: the legacy-SSE groups).
+HTTPASM_CPU_CAP_V1      equ 0
+HTTPASM_CPU_CAP_V2      equ HTTPASM_CPU_V2 | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_SHA | HTTPASM_CPU_GFNI
+HTTPASM_CPU_CAP_V3      equ HTTPASM_CPU_CAP_V2 | HTTPASM_CPU_V3 | HTTPASM_CPU_BMI2 | HTTPASM_CPU_ADX | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_SHA512
+HTTPASM_CPU_CAP_V4      equ HTTPASM_CPU_CAP_V3 | HTTPASM_CPU_V4 | HTTPASM_CPU_IFMA | HTTPASM_CPU_VBMI | HTTPASM_CPU_VBMI2
+
 %endif

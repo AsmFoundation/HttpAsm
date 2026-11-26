@@ -31,13 +31,31 @@ httpasm_token_length:
 ;   none. The forbidden octets are the CTLs other than HTAB: 0x00-0x08, 0x0A-0x1F and 0x7F
 ;   (RFC9110-5.5-2, RFC9110-5.5-5#1, RFC9110-5.5-5#2, RFC9113-8.2.1-3.3). Whitespace at the
 ;   value's ends is not checked here: each version has its own rule for it.
-;   In: rdi = p, rsi = n. Out: rax. Clobbers rcx, rdx, xmm0-xmm5 and the flags.
-;   Memory: see HA_FIELD_VALUE_SCAN. It never reads outside p[0..n), except that a short value
-;   may be read as 16 octets that lie in the same 4 KiB page as p, which cannot fault.
+;   In: rdi = p, rsi = n. Out: rax. Clobbers rcx, rdx, vector registers 0-5 (YMM/ZMM upper
+;   halves included), k1-k3 and the flags.
+;   Versions (cpu.inc): v4 (AVX-512 BW, 64 octets per step, masked tail), v3 (AVX2, 32 octets
+;   per step, for values of 32 octets or more), v1 (SSE2, 16 octets per step). Each returns the
+;   same index for every input.
+;   Memory: see HA_FIELD_VALUE_SCAN. It never reads outside p[0..n), except that the v1 and v3
+;   versions may read a short value as 16 octets that lie in the same 4 KiB page as p, which
+;   cannot fault.
 ; -----------------------------------------------------------------------------
 global httpasm_field_value_scan:function (httpasm_field_value_scan.end - httpasm_field_value_scan)
 align 16
 httpasm_field_value_scan:
+    HA_CPU_PICK1 HTTPASM_CPU_V4, .v4
+    HA_CPU_PICK1 HTTPASM_CPU_V3, .v3
+.v1:
     HA_FIELD_VALUE_SCAN rdi, rsi, rax, rcx, ecx, rdx, xmm0, xmm1, xmm2, xmm3, xmm4, xmm5
+    ret
+.v3:
+    cmp     rsi, 32
+    jb      .v1                             ; under 32 octets the 16-octet version reads as much
+    HA_FIELD_VALUE_SCAN_V3 rdi, rsi, rax, rcx, ecx, rdx, ymm0, ymm1, ymm2, ymm3, ymm4, ymm5
+    vzeroupper
+    ret
+.v4:
+    HA_FIELD_VALUE_SCAN_V4 rdi, rsi, rax, rcx, rdx, zmm0, zmm1, zmm2, zmm3, k1, k2, k3
+    vzeroupper
     ret
 .end:

@@ -8,8 +8,9 @@
 ;   - Internal symbols start with ha_ and are hidden: they link between the core's objects but
 ;     are exported from no image. The C ABI's symbols start with httpasm_ and are exported
 ;     through src/HttpAsm/httpasm.map.
-;   - SSE2 is the floor of this first code. Faster paths (SSSE3, AVX2, AVX-512) come with
-;     run-time CPU dispatch, each kept only when a paired measurement shows it pays.
+;   - SSE2 is the floor (v1, any x86-64). Faster versions (v2: SSSE3/SSE4.2; v3: AVX2; v4:
+;     AVX-512; the AES, carry-less multiply and SHA instructions) are chosen at run time from
+;     ha_cpu, and each is kept only when a single-thread measurement shows it pays: cpu.inc.
 ;   - Comments name the requirement rows they implement (specs/requirements.tsv): a row id such
 ;     as RFC9110-5.5-5#1 leads to the RFC Editor's paragraph of the same anchor.
 ; =============================================================================
@@ -59,6 +60,7 @@ extern ha_method_lookup     ; eax = HTTPASM_METHOD_* of method rdi[0..rsi), 0 if
 extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi if none
 
 %include "httpasm_abi.inc"
+%include "cpu.inc"
 %include "semantics/fields.inc"
 
 %endif

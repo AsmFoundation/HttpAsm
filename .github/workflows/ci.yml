@@ -10,15 +10,21 @@
 #   2. dotnet build HttpAsm.slnx -c Release: the core, libhttpasm.so and the tests.
 #      AsmFoundation.Sdk's bundled toolchain (NASM, lld, from nuget.org) assembles and links on
 #      this runner, as it does on Windows and macOS.
-#   3. The tests, natively, with HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails
-#      instead, so nothing passes by not running. h2spec (HTTP/2 conformance, 146 cases) comes
-#      from tests/tools.sh, pinned by version and SHA-256, and HTTPASM_REQUIRE_H2SPEC=1 makes
-#      Http2Tests.PassesH2spec fail rather than skip if it were missing. The tests run twice:
-#      on epoll, the library's default, then with every server asking for io_uring
-#      (HTTPASM_TEST_IO=uring). Both runs set HTTPASM_REQUIRE_URING=1: the runner's kernel has
-#      io_uring, so a server that asks for it and silently falls back to epoll fails the run
-#      (the runner's kernel 7.0 charges rings to RLIMIT_MEMLOCK, 8 MiB there: RingBudgetTests
-#      runs on it, and too large rings once made servers fall back here).
+#   3. The tests, through tests/run-linux.sh with the native runner, exactly as they run on a
+#      developer's machine:
+#      - the .NET suite at every CPU tier the runner's CPU has (HTTPASM_CPU=v1, v2, v3, and v4
+#        when it has AVX-512), each on epoll and then with every server asking for io_uring;
+#      - tests/native/tiers: every multi-version routine at every tier against oracles and
+#        guard pages, natively, and under Intel SDE (AVX-512) when the CPU has no AVX-512.
+#      HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails instead, so nothing passes
+#      by not running. h2spec and Intel SDE come from tests/tools.sh, pinned by version and
+#      SHA-256; h2spec's 146 cases are required. HTTPASM_REQUIRE_URING=1: the runner's kernel
+#      has io_uring, so a server that asks for it and silently falls back to epoll fails the
+#      run (the runner's kernel 7.0 charges rings to RLIMIT_MEMLOCK, 8 MiB there:
+#      RingBudgetTests runs on it, and too large rings once made servers fall back here).
+#   4. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
+#      written to the job summary with the runner's CPU. Informational: a shared runner is no
+#      measuring machine, but it is where AVX-512 versions get timed when the runner has it.
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag in the comment is for
 # humans), the same pins as GrpcAsm's and AsmSdk's workflows. The token is read-only, and the
@@ -70,18 +76,21 @@ jobs:
       - name: Build (core, libhttpasm.so, tests)
         run: dotnet build HttpAsm.slnx -c Release
 
-      - name: Test tools (h2spec 2.6.0, pinned by SHA-256)
-        run: echo "HTTPASM_H2SPEC=$(bash tests/tools.sh)/h2spec" >> "$GITHUB_ENV"
+      - name: The runner's CPU
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          echo "AVX-512: $(grep -m1 -o -w -E 'avx512[a-z_0-9]*' /proc/cpuinfo | sort -u | tr '\n' ' ')"
 
-      - name: Tests on epoll, the default (Linux, h2spec and io_uring required)
+      - name: Tests - every CPU tier on both backends; the tier program natively and under Intel SDE
         env:
-          HTTPASM_REQUIRE_H2SPEC: "1"
-          HTTPASM_REQUIRE_URING: "1"
-        run: dotnet test --project tests/HttpAsm.Tests/HttpAsm.Tests.csproj -c Release --no-build
+          HTTPASM_RUNNER: native
+        run: bash tests/run-linux.sh Release
 
-      - name: Tests on io_uring (every server asks for it)
-        env:
-          HTTPASM_REQUIRE_H2SPEC: "1"
-          HTTPASM_REQUIRE_URING: "1"
-          HTTPASM_TEST_IO: uring
-        run: dotnet test --project tests/HttpAsm.Tests/HttpAsm.Tests.csproj -c Release --no-build
+      - name: Single-thread measurements per tier (informational, to the job summary)
+        run: |
+          bin="$(bash tests/native/build.sh Release)"
+          {
+            echo "### benchmarks/micro on $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
+            echo
+            "$bin/micro" 21
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -265,6 +265,160 @@ internal unsafe struct HpackOutput
 }
 
 /// <summary>
+/// The CPU tiers' bits (httpasm.h, HTTPASM_CPU_*), and an independent model of how the library
+/// turns found features and a cap into the features it uses: the tests' oracle for
+/// httpasm_cpu_features, httpasm_cpu_limit and the HTTPASM_CPU variable.
+/// </summary>
+/// <remarks>
+/// Written from the documented rules (httpasm.h, cpu.inc), not from the assembly, so a slip in
+/// either shows as a difference.
+/// </remarks>
+internal static class Cpu
+{
+    /// <summary>x86-64-v2.</summary>
+    public const ulong V2 = 1 << 0;
+
+    /// <summary>x86-64-v3.</summary>
+    public const ulong V3 = 1 << 1;
+
+    /// <summary>x86-64-v4.</summary>
+    public const ulong V4 = 1 << 2;
+
+    /// <summary>AES-NI.</summary>
+    public const ulong Aesni = 1 << 8;
+
+    /// <summary>PCLMULQDQ.</summary>
+    public const ulong Clmul = 1 << 9;
+
+    /// <summary>SHA-1/SHA-256 extensions.</summary>
+    public const ulong Sha = 1 << 10;
+
+    /// <summary>GFNI.</summary>
+    public const ulong Gfni = 1 << 11;
+
+    /// <summary>BMI2 (counted with v3).</summary>
+    public const ulong Bmi2 = 1 << 12;
+
+    /// <summary>ADX (counted with v3).</summary>
+    public const ulong Adx = 1 << 13;
+
+    /// <summary>VAES (needs v3).</summary>
+    public const ulong Vaes = 1 << 14;
+
+    /// <summary>VPCLMULQDQ (needs v3).</summary>
+    public const ulong Vclmul = 1 << 15;
+
+    /// <summary>SHA512 extensions (needs v3).</summary>
+    public const ulong Sha512 = 1 << 16;
+
+    /// <summary>AVX512-IFMA (needs v4).</summary>
+    public const ulong Ifma = 1 << 17;
+
+    /// <summary>AVX512-VBMI (needs v4).</summary>
+    public const ulong Vbmi = 1 << 18;
+
+    /// <summary>AVX512-VBMI2 (needs v4).</summary>
+    public const ulong Vbmi2 = 1 << 19;
+
+    /// <summary>Every bit: no cap.</summary>
+    public const ulong All = V2 | V3 | V4 | Aesni | Clmul | Sha | Gfni | Bmi2 | Adx | Vaes | Vclmul | Sha512 | Ifma | Vbmi | Vbmi2;
+
+    /// <summary>The cap "v1" sets: the pure baseline.</summary>
+    public const ulong CapV1 = 0;
+
+    /// <summary>The cap "v2" sets: the level and the legacy-SSE groups.</summary>
+    public const ulong CapV2 = V2 | Aesni | Clmul | Sha | Gfni;
+
+    /// <summary>The cap "v3" sets.</summary>
+    public const ulong CapV3 = CapV2 | V3 | Bmi2 | Adx | Vaes | Vclmul | Sha512;
+
+    /// <summary>The cap "v4" sets.</summary>
+    public const ulong CapV4 = CapV3 | V4 | Ifma | Vbmi | Vbmi2;
+
+    /// <summary>The words HTTPASM_CPU may hold as its first item, and their caps.</summary>
+    public static readonly IReadOnlyDictionary<string, ulong> Levels = new Dictionary<string, ulong>(StringComparer.Ordinal)
+    {
+        ["native"] = All, ["v1"] = CapV1, ["v2"] = CapV2, ["v3"] = CapV3, ["v4"] = CapV4,
+    };
+
+    /// <summary>The groups a "-group" item may drop.</summary>
+    public static readonly IReadOnlyDictionary<string, ulong> Groups = new Dictionary<string, ulong>(StringComparer.Ordinal)
+    {
+        ["aesni"] = Aesni, ["clmul"] = Clmul, ["sha"] = Sha, ["gfni"] = Gfni, ["bmi2"] = Bmi2, ["adx"] = Adx,
+        ["vaes"] = Vaes, ["vclmul"] = Vclmul, ["sha512"] = Sha512, ["ifma"] = Ifma, ["vbmi"] = Vbmi, ["vbmi2"] = Vbmi2,
+    };
+
+    /// <summary>
+    /// What the library uses given what was found and a cap: found AND cap, then every level
+    /// without the one below dropped, and every group without the level its encodings need.
+    /// </summary>
+    /// <param name="found">httpasm_cpu_found().</param>
+    /// <param name="cap">The cap.</param>
+    /// <returns>The expected httpasm_cpu_features().</returns>
+    public static ulong Effective(ulong found, ulong cap)
+    {
+        ulong bits = found & cap & All;
+        if ((bits & V2) == 0)
+        {
+            bits &= ~(V3 | V4);
+        }
+
+        if ((bits & V3) == 0)
+        {
+            bits &= ~(V4 | Bmi2 | Adx | Vaes | Vclmul | Sha512);
+        }
+
+        if ((bits & V4) == 0)
+        {
+            bits &= ~(Ifma | Vbmi | Vbmi2);
+        }
+
+        return bits;
+    }
+
+    /// <summary>
+    /// The cap HTTPASM_CPU's text asks for: null or empty is no cap; a level word, then
+    /// ",-group" items; without a level, the first item is a "-group". Anything else is the
+    /// baseline (CapV1), so a typo never leaves faster code running unnoticed.
+    /// </summary>
+    /// <param name="text">The variable's value, or null when unset.</param>
+    /// <returns>The cap.</returns>
+    public static ulong CapFromText(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return All;
+        }
+
+        string[] items = text.Split(',');
+        ulong cap = All;
+        int first = 0;
+        if (!items[0].StartsWith('-'))
+        {
+            if (!Levels.TryGetValue(items[0], out cap))
+            {
+                return CapV1;
+            }
+
+            first = 1;
+        }
+
+        for (int i = first; i < items.Length; i++)
+        {
+            string item = items[i];
+            if (item.Length < 2 || item[0] != '-' || !Groups.TryGetValue(item[1..], out ulong group))
+            {
+                return CapV1;
+            }
+
+            cap &= ~group;
+        }
+
+        return cap;
+    }
+}
+
+/// <summary>
 /// What a server's workers wait and do their I/O with (httpasm.h): the option that asks for
 /// io_uring (epoll is the default), and httpasm_server_io's answers.
 /// </summary>

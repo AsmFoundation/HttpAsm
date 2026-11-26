@@ -5,6 +5,13 @@
 #
 #   h2spec 2.6.0 (linux amd64): HTTP/2 conformance, 146 cases. Http2Tests.PassesH2spec runs it
 #   when HTTPASM_H2SPEC names the binary; tests/run-linux.sh and CI set that.
+#   Intel SDE 10.13.1 (2026-07-28, linux): Intel's Software Development Emulator, which runs a
+#   program as a CPU with newer instructions would (AVX-512 among them). tests/run-linux.sh
+#   runs the suite's v4 tier under it on a CPU without AVX-512, so the AVX-512 versions are
+#   proven even where they cannot run natively. Free for any use under the Intel Simplified
+#   Software License; the SHA-256 below is the one Intel publishes on its download page. The
+#   archive holds symbolic links, so it is unpacked only on Linux: here when this script runs
+#   on Linux (into .tools/sde/), and by run-linux.sh inside WSL otherwise.
 #
 # A download whose hash differs is deleted and the script fails: a changed release must be
 # reviewed and pinned again here, never trusted silently. Already-fetched tools are re-checked
@@ -40,6 +47,17 @@ if [ ! -x "$tools/h2spec" ] || [ "$tools/h2spec_linux_amd64.tar.gz" -nt "$tools/
   tar -xzf "$tools/h2spec_linux_amd64.tar.gz" -C "$tools" h2spec
   chmod +x "$tools/h2spec"
   touch "$tools/h2spec"
+fi
+
+sde_archive=sde-external-10.13.1-2026-07-28-lin.tar.xz
+fetch "$sde_archive" \
+  "https://downloadmirror.intel.com/924984/$sde_archive" \
+  94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+if [ "$(uname -s)" = "Linux" ] && { [ ! -x "$tools/sde/sde64" ] || [ "$tools/$sde_archive" -nt "$tools/sde/sde64" ]; }; then
+  rm -rf "${tools:?}/sde"
+  mkdir -p "$tools/sde"
+  tar -xJf "$tools/$sde_archive" -C "$tools/sde" --strip-components=1
+  touch "$tools/sde/sde64"
 fi
 
 echo "$tools"

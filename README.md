@@ -77,12 +77,23 @@ dotnet test --project tests/HttpAsm.Tests          # natively, on Linux x64
 dotnet run specs/specs.cs -- extract --check       # the registry matches the pinned documents
 dotnet run specs/generate.cs -- --check            # the generated tables match them too
 benchmarks/run.sh                                  # HttpAsm, nginx and h2o, side by side (Linux)
+$(bash tests/native/build.sh Release)/micro        # each routine's CPU tiers, single-threaded
 ```
 
-`tests/run-linux.sh` fetches h2spec (pinned by SHA-256) and requires its 146 cases to pass. It
-runs every test twice: on epoll, the default, then with every server asking for io_uring
-(`HTTPASM_TEST_IO=uring`); where io_uring is known to work (WSL, a Linux host, CI) a server
-that asks for it and falls back to epoll fails the run.
+`tests/run-linux.sh` fetches h2spec and Intel SDE (each pinned by SHA-256), then:
+- **runs the .NET suite at every CPU tier this machine has** (`HTTPASM_CPU=v1`, `v2`, `v3`,
+  and `v4` on AVX-512 hardware);
+- **runs each tier twice:** on epoll, the default, then with every server asking for io_uring
+  (`HTTPASM_TEST_IO=uring`). Where io_uring is known to work (WSL, a Linux host, CI), a server
+  that asks for it and falls back to epoll fails the run;
+- **runs `tests/native/tiers`:** every multi-version routine at every tier, against an oracle
+  and a guard page. It runs natively, then under Intel SDE's AVX-512 emulation when the CPU
+  has none, because SDE cannot run the .NET runtime;
+- **requires h2spec's 146 cases to pass.**
+
+`HTTPASM_CPU` caps the library's CPU tier in any program, as `OPENSSL_ia32cap` does for
+OpenSSL: `v1` is plain x86-64, and `v3,-vaes` is AVX2 without VAES. It is described in
+`include/httpasm.h`.
 
 ## License
 

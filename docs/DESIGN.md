@@ -314,9 +314,23 @@ single-thread measurements recorded.
 
 **Phase H: hardening and acceleration of M1's code** (HTTP/1.1, chunked bodies, HPACK,
 HTTP/2, the drivers, the client):
-1. *The CPU tier framework* (section 3, "CPU tiers"): CPUID detection, per-routine dispatch,
-   the environment cap. The suite runs at every tier this machine has; the AVX-512 tier runs
-   under Intel SDE; CI does the same.
+1. *The CPU tier framework* (section 3, "CPU tiers"), done 2026-11-26:
+   - `cpu/cpu.asm` reads CPUID and XGETBV. The library's constructor applies `HTTPASM_CPU`,
+     and `httpasm_cpu_found`, `_features` and `_limit` are in the C ABI. Each multi-version
+     routine reads one mask at its entry (`cpu.inc`).
+   - The .NET suite runs at v1, v2, v3 (and v4 on AVX-512 hardware), each on both backends
+     (`tests/run-linux.sh`, and CI through it).
+   - Intel SDE hangs on the .NET runtime, but runs native programs in seconds. So
+     `tests/native/tiers.c` runs every multi-version routine at every tier in one process,
+     against an oracle and a guard page: natively, and under SDE as a Sapphire Rapids. The suite
+     proves v1; identical results prove the rest. A planted AVX-512-only bug passed natively and
+     failed under SDE, as it must.
+   - `benchmarks/micro` times each tier single-threaded, ranked by the fastest of 41 samples
+     with an A/A control: the host's medians swing up to 2x.
+   - The pilot is `httpasm_field_value_scan`. Its AVX2 version is kept: 1.28x faster at 32
+     octets, 1.8x at 64, 2.0-2.2x from 256 up; below 32, every tier runs the SSE2 code. Its
+     AVX-512 version is proven equal, and waits for AVX-512 hardware to be timed
+     (`benchmarks/README.md`).
 2. *The instruments:*
    - **instruction coverage** of `libhttpasm.so` under the tests, and its gate: every block
      runs, or is listed with the reason it cannot;

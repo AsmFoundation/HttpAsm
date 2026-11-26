@@ -72,7 +72,51 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 `HELLO_IO_A` and `HELLO_IO_B` choose each build's backend (`epoll`, the default, or `uring`).
 
+`micro/micro.c` measures single routines, one thread, at every CPU tier (docs/DESIGN.md
+sections 2 and 3: a faster version stays only when it measures faster). For each routine and
+input size, it measures every tier (v1 to v4), and v1 again as the A/A control, in turn, round
+after round, in one process pinned to one CPU, switching tiers with `httpasm_cpu_limit`.
+
+```bash
+bin=$(bash tests/native/build.sh Release)   # builds micro and the tier program
+$bin/micro 41                               # 41 rounds
+```
+
+**How to read it:**
+- It ranks by the fastest sample, not the median. On this machine (WSL2 on a hybrid Intel
+  CPU), interference only ever adds time, and medians of the very same code swung by 2x
+  between the baseline and its A/A twin. The fastest of many 0.5 ms samples kept that gap
+  within about 10%.
+- "vs v1" is the baseline's fastest sample over the tier's.
+- A tier the CPU lacks collapses to the best one it has: here "v4" re-runs v3, since the CPU
+  has no AVX-512.
+
 ## Results
+
+**2026-11-26: `httpasm_field_value_scan` per tier, the tier framework's pilot.** On this
+machine (i9-13900K, WSL2, features 0xff03: v3 with VAES, VPCLMULQDQ, SHA-NI and GFNI, no
+AVX-512), with `micro` at 41 rounds: the fastest ns per call, then the baseline's time over the
+tier's.
+
+| Octets | v1 (SSE2) | v3 (AVX2) | v3 vs v1 | A/A (v1 again vs v1) |
+|---:|---:|---:|---:|---:|
+| 8 | 2.80 | 2.74 | 1.02x | 0.92x |
+| 16 | 2.84 | 2.93 | 0.97x | 0.95x |
+| 31 | 3.36 | 4.27 | 0.79x | 0.97x |
+| 32 | 3.11 | 2.42 | 1.28x | 1.00x |
+| 64 | 6.24 | 3.46 | 1.80x | 1.11x |
+| 256 | 15.11 | 7.43 | 2.03x | 1.04x |
+| 1024 | 63.25 | 29.24 | 2.16x | 1.10x |
+| 4096 | 248.84 | 114.84 | 2.17x | 0.99x |
+
+What it shows:
+- **The AVX2 version is kept**: from 32 octets up it beats the baseline by more than the A/A
+  gap, 1.3x at 32 and over 2x from 256.
+- **Below 32 octets every tier runs the SSE2 code**, so differences there are noise. The
+  0.79x at 31 is one row; the same code measured as "v4" gave 1.07x.
+- **The AVX-512 version cannot run on this CPU.** It is proven equal to the others under
+  Intel SDE (`tests/native/tiers`), and is timed only where CI's runner has AVX-512 (its job
+  summary).
 
 Every run's report is in [results/](results/), named by date and time; a report names the
 commit it measured (`-dirty` when the tree had uncommitted changes when the run began).

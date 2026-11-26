@@ -252,6 +252,51 @@ uint32_t httpasm_abi_version(void);
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
+ * CPU tiers. Each hot routine has a baseline x86-64 version and faster ones (SSE4.2, AVX2,
+ * AVX-512, AES-NI, ...); the library picks the best one the CPU and the OS allow when it loads.
+ * Every version computes the same results, so the choice changes speed, never behavior.
+ * The environment variable HTTPASM_CPU caps the choice when the library loads (as
+ * OPENSSL_ia32cap does for OpenSSL): "native" or unset for everything; "v1" to "v4" for at most
+ * that x86-64 level; then ",-group" items to drop groups ("v3,-vaes", "-sha"). An invalid value
+ * selects v1, the baseline, so a typo never leaves faster code running unnoticed.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_CPU_V2          (1u << 0)   /* x86-64-v2: SSE3, SSSE3, SSE4.1/4.2, POPCNT, CX16 */
+#define HTTPASM_CPU_V3          (1u << 1)   /* x86-64-v3: AVX, AVX2, BMI1/2, FMA, LZCNT, MOVBE */
+#define HTTPASM_CPU_V4          (1u << 2)   /* x86-64-v4: AVX-512 F, BW, CD, DQ, VL */
+#define HTTPASM_CPU_AESNI       (1u << 8)
+#define HTTPASM_CPU_CLMUL       (1u << 9)   /* PCLMULQDQ */
+#define HTTPASM_CPU_SHA         (1u << 10)  /* SHA-1/SHA-256 extensions */
+#define HTTPASM_CPU_GFNI        (1u << 11)
+#define HTTPASM_CPU_BMI2        (1u << 12)  /* counted with v3 */
+#define HTTPASM_CPU_ADX         (1u << 13)  /* counted with v3 */
+#define HTTPASM_CPU_VAES        (1u << 14)  /* needs v3 (YMM) or v4 (ZMM) */
+#define HTTPASM_CPU_VCLMUL      (1u << 15)  /* VPCLMULQDQ; needs v3 or v4 */
+#define HTTPASM_CPU_SHA512      (1u << 16)  /* needs v3 */
+#define HTTPASM_CPU_IFMA        (1u << 17)  /* AVX512-IFMA; needs v4 */
+#define HTTPASM_CPU_VBMI        (1u << 18)  /* needs v4 */
+#define HTTPASM_CPU_VBMI2       (1u << 19)  /* needs v4 */
+#define HTTPASM_CPU_ALL         (HTTPASM_CPU_V2 | HTTPASM_CPU_V3 | HTTPASM_CPU_V4 | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_SHA | HTTPASM_CPU_GFNI | HTTPASM_CPU_BMI2 | HTTPASM_CPU_ADX | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_SHA512 | HTTPASM_CPU_IFMA | HTTPASM_CPU_VBMI | HTTPASM_CPU_VBMI2)
+/* The caps "v1" to "v4" set: each level with the groups its encodings allow. */
+#define HTTPASM_CPU_CAP_V1      0u
+#define HTTPASM_CPU_CAP_V2      (HTTPASM_CPU_V2 | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_SHA | HTTPASM_CPU_GFNI)
+#define HTTPASM_CPU_CAP_V3      (HTTPASM_CPU_CAP_V2 | HTTPASM_CPU_V3 | HTTPASM_CPU_BMI2 | HTTPASM_CPU_ADX | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_SHA512)
+#define HTTPASM_CPU_CAP_V4      (HTTPASM_CPU_CAP_V3 | HTTPASM_CPU_V4 | HTTPASM_CPU_IFMA | HTTPASM_CPU_VBMI | HTTPASM_CPU_VBMI2)
+
+/* What the CPU and the OS offer (HTTPASM_CPU_* bits), read when the library loaded. */
+uint64_t httpasm_cpu_found(void);
+
+/* What the library uses: httpasm_cpu_found narrowed by the cap, with every group whose level is
+ * missing dropped (no VAES without v3, no IFMA without v4). */
+uint64_t httpasm_cpu_features(void);
+
+/* Replaces the cap (HTTPASM_CPU's included) and returns the new httpasm_cpu_features():
+ * HTTPASM_CPU_CAP_V1 forces the baseline, HTTPASM_CPU_ALL restores everything. Meant for tests
+ * and measurements that compare tiers in one process. Safe while other threads run HttpAsm
+ * code: every tier computes the same results. */
+uint64_t httpasm_cpu_limit(uint64_t cap);
+
+/* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)
  * ------------------------------------------------------------------------------------------ */
 
