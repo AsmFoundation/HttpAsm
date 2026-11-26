@@ -91,7 +91,31 @@ $bin/micro 41                               # 41 rounds
 - A tier the CPU lacks collapses to the best one it has: here "v4" re-runs v3, since the CPU
   has no AVX-512.
 
+`rivals/` measures HttpAsm's parsers beside the ones others run, on the same inputs, in one
+process on one core: the HTTP/1.1 request parser against picohttpparser (h2o) and llhttp
+(Node.js), and the HPACK decoder against nghttp2. The rivals are the sources
+`tests/tools.sh` pins for the differential fuzzers, compiled with `-O3 -march=native`, which is
+their best: picohttpparser and llhttp have SSE4.2 paths. HttpAsm runs at its best tier and at
+v1, and the best tier again as the A/A control.
+
+```bash
+benchmarks/rivals/run.sh 41                 # builds the rivals and rivals.c, runs 41 rounds
+```
+
+Read it as micro's table: fastest sample, A/A gap, and each contender's time over HttpAsm's.
+Mind what each parser does. picohttpparser splits a head into lines and checks almost nothing
+else. llhttp checks the grammar. HttpAsm also applies RFC 9112's semantics: target and Host
+grammar, field names and values, every framing rule, and known-field ids.
+
 ## Results
+
+- 2026-11-26, `results/2026-11-26-rivals.md` (i9-13900K under WSL2, the first run): the
+  baseline for phase H step 4.
+  - **Request heads:** picohttpparser is 2.1-2.3x faster than HttpAsm; llhttp is level or up
+    to 1.34x slower.
+  - **HPACK:** HttpAsm decodes 1.48x faster than nghttp2.
+  - **Tiers:** HttpAsm's best tier equals its v1, because its one vector routine (the field
+    value scan) is too small a share of a whole parse to show.
 
 **2026-11-26: `httpasm_field_value_scan` per tier, the tier framework's pilot.** On this
 machine (i9-13900K, WSL2, features 0xff03: v3 with VAES, VPCLMULQDQ, SHA-NI and GFNI, no

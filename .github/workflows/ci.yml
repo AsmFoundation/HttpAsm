@@ -30,7 +30,8 @@
 #   5. tests/fuzz/run.sh: each fuzzer for 30 s with libFuzzer, AddressSanitizer and
 #      UndefinedBehaviorSanitizer, steered by the assembly's own branch edges. A finding fails
 #      the run and is printed in base64, so the log alone reproduces it.
-#   6. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
+#   6. benchmarks/micro and benchmarks/rivals: single-thread measurements of the multi-version
+#      routines at every tier, and of the parsers beside picohttpparser, llhttp and nghttp2,
 #      written to the job summary with the runner's CPU. Informational: a shared runner is no
 #      measuring machine, but it is where AVX-512 versions get timed when the runner has it.
 #
@@ -138,4 +139,14 @@ jobs:
             echo "### benchmarks/micro on $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
             echo
             "$bin/micro" 21
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: The parsers beside picohttpparser, llhttp and nghttp2 (informational, to the job summary)
+        env:
+          HTTPASM_RUNNER: native
+        run: |
+          {
+            echo "### benchmarks/rivals on $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-)"
+            echo
+            bash benchmarks/rivals/run.sh 21
           } | tee -a "$GITHUB_STEP_SUMMARY"

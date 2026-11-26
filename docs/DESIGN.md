@@ -422,7 +422,15 @@ HTTP/2, the drivers, the client):
        coding. A coding's token must now end its element (OWS, then `,`, `;` or the end).
    - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per
      call and bytes per cycle, paired A/B with an A/A control, against picohttpparser, llhttp
-     and nghttp2;
+     and nghttp2. Built 2026-11-26 as `benchmarks/rivals/` (with `benchmarks/micro` for the
+     tiers). The rivals are compiled at their best (`-O3 -march=native`), in one process on
+     one core, interleaved, ranked by the fastest sample. The first run is step 4's baseline:
+     - picohttpparser parses request heads 2.1-2.3x faster than HttpAsm, while checking
+       little beyond line structure;
+     - llhttp is level with HttpAsm, or up to 1.34x slower;
+     - HttpAsm decodes HPACK 1.48x faster than nghttp2;
+     - HttpAsm's best tier equals its v1. Acceleration must reach the whole parse, not one
+       routine;
    - **constant-time checks**, for M2: valgrind with secrets marked undefined, and statistical
      timing tests.
 3. *Tests from every angle* for M1's rows: section 2's matrix for each proven row. Also the
