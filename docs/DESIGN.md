@@ -372,7 +372,14 @@ HTTP/2, the drivers, the client):
        block encoded again and decoded by a peer, whose table must stay entry for entry the
        encoder's; `h2_request`, field lists through RFC 9113's request and trailer rules, with
        everything accepted checked apart from the library (pseudo-fields, names, values, the
-       request record) and against HTTP/1.1's parser.
+       request record) and against HTTP/1.1's parser; `server`, whole connections (HTTP/1.1,
+       or HTTP/2 after the preface) to a running server on loopback with its drivers linked
+       in. The server must close after the client's FIN, and must answer the first request
+       as `httpasm_h1_parse_request` judges it: the refusal's status, the handler's 200
+       naming the same method, target and body length, or 413. A broken first request-line
+       with no `HTTP/` in it gets the close alone, by design: it is no HTTP/1.x request,
+       RFC 9112 2.2. HTTP/2 answers must be whole frames, SETTINGS first, and a plain GET on
+       a new connection must still be answered after every input.
      - **The first campaigns:** `h1_request`, 10.7 million inputs in 60 s; `chunked` 3.6
        million; `h1_response` 7.8 million; `hpack` 19.5 million in 300 s. Planted failures
        (in a check, and in the chunked oracle) were found within seconds and printed in base64.
@@ -405,10 +412,12 @@ HTTP/2, the drivers, the client):
      - `h1_request_diff`: request heads through HttpAsm, llhttp (strict) and picohttpparser.
        Where two accept, everything both report must agree: head length, method, target,
        version, fields, and llhttp's framing. Where one refuses what the other accepts, the
-       class must be listed in `h1_request_diff.triage` with its RFC reason. 36 classes
-       triaged from a 19-million-input survey (`HTTPASM_FUZZ_SURVEY`): HTTP/0.9 lines llhttp
-       takes, bare LF, Host and framing rules the references leave to the application, and
-       others. It found one real difference: `Transfer-Encoding: chunked\xD8` (an obs-text
+       class must be listed in `h1_request_diff.triage` with its RFC reason. 38 classes
+       triaged from surveys (`HTTPASM_FUZZ_SURVEY`) of 19 million inputs, then of about 190
+       million (16 workers, 10 minutes); CI's own campaign found one more, which a gate that
+       fails on unknown classes is for. They include HTTP/0.9 lines llhttp takes, bare LF, and
+       the Host and framing rules the references leave to the application. It found one real
+       difference: `Transfer-Encoding: chunked\xD8` (an obs-text
        octet after the token, or `chunked x`) was read as chunked, where llhttp reads another
        coding. A coding's token must now end its element (OWS, then `,`, `;` or the end).
    - **a single-thread benchmark harness:** each routine on fixed inputs, in nanoseconds per

@@ -27,6 +27,7 @@ llhttp: httpasm=EXPECT ref=accepted | llhttp does not read Expect; RFC 9110 10.1
 llhttp: httpasm=TE_NOT_CHUNKED ref=accepted | a Transfer-Encoding whose value is not a list of transfer-codings ("cPOST / chunzip, ..., chunked"): llhttp looks only at the last element; HttpAsm refuses a framing field it cannot read whole (RFC 9112 6.1 grammar; RFC 9112 6.3: unreliable framing is a 400)
 llhttp: httpasm=TE_UNKNOWN ref=accepted | a transfer coding before chunked that HttpAsm does not implement ("nnked, chunked"): RFC 9112 6.1: a server that receives a transfer coding it does not understand SHOULD answer 501; llhttp ignores codings before the last
 llhttp: httpasm=TE_HTTP10 ref=accepted | Transfer-Encoding in an HTTP/1.0 request: RFC 9112 6.1 says the recipient MUST treat the framing as faulty; llhttp frames it as chunked
+llhttp: httpasm=CONTENT_LENGTH ref=accepted | a Content-Length past 2^63 - 1 (found by CI's 30-second campaign: 2^64 - 1 with leading zeros): RFC 9110 8.6 makes the recipient guard against overflow on large numerals (17.5); HttpAsm keeps lengths in signed 64-bit offsets and refuses past them with 400, llhttp takes the whole 64-bit range, and no body that long can be carried either way
 llhttp: httpasm=TOO_MANY_FIELDS ref=accepted | HttpAsm's limit of 128 field lines (httpasm_h1_limits.max_fields), answered 431 (RFC 6585 5); llhttp has no limit
 
 # ---- HttpAsm accepts, llhttp refuses
@@ -34,6 +35,7 @@ llhttp: httpasm=accepted ref=HPE_INVALID_METHOD | llhttp knows a fixed list of m
 llhttp: httpasm=accepted ref=HPE_INVALID_CONSTANT | "PAUSE / HTTP/1.1": llhttp also parses RTSP, takes PAUSE (an RTSP method) for RTSP and then expects "RTSP/" as the version; to HTTP, PAUSE is an extension method like any token (RFC 9110 9.1)
 llhttp: httpasm=accepted ref=HPE_INVALID_URL | an absolute-form target such as "Host:/" (scheme "Host", path "/") is a valid absolute-URI (RFC 3986 4.3, RFC 9112 3.2.2) that llhttp's URL scanner refuses; what to do with a scheme it does not serve is the handler's decision
 llhttp: httpasm=accepted ref=HPE_INVALID_VERSION | HTTP/1.2 and later minors: RFC 9110 2.5: a recipient SHOULD process a higher minor version as the highest it implements, HTTP/1.1
+llhttp: httpasm=accepted ref=HPE_INVALID_TRANSFER_ENCODING | "Transfer-Encoding: chunked," (a trailing empty element): RFC 9110 5.6.1.2: a recipient MUST parse and ignore a reasonable number of empty list elements, so chunked is still the final coding; llhttp refuses the value, so the two can never frame it differently
 llhttp: httpasm=accepted ref=HPE_UNEXPECTED_CONTENT_LENGTH | two Content-Length fields with the same value: RFC 9112 6.3 item 5 lets the recipient either reject the message or use the one value; HttpAsm uses it (llhttp rejects), and both frame the same length
 
 # ---- HttpAsm refuses, picohttpparser accepts (it reads the head's syntax only: no framing, Host or Expect rules)
