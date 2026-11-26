@@ -83,6 +83,16 @@ internal sealed class H2Connection : IDisposable
     /// <summary>How many GOAWAY frames the server sent.</summary>
     public int GoAwayCount { get; private set; }
 
+    /// <summary>
+    /// Whether <see cref="ReadFrame"/> answers the server's PINGs with an ACK at once, as a
+    /// compliant client must (RFC 9113 6.7). True by default; a test that holds the answer back
+    /// (to send something before it, say) turns it off and answers with <see cref="SendFrame"/>.
+    /// </summary>
+    public bool AnswerPings { get; set; } = true;
+
+    /// <summary>The PINGs (without ACK) the server sent so far.</summary>
+    public int PingsReceived { get; private set; }
+
     /// <summary>The size of the dynamic table that decodes the server's blocks: the server's
     /// encoder's table, as its blocks so far describe it (RFC 7541 4.1).</summary>
     public uint DecoderSize => decoder.Size;
@@ -233,6 +243,17 @@ internal sealed class H2Connection : IDisposable
         var frame = new H2Frame(buffer[start + 3], buffer[start + 4], (int)(word & 0x7FFFFFFF), buffer.AsSpan(start + 9, length).ToArray());
         start += 9 + length;
         CheckSendingRules(frame, reservedBit: word >> 31 != 0);
+        if (frame.Type == Ping && (frame.Flags & Ack) == 0)
+        {
+            PingsReceived++;
+            if (AnswerPings)
+            {
+                // What a compliant client does (RFC 9113 6.7: a PING without ACK MUST be
+                // answered with one carrying the same payload). The server's graceful stop
+                // waits for this answer before its final GOAWAY.
+                SendFrame(Ping, Ack, 0, frame.Payload);
+            }
+        }
         if (frame.Type is Headers or Continuation)
         {
             block.AddRange(frame.Type == Headers ? Fragment(frame) : frame.Payload);

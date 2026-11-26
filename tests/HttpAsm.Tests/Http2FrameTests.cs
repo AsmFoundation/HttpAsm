@@ -643,6 +643,41 @@ public sealed class Http2FrameTests
     }
 
     /// <summary>
+    /// A graceful stop on an idle HTTP/2 connection is graceful too: GOAWAY(NO_ERROR, 2^31 - 1)
+    /// then a PING. A request the client sent before answering the PING was on its way when the
+    /// notice went out, so it is served. The final GOAWAY, naming that request's stream as the
+    /// last, and the close come only after the PING's ACK: RFC 9113 6.8's round trip, measured.
+    /// The ACK itself is not answered (RFC9113-6.7-7.2#2). Closing an idle connection at once,
+    /// as the server first did, refused such a request; ShutsDownGracefully failed that way
+    /// under the slower coverage build (2026-11-26).
+    /// </summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    [Requirement("RFC9113-6.8-18#1", "RFC9113-6.8-18#2", "RFC9113-6.7-7.2#2")]
+    public async Task WaitsForThePingBeforeClosingAnIdleConnection()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port) { AnswerPings = false };
+
+        Task stop = Task.Run(server.Stop, ct);
+
+        (uint first, uint code, _) = c.ReadGoAway();
+        Assert.Equal((0x7FFFFFFFu, NoError), (first, code));
+        H2Frame ping = c.Expect(Ping);
+        Assert.Equal(0, ping.Flags & Ack);
+        c.SendRequest(1);                                           // already on its way: served
+        c.SendFrame(Ping, Ack, 0, ping.Payload);                    // the round trip completes
+        Assert.Equal(200, c.ReadResponse(1).Status);
+        (uint last, code, _) = c.ReadGoAway();
+        Assert.Equal((1u, NoError), (last, code));
+        Assert.Null(c.ReadFrame());
+        Assert.Equal(1, c.PingsReceived);
+        await stop.WaitAsync(TimeSpan.FromSeconds(10), ct);
+    }
+
+    /// <summary>
     /// Flow control on the answers: with the client's initial window at 1, the body comes 1
     /// octet at a time; a SETTINGS change applies to open streams (resuming them, or making a
     /// window negative, which must be paid back first); WINDOW_UPDATE resumes them.

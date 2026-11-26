@@ -5,7 +5,8 @@
  * through a socket: buffering across reads, pipelining, bodies, the HTTP/2 engine, and that no
  * input stops the server.
  *
- * The server (LLVMFuzzerInitialize): one worker on epoll, loopback, a 4 KiB body limit (413 is
+ * The servers (LLVMFuzzerInitialize): two, one worker each, one on epoll and one asking for
+ * io_uring (the input's bit 1 picks), loopback, a 4 KiB body limit (413 is
  * reachable), a handler that answers 200 with "<method> <target> <body octets>". Its code is
  * linked into this program from the Fuzz objects, so its blocks steer the fuzzer like the core's.
  *
@@ -42,7 +43,11 @@
 
 enum { ANSWER_MAX = 4 << 20, MAX_BODY = 4096, TIMEOUT_MS = 5000, MAX_FIELDS = 128 };
 
-static httpasm_server *server;
+/* Two servers: [0] on epoll (the default), [1] asking for io_uring (HTTPASM_SERVER_URING), so
+ * uring.asm's paths meet the same inputs; where the kernel refuses a ring, [1] runs on epoll
+ * all the same (httpasm.h), which still serves. port is the one the current input talks to. */
+static httpasm_server *servers[2];
+static uint16_t ports[2];
 static uint16_t port;
 
 /* handler: answers every request 200 with "<method> <target> <body octets>", at once. The
@@ -62,7 +67,7 @@ static void handler(void *context, httpasm_exchange *exchange)
         httpasm_exchange_respond(exchange, 501, NULL, 0, NULL, 0);
 }
 
-/* LLVMFuzzerInitialize: starts the server once for the whole run. Aborts if it cannot. */
+/* LLVMFuzzerInitialize: starts both servers once for the whole run. Aborts if one cannot. */
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
     (void)argc;
@@ -74,10 +79,13 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     options.max_body = MAX_BODY;
     options.idle_timeout_ms = 2000;
     options.bind_address = htonl(INADDR_LOOPBACK);
-    int error = 0;
-    server = httpasm_server_create(&options, &error);
-    FUZZ_CHECK(server != NULL && httpasm_server_start(server) == 0, "the server did not start (%d)", error);
-    port = httpasm_server_port(server);
+    for (int i = 0; i < 2; i++) {
+        int error = 0;
+        options.flags = i == 1 ? HTTPASM_SERVER_URING : 0;
+        servers[i] = httpasm_server_create(&options, &error);
+        FUZZ_CHECK(servers[i] != NULL && httpasm_server_start(servers[i]) == 0, "server %d did not start (%d)", i, error);
+        ports[i] = httpasm_server_port(servers[i]);
+    }
     return 0;
 }
 
@@ -280,6 +288,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size < 1 || size > FUZZ_MAX)
         return 0;
     int h2 = data[0] & 1;
+    port = ports[(data[0] >> 1) & 1];        /* bit 1: the io_uring server */
     size_t n = size - 1;
     memcpy(input, data + 1, n);
     int closed = 0;

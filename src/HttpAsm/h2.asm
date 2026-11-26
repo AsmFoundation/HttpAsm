@@ -53,6 +53,8 @@ default rel
 
 section .rodata
 s_preface:          db "PRI * HTTP/2.0", 13, 10, 13, 10, "SM", 13, 10, 13, 10
+s_stop_ping:        db "HAstop!", 0 ; the graceful stop's PING payload (8 octets): its ACK
+                                    ; is the round trip ha_h2_notice waits for
 s_status:           db ":status"
 s_date:             db "date"
 s_content_length:   db "content-length"
@@ -289,12 +291,17 @@ ha_h2_goodbye:
 .end:
 
 ; -----------------------------------------------------------------------------
-; ha_h2_notice: a graceful stop began while this connection still has streams in progress.
-; GOAWAY(NO_ERROR) with the last stream id 2^31 - 1 tells the client to open no more streams,
-; while every stream already on its way is still served (RFC9113-6.8-18#1); the final GOAWAY,
-; with the real last stream id, goes out when the connection closes once idle (ha_h2_goodbye,
-; RFC9113-6.8-18#2), so no request is lost between the two. Once per connection; nothing after a
-; connection error. The output is flushed at once (the stop has no other reason to write).
+; ha_h2_notice: a graceful stop began. GOAWAY(NO_ERROR) with the last stream id 2^31 - 1 tells
+; the client to open no more streams, while every stream already on its way is still served
+; (RFC9113-6.8-18#1); a PING follows it, and its ACK (h2_ping: H2F_NOTICE_ACKED) proves the
+; client has seen the notice, so everything it sent before has arrived: RFC 9113 6.8's "at
+; least one round-trip time" for in-flight streams, measured instead of guessed. The final
+; GOAWAY, with the real last stream id, goes out when the connection closes once idle and
+; acknowledged (close_idle, ha_h2_goodbye; RFC9113-6.8-18#2), so no request is lost between the
+; two. Every HTTP/2 connection gets it, idle ones included: closing an idle one at once lost a
+; request already on its way (Http2FrameTests.ShutsDownGracefully failed that way under the
+; slower coverage build, 2026-11-26). Once per connection; nothing after a connection error. The
+; output is flushed at once (the stop has no other reason to write).
 ;   In: rdi = conn (conn.h2 may be 0: nothing happens). Out: eax = 0, or 1 when the flush closed
 ;   the connection (a failed send). Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
@@ -317,10 +324,24 @@ ha_h2_notice:
     call    h2_goaway_frame
     test    eax, eax
     jnz     .unsent                         ; no memory: the stop goes on without the notice
+    mov     edi, H2_PING                    ; the round trip's probe, after the GOAWAY
+    xor     esi, esi
+    xor     edx, edx
+    lea     rcx, [rel s_stop_ping]
+    mov     r8d, 8
+    call    h2_frame
+    test    eax, eax
+    jnz     .no_ping                        ; no memory: idle closes without the round trip
     mov     rdi, rbx
     call    ha_conn_flush                   ; eax = 1 when it closed the connection
     jmp     .out
+.no_ping:
+    or      dword [r12 + h2.flags], H2F_NOTICE_ACKED  ; nothing to wait for: close when idle
+    mov     rdi, rbx
+    call    ha_conn_flush
+    jmp     .out
 .unsent:
+    or      dword [r12 + h2.flags], H2F_NOTICE_ACKED  ; no notice went out: none to wait on
     xor     eax, eax
 .out:
     add     rsp, 8
@@ -1018,7 +1039,8 @@ h2_settings:
     ret
 
 ; -----------------------------------------------------------------------------
-; h2_ping: PING (RFC 9113 6.7): answered with an ACK carrying the same 8 octets.
+; h2_ping: PING (RFC 9113 6.7): answered with an ACK carrying the same 8 octets. An ACK of the
+; graceful stop's own PING marks the notice acknowledged (H2F_NOTICE_ACKED).
 ;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 align 16
@@ -1029,13 +1051,25 @@ h2_ping:
     cmp     dword [r12 + h2.frame_length], 8
     jne     .frame_size_error
     test    dword [r12 + h2.frame_flags], H2_FLAG_ACK
-    jnz     .out                            ; an answer to a PING this side never sends
+    jnz     .ack
     mov     edi, H2_PING
     mov     esi, H2_FLAG_ACK
     xor     edx, edx
     mov     rcx, [r12 + h2.frame_payload]
     mov     r8d, 8
     call    h2_frame
+    jmp     .out
+.ack:
+    ; The only PING this side sends is a graceful stop's (ha_h2_notice). Its ACK, after the
+    ; notice, is the round trip the stop waits for; any other ACK is ignored (RFC 9113 6.7
+    ; leaves unsolicited ACKs without effect).
+    test    dword [r12 + h2.flags], H2F_NOTICE
+    jz      .out
+    mov     rax, [r12 + h2.frame_payload]
+    mov     rax, [rax]
+    cmp     rax, [rel s_stop_ping]
+    jne     .out
+    or      dword [r12 + h2.flags], H2F_NOTICE_ACKED
     jmp     .out
 .protocol_error:
     mov     edi, H2_PROTOCOL_ERROR

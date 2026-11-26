@@ -336,6 +336,9 @@ H2F_CLOSING         equ 0x01    ; the final GOAWAY is written (an error, or a go
 H2F_GOAWAY_RECEIVED equ 0x02    ; the peer is leaving: close once no stream is active
 H2F_NOTICE          equ 0x04    ; a graceful stop's first GOAWAY (last stream 2^31 - 1) went out:
                                 ; streams already on their way are still served, none should follow
+H2F_NOTICE_ACKED    equ 0x08    ; the PING sent after that GOAWAY came back: everything the client
+                                ; sent before it saw the notice has arrived (RFC 9113 6.8's round
+                                ; trip), so an idle connection may now close with the final GOAWAY
 
 ; How a remembered stream closed: what a later frame on it means (RFC 9113 5.1).
 H2C_NORMAL          equ 1       ; both sides ended it: DATA or HEADERS are a connection error STREAM_CLOSED

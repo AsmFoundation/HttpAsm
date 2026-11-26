@@ -1045,10 +1045,11 @@ begin_stop:
     ret
 
 ; close_idle: closes every connection with no request in progress and nothing to send (an
-; HTTP/2 one says GOAWAY as it closes: ha_conn_close). An HTTP/2 connection that has to stay
-; open for its streams gets a graceful stop's notice instead, once (ha_h2_notice: GOAWAY with
-; the last stream 2^31 - 1, RFC9113-6.8-18), so its client opens nothing new; a later call
-; closes it once its streams are done. Called only while the worker is stopping.
+; HTTP/2 one says GOAWAY as it closes: ha_conn_close). An HTTP/2 connection gets a graceful
+; stop's notice first, once (ha_h2_notice: GOAWAY with the last stream 2^31 - 1, then a PING,
+; RFC9113-6.8-18), so its client opens nothing new; a later call closes it once its streams are
+; done and the PING has come back, the round trip after which no request of the client's can
+; still be on its way. Called only while the worker is stopping.
 ;   In: rbx = worker. Keeps rbx, rbp, r12-r15 (r13, r14 saved here).
 align 16
 close_idle:
@@ -1073,6 +1074,12 @@ close_idle:
     jz      .idle
     cmp     dword [rax + h2.stream_count], 0
     jne     .skip                           ; HTTP/2: requests in progress
+    ; Idle HTTP/2: it closes only once the notice's PING came back (ha_h2_notice), or when the
+    ; client is leaving or the connection is closing anyway; until then a request may still be
+    ; on its way, and it would be refused. A client that never answers is closed at the stop's
+    ; deadline (.force in worker_main), like any connection still open then.
+    test    dword [rax + h2.flags], H2F_NOTICE_ACKED | H2F_CLOSING | H2F_GOAWAY_RECEIVED
+    jz      .skip
 .idle:
     mov     rdi, r13
     call    ha_conn_close
