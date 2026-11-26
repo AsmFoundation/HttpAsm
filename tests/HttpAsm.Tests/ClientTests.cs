@@ -347,7 +347,12 @@ public sealed class ClientTests
     /// switch to unasked (RFC9110-7.8-5#3), so the octets after it are not this client's to read
     /// as HTTP/1.1 (-HTTPASM_ERROR_STATUS, 25). The fuzzer's oracle once skipped it as an
     /// interim answer, and CI's fuzzing caught the difference (2026-11-26, the seed
-    /// tests/fuzz/seeds/client/switching-protocols).
+    /// tests/fuzz/seeds/client/switching-protocols). A Content-Length of 5.7 GB followed by five
+    /// octets and the close is that close in a body: the client grows its input as octets
+    /// arrive, and never asks for the named size up front (it did: tests/fuzz/client's CI run
+    /// of 2026-11-26 reported "malloc(5777777824)"; the seed huge-content-length keeps the
+    /// fuzzer's memory limit on it). And a server that stalls inside each framing - a length,
+    /// a chunk, the trailers, a body delimited by the close - fails it with the timeout.
     /// </summary>
     /// <param name="answer">The canned server's answer.</param>
     /// <param name="close">Whether it closes after it.</param>
@@ -357,6 +362,11 @@ public sealed class ClientTests
     [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort", true, -104)]
     [InlineData("", false, -110)]
     [InlineData("HTTP/1.1 101 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", true, -25)]
+    [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 5777777777\r\n\r\nhello", true, -104)]
+    [InlineData("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort", false, -110)]
+    [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel", false, -110)]
+    [InlineData("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX-T: 1\r\n", false, -110)]
+    [InlineData("HTTP/1.0 200 OK\r\n\r\nto the close, which never comes", false, -110)]
     [Requirement("RFC9112-6.3-2.6", "RFC9112-6.3-2.5#4", "RFC9112-8-2", "RFC9110-7.8-5#3")]
     public void ClosesOnFailures(string answer, bool close, int result)
     {

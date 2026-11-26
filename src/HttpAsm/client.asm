@@ -646,16 +646,26 @@ httpasm_client_send:
     mov     rax, [rsp + S_BODY_END]
     cmp     [rbx + client.rlen], rax
     jae     .length_whole
-    ; Room for the whole body at once, then read.
+    ; Room for more of the body, then read. Content-Length is the server's word, not yet its
+    ; octets: the input grows to twice its size per step at most (to the message's end when
+    ; that is nearer), as client_receive grows it for a body of unknown length, so a head that
+    ; names 5 GB costs what actually arrives. Sizing it for the whole body at once let a
+    ; 60-octet response make the client ask for 5.7 GB (tests/fuzz/client in CI, 2026-11-26:
+    ; "out-of-memory (malloc(5777777824))"). The capacity is set only once realloc succeeded
+    ; (rbp holds it across the call: free in this function, and kept by the callee).
     cmp     rax, [rbx + client.rcap]
     jbe     .length_receive
-    mov     rsi, rax
-    mov     [rbx + client.rcap], rsi
+    mov     rbp, [rbx + client.rcap]
+    shl     rbp, 1
+    cmp     rbp, rax
+    cmova   rbp, rax                        ; no more than the message needs
+    mov     rsi, rbp
     mov     rdi, [rbx + client.rbuf]
     call    realloc wrt ..plt
     test    rax, rax
     jz      .no_memory
     mov     [rbx + client.rbuf], rax
+    mov     [rbx + client.rcap], rbp
 .length_receive:
     call    client_receive
     test    rax, rax
