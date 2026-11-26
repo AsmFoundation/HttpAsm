@@ -15,7 +15,10 @@
 ;
 ; How it works. Readiness stays level-triggered, as under epoll: one POLL_ADD per connection,
 ; one-shot, armed with the events ha_interest_mask gives; when they change while it is armed,
-; it is removed and armed anew on its completion. The I/O is batched: the RECVs and SENDs of
+; it is removed and armed anew on its completion. One exception: a writer's poll (OUT alone) is
+; multishot, because kernels before 2026-10-29 add POLLRDHUP to every io_uring poll, and a
+; half-closed peer would complete a one-shot poll for room at once, every time it was armed
+; (uring_conn_work's .poll has the measurement). The I/O is batched: the RECVs and SENDs of
 ; every connection that became ready, and every poll to arm or remove, reach the kernel in the
 ; one io_uring_enter that then waits for the next events, instead of one system call each.
 ;
@@ -30,7 +33,8 @@
 ;     descriptors outlive every SQE that names them.)
 ;   - A connection's operations are counted (conn.uops) until their completions are handled; a
 ;     closed connection is freed only at 0 (ha_conn_reap): the walk removes its armed poll, and
-;     that poll's completion is its last reference.
+;     that poll's completion is its last reference. A multishot poll counts once, however many
+;     completions it posts: only its last (no IORING_CQE_F_MORE) drops the reference.
 ;   - Completions are handled in submission order (a connection's SEND before its RECV, queued
 ;     so), and deferred answers only after all of a batch's completions (the eventfd's poll only
 ;     sets .wake_due), so nothing moves a buffer between an operation and its completion's
@@ -105,6 +109,11 @@ SQE_OPFLAGS     equ 28      ; msg_flags (SEND, RECV), poll32_events (POLL_ADD)
 ; (a bit no event uses): the walk sends one removal and waits for the poll's completion.
 POLL_REMOVING   equ 0x80000000
 SQE_USER_DATA   equ 32
+; A writer's poll is multishot (SQE_LEN holds POLL_ADD's flags): it stays armed across its
+; completions, each of which says so with IORING_CQE_F_MORE (struct io_uring_cqe's flags, at
+; offset 12); the last one, a removal's -ECANCELED, does not. Why, at uring_conn_work's .poll.
+IORING_POLL_ADD_MULTI   equ 1       ; 5.13, the oldest release this backend accepts
+IORING_CQE_F_MORE       equ 2
 
 section .text
 
@@ -418,8 +427,9 @@ ha_uring_unpoll:
 ; -----------------------------------------------------------------------------
 ; ha_uring_cqe: the next completion of the worker's ring, taken off it: its slot is free again
 ; when this returns (what it held is in registers).
-;   In: rdi = worker (with a ring). Out: rax = its user_data, edx = its res (signed); rax = 0
-;   when none is left (no operation is ever submitted with user_data 0). Clobbers rcx, r8.
+;   In: rdi = worker (with a ring). Out: rax = its user_data, edx = its res (signed), ecx = its
+;   flags (IORING_CQE_F_MORE: a multishot poll that stays armed); rax = 0 when none is left (no
+;   operation is ever submitted with user_data 0). Clobbers r8, r9.
 ; -----------------------------------------------------------------------------
 global ha_uring_cqe:function hidden (ha_uring_cqe.end - ha_uring_cqe)
 align 16
@@ -434,9 +444,11 @@ ha_uring_cqe:
     shl     rax, 4                          ; 16 octets a CQE
     add     rax, [rdi + worker.cqes]
     mov     edx, [rax + 8]                  ; res
+    mov     r9d, [rax + 12]                 ; flags: read before the slot is handed back below
     mov     rax, [rax]                      ; user_data
     inc     ecx
     mov     [r8], ecx                       ; the head moves: the kernel may reuse the slot
+    mov     ecx, r9d
     ret
 .none:
     xor     eax, eax
@@ -563,7 +575,22 @@ uring_conn_work:
     mov     ecx, [rbx + conn.fd]
     mov     [rax + SQE_FD], ecx
     mov     ecx, [rsp + W_EVENTS]
-    mov     [rax + SQE_OPFLAGS], ecx        ; poll32_events; one-shot (no IORING_POLL_ADD_MULTI)
+    mov     [rax + SQE_OPFLAGS], ecx        ; poll32_events
+    ; A writer's poll (OUT alone: output waits for the socket) is multishot; every other is
+    ; one-shot. io_uring adds POLLRDHUP to every poll it arms on kernels before upstream commit
+    ; 74c1f1048e44 (2026-10-29, "io_uring/poll: don't poll a writer for a read side hangup";
+    ; Linux 5.15 and the 6.x of CI runners among them). Once the peer has half-closed, the
+    ; hang-up stays raised, so a one-shot poll for room completed at once, was armed again at
+    ; once, and so on: a client that half-closed and read slowly kept its worker at 100% CPU
+    ; until the idle timeout (measured 2026-11-26). A multishot poll reports the raised hang-up
+    ; once when armed and then completes only when the socket wakes its waiters again (room
+    ; freed, an error), so the worker rests; ha_uring_conn (.poll_more) keeps it armed through
+    ; those completions. One that stays armed while the events wanted change is removed like any
+    ; other (.armed), and its removal's completion is its last.
+    cmp     ecx, EPOLLOUT
+    jne     .one_shot
+    mov     dword [rax + SQE_LEN], IORING_POLL_ADD_MULTI
+.one_shot:
     lea     rcx, [rbx + UT_POLL]
     mov     [rax + SQE_USER_DATA], rcx
     or      dword [rbx + conn.uflags], U_POLL
@@ -670,11 +697,14 @@ ha_uring_enter:
 
 ; -----------------------------------------------------------------------------
 ; ha_uring_conn: one completion of a connection's operation. Its reference (uops) is dropped
-; first; a closed connection's completions do nothing more (the reap frees it at 0).
+; first, unless it is a multishot poll's that leaves the poll armed (IORING_CQE_F_MORE: the
+; poll keeps its reference until its last completion); a closed connection's completions do
+; nothing more (the reap frees it at 0).
 ;   POLL: an error or a hang-up closes, as under epoll. Writable: the output goes on (a SEND).
 ;     Readable, or the peer's end: a RECV is queued; on a deferred connection only the peer's
 ;     end is noted, as under epoll; a full input is processed first. A poll its removal
-;     cancelled (res < 0) is armed again from the state now.
+;     cancelled (res < 0) is armed again from the state now. A writer's multishot poll that
+;     stays armed: .poll_more.
 ;   RECV: what read_ready does under epoll with its recvfrom's result: the octets are added and
 ;     processed, the peer's end noted (0), EAGAIN waits for readability again; a draining
 ;     connection discards and reads on until EAGAIN, closing at the peer's end.
@@ -683,8 +713,8 @@ ha_uring_enter:
 ;     left, closes after a closing response or sets the interest, and the processing resumes
 ;     (pipelined requests, input held back by back-pressure), unless a RECV of the same batch
 ;     is still to be handled (it drives then: its octets are in the input, the length not yet).
-;   In: rdi = conn, esi = UT_*, edx = res (the CQE's, signed). Clobbers every caller-saved
-;   register; keeps rbx, rbp, r12-r15.
+;   In: rdi = conn, esi = UT_*, edx = res (the CQE's, signed), ecx = the CQE's flags. Clobbers
+;   every caller-saved register; keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 global ha_uring_conn:function hidden (ha_uring_conn.end - ha_uring_conn)
 align 16
@@ -695,6 +725,8 @@ ha_uring_conn:
     mov     rbx, rdi
     mov     r12d, esi
     movsxd  r13, edx                        ; res, sign-extended: < 0 is -errno
+    test    ecx, IORING_CQE_F_MORE
+    jnz     .poll_more                      ; only a writer's poll is multishot (uring_conn_work)
     dec     dword [rbx + conn.uops]
     cmp     r12d, UT_POLL
     je      .poll
@@ -831,6 +863,25 @@ ha_uring_conn:
 .error:
     mov     rdi, rbx
     call    ha_conn_close
+    jmp     .out
+.poll_more:
+    ; A writer's multishot poll reported something and stays armed: U_POLL, conn.pad and its
+    ; reference stay as they are. Writable: the output goes on, as from a one-shot poll (the
+    ; walk then removes this poll, the events wanted having changed, unless the socket filled
+    ; again first). An error or a hang-up closes. Anything else is the peer's end reported to a
+    ; writer (POLLRDHUP, which io_uring adds to every poll on kernels before 74c1f1048e44):
+    ; nothing to do, and the poll goes on waiting for room. The end itself is read later, in
+    ; order, once the output drained and the connection reads again; noting it now (C_PEER_DONE)
+    ; would answer and close before the requests still in the socket ahead of it were read.
+    test    dword [rbx + conn.flags], C_CLOSED | C_ZOMBIE
+    jnz     .out                            ; its removal is queued: that completion is its last
+    test    r13d, EPOLLERR | EPOLLHUP
+    jnz     .error
+    test    r13d, EPOLLOUT
+    jz      .out
+    and     dword [rbx + conn.flags], ~C_WANT_WRITE
+    mov     rdi, rbx
+    call    ha_conn_flush                   ; queues the SEND; its completion goes on
     jmp     .out
 .rearm:
     mov     rdi, rbx

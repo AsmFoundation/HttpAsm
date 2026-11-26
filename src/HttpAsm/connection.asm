@@ -36,11 +36,20 @@ section .text
 ; ha_interest_mask: the events a connection should wait for, from its flags; the one rule set
 ; for both backends (epoll's ha_set_interest, io_uring's poll in uring.asm; EPOLL* and POLL*
 ; share their values). Closed connections and zombies wait for nothing (their descriptor is
-; gone). Otherwise: RDHUP until the peer's end was seen (a peer's close is noticed even while
-; deferred; once seen, asking again would wake the worker in a loop, since it stays raised),
-; OUT while output waits for the socket, IN unless output waits, an exchange is deferred, or
-; reading is paused. A deferred connection whose peer is done waits for nothing at all (0:
-; only errors and hang-ups, which are always reported).
+; gone). While output waits for the socket: OUT, and nothing else. Otherwise: RDHUP until the
+; peer's end was seen (a peer's close is noticed even while deferred; once seen, asking again
+; would wake the worker in a loop, since it stays raised), and IN unless an exchange is
+; deferred or reading is paused. A deferred connection whose peer is done waits for nothing at
+; all (0: only errors and hang-ups, which are always reported).
+;   Why not RDHUP while output waits: RDHUP stays raised from the peer's FIN on, and is cleared
+;   only by reading the end of the stream (C_PEER_DONE). Output past HA_OUTPUT_HIGH stops the
+;   processing, so pipelined requests can fill the input; the FIN behind them then cannot be
+;   read, and every wait returned RDHUP at once for a read that could not happen: a client that
+;   asked for a large answer, sent 16 KiB more of requests, half-closed and read nothing kept a
+;   worker at 100% CPU until the idle timeout (measured 2026-11-26: 0.98 s of CPU a second, on
+;   epoll and on io_uring). Nothing is lost: the output is written either way, errors and
+;   hang-ups still come, and once it drained the connection asks for IN and RDHUP again and
+;   reads the end in order.
 ;   In: rdi = conn. Out: esi = the events. Clobbers ecx and the flags; keeps the rest.
 ; -----------------------------------------------------------------------------
 global ha_interest_mask:function hidden (ha_interest_mask.end - ha_interest_mask)
@@ -50,18 +59,18 @@ ha_interest_mask:
     mov     ecx, [rdi + conn.flags]
     test    ecx, C_ZOMBIE | C_CLOSED
     jnz     .out
+    test    ecx, C_WANT_WRITE
+    jnz     .writing
     test    ecx, C_PEER_DONE
     jnz     .rdhup_set
     mov     esi, EPOLLRDHUP
 .rdhup_set:
-    test    ecx, C_WANT_WRITE
-    jz      .no_write
-    or      esi, EPOLLOUT
-    jmp     .out
-.no_write:
     test    ecx, C_DEFERRED | C_READ_PAUSED
     jnz     .out
     or      esi, EPOLLIN
+    jmp     .out
+.writing:
+    mov     esi, EPOLLOUT                   ; the socket's room alone (see above)
 .out:
     ret
 .end:

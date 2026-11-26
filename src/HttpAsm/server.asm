@@ -1347,7 +1347,7 @@ worker_main:
     call    refresh_clock
 .completion:
     mov     rdi, rbx
-    call    ha_uring_cqe                    ; rax = user_data (0: none left), edx = res
+    call    ha_uring_cqe                    ; rax = user_data (0: none left), edx = res, ecx = flags
     test    rax, rax
     jz      .completions_done
     cmp     rax, 16
@@ -1356,7 +1356,7 @@ worker_main:
     and     esi, UT_MASK                    ; the operation
     and     rax, ~UT_MASK                   ; the connection
     mov     rdi, rax
-    call    ha_uring_conn
+    call    ha_uring_conn                   ; edx = res and ecx = flags, as ha_uring_cqe left them
     jmp     .completion
 .own:
     cmp     rax, HA_TAG_LISTENER

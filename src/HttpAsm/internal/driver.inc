@@ -209,9 +209,11 @@ C_ZOMBIE            equ 0x0010  ; closed while deferred: freed when the response
 C_CONTINUE_SENT     equ 0x0020  ; 100 Continue went out for the current request
 C_READ_PAUSED       equ 0x0040  ; EPOLLIN is off (deferred, or output past HA_OUTPUT_HIGH)
 ; The peer finished sending (its FIN was read, or EPOLLRDHUP came while deferred). EPOLLRDHUP is
-; level-triggered and stays raised from then on: asking for it again would wake the worker in a
-; loop while the connection cannot act (deferred, or waiting for EPOLLOUT). The connection
-; answers what it holds and closes; nothing more can arrive, so it closes without lingering.
+; level-triggered and stays raised from the FIN on: asking for it again would wake the worker in
+; a loop while the connection cannot act. So it is never asked for once this flag is set, nor
+; while output waits for EPOLLOUT (the FIN may sit behind input the processing cannot take
+; then: ha_interest_mask). The connection answers what it holds and closes; nothing more can
+; arrive, so it closes without lingering.
 C_PEER_DONE         equ 0x0080
 ; Closed and on its worker's closed list: the memory stays until the end of the event batch,
 ; because a later event of the same batch (epoll_wait's events, or io_uring's completions) may
