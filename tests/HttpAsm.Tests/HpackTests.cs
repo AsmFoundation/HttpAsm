@@ -256,6 +256,58 @@ public sealed partial class HpackTests
     }
 
     /// <summary>
+    /// Once the output is full, the decoder writes nothing more: every later field is only
+    /// measured, whatever its representation. This is the defense against the HPACK bomb's CPU
+    /// cost (RFC 7541 7.3, RFC 9113 10.5). A block of 1-octet references to a 600-octet dynamic
+    /// entry used to copy the entry for each reference even past the limits, so the decoder did
+    /// 600 times the work of the octets it read. Each case fills the output first, through the
+    /// field count or through the space. A canary fills the space past what the records use,
+    /// and every kind of field then follows: indexed dynamic, literals with dynamic, static and
+    /// new names, raw and Huffman-coded, and an insertion. The canary must survive, while the
+    /// insertion still reaches the table (RFC 9113 10.5.1: the block is processed whole).
+    /// </summary>
+    /// <param name="maxFields">The records' room.</param>
+    /// <param name="space">The strings' room.</param>
+    /// <param name="used">The space the two records the output takes use (the second field
+    /// overflows the 700-octet space, which holds the first only).</param>
+    [Theory]
+    [InlineData(2, 4096, 1210)]
+    [InlineData(256, 700, 605)]
+    [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5.1-3")]
+    public void WritesNothingOnceTheOutputIsFull(int maxFields, int space, int used)
+    {
+        Platform.RequireLinuxX64();
+        string big = new('a', 600);
+        var block = new List<byte>();
+        block.AddRange([0x40, .. RawLiteral("x-big"), .. RawLiteral(big)]);     // index 62 from here on
+        block.Add(0xBE);                                                        // indexed: 62
+        for (int i = 0; i < 50; i++)
+        {
+            block.Add(0xBE);                                                    // the bomb's references
+        }
+
+        block.AddRange([.. Integer(62, 4, 0x00), .. RawLiteral(new string('v', 300))]);    // dynamic name, not indexed
+        block.AddRange([.. Integer(4, 4, 0x00), .. RawLiteral("/" + new string('p', 99))]); // static name (:path)
+        block.AddRange([0x00, .. RawLiteral("x-new"), .. RawLiteral(new string('w', 100))]); // new name
+        block.AddRange([0x00, .. HuffmanLiteral("custom-key"u8.ToArray()), .. HuffmanLiteral("custom-value"u8.ToArray())]);
+        block.AddRange([0x40, .. RawLiteral("x-ins"), .. RawLiteral(new string('z', 200))]);  // an insertion
+
+        byte[] room = new byte[space + 64];
+        Array.Fill(room, (byte)0xA5);
+        using var decoder = new HpackTable(4096);
+        HpackDecoded decoded = decoder.Decode([.. block], maxFields, space, room);
+
+        Assert.Equal(1, decoded.Result);
+        Assert.Equal((ulong)used, decoded.SpaceUsed);
+        int written = Array.FindIndex(room, used, b => b != 0xA5);
+        Assert.True(written < 0, $"the decoder wrote at offset {written} of the space after the output was full");
+        ulong expected = (5 + 600 + 32) * 52UL + (5 + 300 + 32) + (5 + 100 + 32) + (5 + 100 + 32) + (10 + 12 + 32) + (5 + 200 + 32);
+        Assert.Equal(expected, decoded.ListSize);                               // every field counted
+        Assert.Equal("x-ins: " + new string('z', 200), decoder.Entry(62)?.ToString());   // inserted all the same
+        Assert.Equal("x-big: " + big, decoder.Entry(63)?.ToString());
+    }
+
+    /// <summary>
     /// The encoder follows the peer's table size: a change is applied at once and signalled at
     /// the start of the next block; after several changes, the smallest maximum comes first, then
     /// the final one; an unchanged limit, or one above what the memory holds, signals nothing.
@@ -480,6 +532,34 @@ public sealed partial class HpackTests
 
         return found == 257 ? codes : throw new InvalidDataException($"RFC 7541 Appendix B: {found} codes, expected 257.");
     });
+
+    /// <summary>An integer with an N-bit prefix (RFC 7541 5.1), the first octet's high bits given.</summary>
+    /// <param name="value">The integer.</param>
+    /// <param name="prefix">The prefix's bits (1-8).</param>
+    /// <param name="high">The first octet's bits above the prefix (the representation's pattern).</param>
+    /// <returns>The octets.</returns>
+    private static byte[] Integer(int value, int prefix, byte high)
+    {
+        int max = (1 << prefix) - 1;
+        if (value < max)
+        {
+            return [(byte)(high | value)];
+        }
+
+        var octets = new List<byte> { (byte)(high | max) };
+        for (value -= max; value >= 128; value >>= 7)
+        {
+            octets.Add((byte)(0x80 | (value & 0x7F)));
+        }
+
+        octets.Add((byte)value);
+        return [.. octets];
+    }
+
+    /// <summary>A raw (not Huffman-coded) string literal: H clear, the length with a 7-bit prefix.</summary>
+    /// <param name="text">The string (Latin-1).</param>
+    /// <returns>The literal's octets.</returns>
+    private static byte[] RawLiteral(string text) => [.. Integer(text.Length, 7, 0x00), .. Encoding.Latin1.GetBytes(text)];
 
     /// <summary>A Huffman-coded string literal (H set, 7-bit length), by Appendix B's table.</summary>
     /// <param name="octets">The string.</param>

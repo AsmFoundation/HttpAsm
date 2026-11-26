@@ -16,8 +16,12 @@
 ;   the caller's space, because a later field of the same block may evict the entry an earlier
 ;   one came from. When the fields or the space run out, decoding still runs to the block's end
 ;   (the table must stay in step with the peer's encoder, RFC 9113 4.3) and returns 1: the
-;   caller refuses the request (431) without losing the connection. Any malformed input
-;   returns -HTTPASM_ERROR_HPACK_*: in HTTP/2 a COMPRESSION_ERROR for the connection.
+;   caller refuses the request (431) without losing the connection. From that point on nothing
+;   more is copied into space (D_OUTPUT_OPEN): the rest of the block is only measured, so every
+;   octet past the limits costs constant work, and a block of 1-octet references to a large
+;   dynamic entry (an HPACK bomb, RFC 7541 7.3) costs no more than any other block of its size.
+;   Any malformed input returns -HTTPASM_ERROR_HPACK_*: in HTTP/2 a COMPRESSION_ERROR for the
+;   connection.
 ;
 ; Encoder (httpasm_hpack_encode): fields into a header block. An exact match in the static or
 ; dynamic table becomes an index; otherwise a literal with the name's index when the name is in
@@ -505,6 +509,24 @@ D_FRAME         equ 88      ; six pushes + 88: rsp stays 16-byte aligned for the
 DF_SEEN         equ 1       ; a field was seen: size updates are no longer allowed
 DF_OVERFLOW     equ 2       ; a field did not fit: no more records are written
 
+; D_OUTPUT_OPEN: D_FITS = 1 while the output can take another record, 0 once it cannot (a field
+; did not fit, or max_fields records are written). A field that starts with D_FITS 0 copies
+; nothing into space: its strings are only measured (and decoded again into the table when it
+; is inserted). Without this, a block past the limits still paid for every copy: each 1-octet
+; reference to a large dynamic entry copied the whole entry again (an HPACK bomb's CPU cost,
+; RFC 7541 7.3), where now every octet past the limits costs the same small, constant work.
+; Clobbers eax and the flags.
+%macro D_OUTPUT_OPEN 0
+    mov     dword [rsp + D_FITS], 0
+    test    r15d, DF_OVERFLOW
+    jnz     %%closed
+    mov     eax, [rbp + httpasm_hpack_output.count]
+    cmp     eax, [rbp + httpasm_hpack_output.max_fields]
+    jae     %%closed                        ; full: this field will overflow (.record)
+    mov     dword [rsp + D_FITS], 1
+%%closed:
+%endmacro
+
 global httpasm_hpack_decode:function (httpasm_hpack_decode.end - httpasm_hpack_decode)
 align 16
 httpasm_hpack_decode:
@@ -559,7 +581,7 @@ httpasm_hpack_decode:
     mov     rax, [rbp + httpasm_hpack_output.space]
     add     rax, [rbp + httpasm_hpack_output.space_used]
     mov     [rsp + D_CURSOR], rax
-    mov     dword [rsp + D_FITS], 1
+    D_OUTPUT_OPEN
     mov     qword [rsp + D_NAME_POS], 0
     cmp     dword [rsp + D_INDEX], 0
     je      .literal_name
@@ -574,6 +596,8 @@ httpasm_hpack_decode:
     mov     [rsp + D_NAME], rsi             ; the static table's text: no copy
     jmp     .value
 .dynamic_name:
+    cmp     dword [rsp + D_FITS], 0
+    je      .value                          ; the output is closed: the name is not copied
     mov     rax, [rbp + httpasm_hpack_output.space]
     add     rax, [rbp + httpasm_hpack_output.space_size]
     sub     rax, [rsp + D_CURSOR]           ; the room left
@@ -594,6 +618,10 @@ httpasm_hpack_decode:
     mov     r14, [rbp + httpasm_hpack_output.space]
     add     r14, [rbp + httpasm_hpack_output.space_size]
     sub     r14, rdi                        ; the room left
+    cmp     dword [rsp + D_FITS], 0
+    jne     .name_room
+    xor     r14d, r14d                      ; the output is closed: the name is only measured
+.name_room:
     mov     r9, r14
     call    hp_string
     test    rax, rax
@@ -650,7 +678,7 @@ httpasm_hpack_decode:
     xor     eax, eax
     mov     [rsp + D_FFLAGS], eax
     mov     [rsp + D_INC], eax
-    mov     dword [rsp + D_FITS], 1
+    D_OUTPUT_OPEN                           ; before rax is the cursor: it clobbers eax
     mov     rax, [rbp + httpasm_hpack_output.space]
     add     rax, [rbp + httpasm_hpack_output.space_used]
     mov     [rsp + D_CURSOR], rax
@@ -660,7 +688,10 @@ httpasm_hpack_decode:
     mov     [rsp + D_VALUE], rdx
     jmp     .record
 .indexed_dynamic:
-    ; Copies of both: a later field of this block may evict the entry.
+    ; Copies of both: a later field of this block may evict the entry. None once the output
+    ; is closed (D_OUTPUT_OPEN): a reference past the limits costs no copy.
+    cmp     dword [rsp + D_FITS], 0
+    je      .value_no_room
     mov     r9, [rbp + httpasm_hpack_output.space]
     add     r9, [rbp + httpasm_hpack_output.space_size]
     sub     r9, rax                         ; the room left

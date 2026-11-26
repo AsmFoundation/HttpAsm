@@ -90,11 +90,24 @@ internal sealed unsafe class HpackTable : IDisposable
     /// <param name="block">The block.</param>
     /// <param name="maxFields">The records' room.</param>
     /// <param name="space">The strings' room.</param>
+    /// <param name="room">
+    /// The strings' memory, when the test inspects it afterwards (prefilled with a canary, say):
+    /// at least <paramref name="space"/> octets, of which the decoder may use the first
+    /// <paramref name="space"/>. Null: a fresh array of that size.
+    /// </param>
     /// <returns>What the call reported.</returns>
-    public HpackDecoded Decode(byte[] block, int maxFields = 256, int space = 65536)
+    /// <exception cref="ArgumentException"><paramref name="room"/> is shorter than <paramref name="space"/>.</exception>
+    public HpackDecoded Decode(byte[] block, int maxFields = 256, int space = 65536, byte[]? room = null)
     {
         var records = new HttpField[Math.Max(maxFields, 1)];
-        byte[] room = new byte[Math.Max(space, 1)];
+        if (room != null && room.Length < space)
+        {
+            throw new ArgumentException("The room is shorter than the space it must hold.", nameof(room));
+        }
+
+        // A caller's room is used as it is (its canary must survive what the decoder skips); a
+        // fresh one needs at least one octet so `fixed` yields a pointer even for space 0.
+        room ??= new byte[Math.Max(space, 1)];
         fixed (byte* b = block)
         fixed (HttpField* f = records)
         fixed (byte* s = room)

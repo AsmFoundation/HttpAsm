@@ -418,8 +418,13 @@ int httpasm_hpack_init(void *memory, size_t size, uint32_t limit, uint32_t flags
 
 /* Decodes one complete header block into output. 0: every field was written. 1: the block was
  * decoded (the table is in step) but fields or space ran out; the first records are written
- * and list_size counts all: refuse the request, keep the connection. -HTTPASM_ERROR_HPACK_*:
- * malformed; the table must not be used again (HTTP/2: COMPRESSION_ERROR). */
+ * and list_size counts all: refuse the request, keep the connection. Once the output is full
+ * (max_fields records written, or a field that did not fit), nothing more is written to space:
+ * the rest of the block is only measured, at a constant cost per octet, so a block of 1-octet
+ * references to a large dynamic entry (an HPACK bomb) costs no more than any block of its size.
+ * The field that finds the space too small may have written into the room left (never past
+ * space_size). -HTTPASM_ERROR_HPACK_*: malformed; the table must not be used again (HTTP/2:
+ * COMPRESSION_ERROR). */
 int64_t httpasm_hpack_decode(httpasm_hpack *table, const uint8_t *block, size_t length,
                              httpasm_hpack_output *output);
 
