@@ -1422,7 +1422,7 @@ worker_main:
     mov     rdi, r13
     call    ha_conn_expire
     test    eax, eax
-    jnz     .expire                         ; kept: a new window
+    jnz     .expire                         ; kept (a new window), or closed by its flush: not due
     mov     rdi, r13
     call    ha_conn_close
     jmp     .expire

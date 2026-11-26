@@ -194,6 +194,36 @@ internal sealed class H2Connection : IDisposable
         socket.Send(frame);
     }
 
+    /// <summary>
+    /// Writes several frames in one send, so they reach the server in one segment and it handles
+    /// them in one turn of its loop: for a test that needs two streams opened at the same
+    /// instant (separate sends may be read a turn apart, and the server's clock with them).
+    /// </summary>
+    /// <param name="frames">The frames, in order: type, flags, stream id, payload.</param>
+    public void SendFrames(params (int Type, int Flags, int Stream, byte[] Payload)[] frames)
+    {
+        var octets = new List<byte>();
+        foreach ((int type, int flags, int stream, byte[] payload) in frames)
+        {
+            if (type == Headers)
+            {
+                opened.Add(stream & 0x7FFFFFFF);   // the server may answer (or reset) it from now on
+            }
+
+            byte[] header = new byte[9];
+            header[0] = (byte)(payload.Length >> 16);
+            header[1] = (byte)(payload.Length >> 8);
+            header[2] = (byte)payload.Length;
+            header[3] = (byte)type;
+            header[4] = (byte)flags;
+            BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(5), stream);
+            octets.AddRange(header);
+            octets.AddRange(payload);
+        }
+
+        socket.Send(octets.ToArray());
+    }
+
     /// <summary>Writes a SETTINGS frame.</summary>
     /// <param name="settings">Its parameters, in order.</param>
     public void SendSettings(params (int Id, uint Value)[] settings)

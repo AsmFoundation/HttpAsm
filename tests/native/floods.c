@@ -535,6 +535,15 @@ static void make_hpack_blocks(bytes *b, uint8_t reference)
 }
 static void make_hpack_plain(bytes *b) { make_hpack_blocks(b, 0x82); }    /* :method GET, static */
 static void make_hpack_bomb(bytes *b) { make_hpack_blocks(b, 0xBE); }     /* dynamic entry 62 */
+static void setup_open_windows(bytes *b)
+{
+    /* The connection's window opened all the way (the client's SETTINGS opened every
+     * stream's): the refusals' answers go out whole and their streams end, so none piles up
+     * against MAX_CONCURRENT_STREAMS. With the windows at 65,535 the answers' bodies waited,
+     * their streams stayed, and the flood met the refused-stream path's glitches instead of
+     * its own (measured: 65,535 DATA octets came, and the refusal's glitch site never ran). */
+    u32_frame(b, WINDOW_UPDATE, 0, 0x7FFFFFFF - 65535);
+}
 static void make_refused_heads(bytes *b)
 {
     /* Requests refused before any handler, each costing a decoded head and an answer (417 to
@@ -594,9 +603,9 @@ static const flood floods[] = {
     { "empty-headers", "CVE-2019-9516", SERVED, 0, "hpack-plain", { 0 }, 0, NULL, make_empty_headers },
     { "ping-unread", "CVE-2019-9512", SERVED, 1, NULL, { 0 }, 0, NULL, make_ping },
     { "settings-unread", "CVE-2019-9515", SERVED, 1, NULL, { 0 }, 0, NULL, make_settings },
-    { "refused-heads", "RFC 9113 10.5", CALM, 0, NULL, { 0 }, 0, NULL, make_refused_heads },
+    { "refused-heads", "RFC 9113 10.5", CALM, 0, NULL, { 4, 0x7FFFFFFF }, 1, setup_open_windows, make_refused_heads },
     { "closed-stream-data", "RFC 9113 5.1", CALM, 0, NULL, { 0 }, 0, NULL, make_closed_stream_data },
-    { "oversized-uploads", "RFC 9113 10.5", CALM, 0, NULL, { 0 }, 0, NULL, make_oversized_uploads },
+    { "oversized-uploads", "RFC 9113 10.5", CALM, 0, NULL, { 4, 0x7FFFFFFF }, 1, setup_open_windows, make_oversized_uploads },
 };
 #define FLOOD_COUNT ((int)(sizeof floods / sizeof floods[0]))
 

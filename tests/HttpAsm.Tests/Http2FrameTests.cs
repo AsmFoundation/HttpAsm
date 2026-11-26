@@ -1963,17 +1963,19 @@ public sealed class Http2FrameTests
 
     /// <summary>
     /// A request answered early (417 for an expectation the server cannot meet) whose client
-    /// then ends it with trailers rather than DATA: the stream ends once both sides are done,
-    /// with no reset either way. When the 417 went out whole, the trailers end the stream at
-    /// once; when its body still waits for the client's window (SETTINGS_INITIAL_WINDOW_SIZE 0
-    /// here), the stream stays until a WINDOW_UPDATE lets the body out, END_STREAM with it.
-    /// The connection serves on in both cases.
+    /// then ends it with trailers rather than DATA. When the 417 goes out whole while the
+    /// request is still open, the server ends the stream itself with RST_STREAM NO_ERROR, which
+    /// asks the client to stop sending without calling anything an error (RFC9113-8.1-11#1),
+    /// and the trailers that cross it are discarded. When the 417's body still waits for the
+    /// client's window (SETTINGS_INITIAL_WINDOW_SIZE 0 here), the trailers come first: they end
+    /// the request, the stream stays until a WINDOW_UPDATE lets the body out with END_STREAM,
+    /// and it then ends normally, with no reset at all. The connection serves on in both cases.
     /// </summary>
     /// <param name="bodyWaits">Whether the 417's body is held back by a window of 0.</param>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    [Requirement("RFC9110-10.1.1-5", "RFC9113-6.9.1-2#1")]
+    [Requirement("RFC9110-10.1.1-5", "RFC9113-6.9.1-2#1", "RFC9113-8.1-11#1")]
     public void EndsAStreamAnsweredEarlyWhenItsTrailersCome(bool bodyWaits)
     {
         Platform.RequireLinuxX64();
@@ -1988,6 +1990,18 @@ public sealed class Http2FrameTests
         }
 
         Assert.Equal("417", c.Decoded[1].Single(f => f.Name == ":status").Value);
+        if (!bodyWaits)
+        {
+            // The 417 whole, the request still open: the server's RST_STREAM NO_ERROR follows.
+            H2Frame end = c.ReadFrame()!;
+            while (end.Type != RstStream || end.Stream != 1)
+            {
+                end = c.ReadFrame()!;
+            }
+
+            Assert.Equal(NoError, BinaryPrimitives.ReadUInt32BigEndian(end.Payload));
+        }
+
         c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("x-trailer", "late")));
         if (bodyWaits)
         {
@@ -2006,6 +2020,106 @@ public sealed class Http2FrameTests
         c.SendRequest(3, path: "/no-content");                     // 204: no DATA, whatever the window
         Assert.Equal(204, c.ReadResponse(3).Status);
         Assert.DoesNotContain(c.FramesWithin(100), f => f.Type == RstStream);
+    }
+
+    /// <summary>
+    /// A stream whose request head is still arriving (HEADERS without END_HEADERS, the
+    /// CONTINUATION late) is judged by the stuck-stream sweep like any other: it moved nothing
+    /// in a whole window, so it is answered 408 and ended (RST_STREAM NO_ERROR) with its head
+    /// incomplete. The connection's window is kept meanwhile by another stream's answer, 512 KiB
+    /// of /big (all its window allows; the client may send nothing else, not even a
+    /// WINDOW_UPDATE, between a field block's frames: RFC9113-4.3-10). When the head's
+    /// CONTINUATION then comes, its block is still decoded and only then dropped, its stream
+    /// gone, so the HPACK tables stay in step (RFC9113-4.3-11): the next request's cookie, an
+    /// index into the dynamic entry the late block added, comes out whole.
+    /// </summary>
+    /// <remarks>
+    /// The window is 512 KiB, under HA_OUTPUT_HIGH (1 MiB): an answer queued past that stops
+    /// the connection's frame processing until the output drains (back-pressure), which kept
+    /// the late head's HEADERS unread, its stream not even opened, while all 8 MiB went out
+    /// (measured under gdb: the sweep ran every window and had nothing to judge).
+    /// </remarks>
+    [Fact]
+    [Requirement("RFC9113-4.3-11", "RFC9113-4.3-10")]
+    public void DecodesTheRestOfAHeadWhoseStreamTheSweepEnded()
+    {
+        Platform.RequireLinuxX64();
+        const string Cookie = "late-entry-from-the-swept-head";     // 20 octets or more: indexed
+        using var server = NewServer(idleMs: 400);
+        using var c = new H2Connection(server.Port, true, (4, 512u << 10));
+        c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);
+        // /big (512 KiB go, the rest waits) and the late head's start (it stops there) in one
+        // send: handled in one turn, both streams begin at the same instant of the server's
+        // clock, so the head's stream is a whole window old at the connection's first deadline,
+        // when the window's progress (the 512 KiB) earns the connection another and the sweep
+        // judges the streams. Sent apart, the head came a turn later, was a moment too young at
+        // that sweep, and nothing kept the connection past the next deadline.
+        byte[] big = c.RequestBlock("GET", "/big");
+        byte[] block = c.RequestBlock("GET", "/cookie", ("cookie", Cookie));
+        c.SendFrames((Headers, EndHeaders | EndStream, 1, big), (Headers, EndStream, 3, block[..4]));
+
+        var clock = Stopwatch.StartNew();
+        bool answered = false, ended = false;
+        while (clock.ElapsedMilliseconds < 3000 && !(answered && ended) && c.ReadFrame() is H2Frame frame)
+        {
+            answered |= frame.Stream == 3 && frame.Type == Headers;
+            ended |= frame.Stream == 3 && frame.Type == RstStream;
+        }
+
+        Assert.True(answered, "the stuck stream was answered 408");
+        Assert.Equal("408", c.Decoded[3].Single(f => f.Name == ":status").Value);
+        Assert.True(ended, "and ended");
+        c.SendFrame(Continuation, EndHeaders, 3, block.AsSpan(4)); // the rest of the head, too late
+        c.SendRequest(5, path: "/cookie", extra: ("cookie", Cookie));
+
+        Assert.Equal(Cookie + "|1", Encoding.ASCII.GetString(c.ReadResponse(5).Body));
+    }
+
+    /// <summary>
+    /// A connection error found while an answer is still on its way out: the server writes
+    /// GOAWAY behind what it holds and serves nothing more, and the connection is to close once
+    /// that output is sent (RFC9113-5.4.1-2#2). A client that does not read would hold it open
+    /// on that promise; the window's end closes it instead, even though the window moved (the
+    /// output's first octets went), because a connection that is ending earns no other. The
+    /// error must be found with output still waiting, which back-pressure normally prevents (no
+    /// frame is handled while the output holds more than HA_OUTPUT_HIGH, and none is read
+    /// while it waits for the socket). So the three frames come in one send and are handled
+    /// together: /a's 2 MB answer, which the socket takes whole (its loopback send buffer
+    /// autotunes to 2.2-2.6 MB); /b's 1,000,000 octets, under HA_OUTPUT_HIGH, so the next frame
+    /// is still handled; and DATA on stream 0, a connection error. The socket takes only the
+    /// start of /b; the client, with a 16 KiB receive buffer, reads nothing for a second; the
+    /// server closes at its 400 ms deadline; then the client finds /a whole, /b cut short, and
+    /// the end.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-5.4.1-2#2")]
+    public void ClosesAConnectionEndingInErrorAtItsWindowsEnd()
+    {
+        Platform.RequireLinuxX64();
+        byte[] a = new byte[2_000_000], b = new byte[1_000_000];
+        using var server = new TestServer(x => x.Respond(200, x.Target == "/a" ? a : b), idleMs: 400);
+        using var c = new H2Connection(server.Port, 16 << 10, (4, 0x7FFFFFFF));   // every stream's window open
+        c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);                          // and the connection's
+        c.SendFrames(
+            (Headers, EndHeaders | EndStream, 1, c.RequestBlock("GET", "/a")),
+            (Headers, EndHeaders | EndStream, 3, c.RequestBlock("GET", "/b")),
+            (Data, 0, 0, [(byte)'x']));                             // DATA on stream 0: PROTOCOL_ERROR
+        Thread.Sleep(1000);                                         // nothing read: the deadline closes it
+
+        long received = 0;
+        try
+        {
+            while (c.ReadFrame() is H2Frame frame)
+            {
+                received += frame.Type == Data ? frame.Payload.Length : 0;
+            }
+        }
+        catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionReset)
+        {
+            // The close reset what the client had not read: as good an end as a FIN.
+        }
+
+        Assert.InRange(received, a.Length + 1, a.Length + b.Length - 1);
     }
 
     /// <summary>

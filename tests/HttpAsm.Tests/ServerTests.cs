@@ -341,6 +341,26 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// The look for "HTTP/" that decides whether a refused first line is answered reads the
+    /// first 8 KiB only, past the empty lines the parser skips before a request line (RFC
+    /// 9112 2.2: any number). A line that only starts past 8 KiB of them is not looked at: the
+    /// connection closes with nothing sent, as for anything that is not HTTP. 5,000 empty lines
+    /// (10,000 octets), then a line that is not a request line.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9112-2.2-9")]
+    public void ClosesSilentlyOnALineBeyondTheFirst8KiB()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200));
+        using var c = new RawConnection(server.Port);
+
+        c.Send(string.Concat(Enumerable.Repeat("\r\n", 5000)) + "SSH-2.0-OpenSSH_9.6\r\n\r\n");
+
+        Assert.True(c.ServerClosed());
+    }
+
+    /// <summary>
     /// A body past max_body is refused with 413 and the connection closes (its unread body
     /// would otherwise be taken for the next request): a declared length at once, before any
     /// body octet is read, saying Connection: close so the client knows the rest will not be
@@ -1470,6 +1490,49 @@ public sealed class ServerTests
     }
 
     /// <summary>
+    /// An exchange the stop forced closed (after its 5 s grace) and answered only after the
+    /// stop is taken by the workers of the next start: the answer waits in its worker's queue
+    /// through the restart, the new worker finds it, and its connection (a zombie since the
+    /// stop) is released and freed. On io_uring that connection was counted for the ring the
+    /// stop closed, and the new worker, with a ring of its own, frees it all the same (the
+    /// reap tells the old ring's references from its own). The server then serves as before.
+    /// </summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task ReleasesAnAnswerThatOutlivedTheStopAtTheNextStart()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        Exchange? held = null;
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/held")
+            {
+                held = x;
+                x.Defer();
+                return;
+            }
+
+            x.Respond(200, "served");
+        }, workers: 1);
+        using (var c = new RawConnection(server.Port, timeoutMs: 15000))
+        {
+            c.Send("GET /held HTTP/1.1\r\nHost: t\r\n\r\n");
+            Thread.Sleep(100);                                      // the handler has deferred it
+            await Task.Run(server.Stop, ct).WaitAsync(TimeSpan.FromSeconds(15), ct);
+            Assert.True(c.ServerClosed(1000));
+        }
+
+        Assert.Equal(0, held!.Respond(200, "late"));                // queued: no worker runs
+        Assert.Equal(0, server.Start());
+        Thread.Sleep(200);                                          // the new worker takes the answer
+
+        using var next = new RawConnection(server.Port);
+        next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("served", next.ReadResponse().Text);
+    }
+
+    /// <summary>
     /// Pipelined requests whose answers outgrow the output while a slow reader drains it: each
     /// answer of 100,000 octets is written when the output has room again, after what was sent
     /// is dropped from its front, and when that is still not room enough the output grows. All
@@ -1492,15 +1555,23 @@ public sealed class ServerTests
     }
 
     /// <summary>
-    /// A deferred answer that comes while the answer before it is still partly unsent goes
-    /// behind it: the output first drops what was sent (compacts), and when that does not make
-    /// room enough, grows. 500,000 octets answered inline, then a deferred request answered
-    /// 200 ms later with 2 MB, to a client that reads nothing for half a second (its 16 KiB
-    /// receive buffer keeps most of the first answer on the server).
+    /// A deferred answer larger than the connection's output, coming while the client has read
+    /// nothing yet: it goes behind the inline answer before it, the output growing to hold it,
+    /// and both arrive whole and in order. 500,000 octets answered inline, then a deferred
+    /// request answered 200 ms later with 2 MB, to a client that reads nothing for half a
+    /// second.
     /// </summary>
+    /// <remarks>
+    /// On loopback the kernel takes the first answer whole (a connection's send buffer
+    /// autotunes to about 1.3 MB from loopback's 64 KiB MSS, more than the 1 MiB past which the
+    /// processing stops for back-pressure), so the output is empty again when the deferred
+    /// answer comes. An output partly sent at that moment, which would be compacted first, needs
+    /// a smaller send buffer than loopback gives: see tests/coverage/unreachable.tsv
+    /// (output_reserve's "rare:" entry).
+    /// </remarks>
     [Fact]
     [Requirement("RFC9112-9.3.2-1#3")]
-    public void AppendsADeferredAnswerBehindOnePartlySent()
+    public void AppendsALargeDeferredAnswerBehindAnInlineOne()
     {
         Platform.RequireLinuxX64();
         byte[] first = RandomBytes(500_000);

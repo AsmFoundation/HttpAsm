@@ -185,8 +185,11 @@ lru_unlink:
 ;   The verdict is reached before the streams are judged: the sweep may queue a 408, and an
 ;   answer queued starts a new window (ha_h2_respond touches), zeroing the progress the verdict
 ;   needs. Only a connection that is kept is swept; one that closes takes its streams with it.
-;   In: rdi = conn (its deadline passed). Out: eax = 1 when it gets a new window (ha_lru_touch:
-;   a future deadline, the list's tail), 0 when the caller should close it.
+;   What the sweep queued is flushed here (see .keep): the expiry runs between events, and no
+;   other flush of the connection's follows it.
+;   In: rdi = conn (its deadline passed). Out: eax = 1 when it is no longer due: kept with a new
+;   window (ha_lru_touch: a future deadline, the list's tail), or closed already, off the list,
+;   by the flush of the sweep's answers (a failed send); 0 when the caller should close it.
 ;   Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 global ha_conn_expire:function hidden (ha_conn_expire.end - ha_conn_expire)
@@ -229,6 +232,22 @@ ha_conn_expire:
     mov     rax, [rbx + conn.h2]
     test    dword [rax + h2.flags], H2F_CLOSING
     jnz     .close                          ; a connection error meanwhile: it is ending anyway
+    mov     rdi, rbx
+    call    ha_lru_touch                    ; the new window first: what the flush sends is its progress
+    ; What the sweep answered (a stuck request's 408, a stuck answer's RST_STREAM) is in the
+    ; output, and must go now: the expiry runs between events, so no flush of this connection's
+    ; follows it. Without this one the 408 waited for the connection's next activity, and on a
+    ; connection with none it left only behind the closing GOAWAY, a window later, its octets
+    ; never counted as the progress that would have kept the connection (Http2FrameTests.
+    ; DecodesTheRestOfAHeadWhoseStreamTheSweepEnded, 2026-11-26). Under io_uring the flush
+    ; queues a SEND for the next submission. A send that fails closes the connection
+    ; (ha_conn_flush returns 1): it has left the deadline list then, all the caller needs, so
+    ; the answer is 1 either way.
+    mov     rdi, rbx
+    call    ha_conn_flush
+    mov     eax, 1
+    pop     rbx
+    ret
 .new_window:
 %endif
     mov     rdi, rbx

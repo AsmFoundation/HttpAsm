@@ -8,11 +8,11 @@
  * with a trailer, echoed (the input and the output grow); an HTTP/2 request; an HTTP/2
  * connection carrying a deferred request and an upload whose head continues in a CONTINUATION
  * frame, whose 20 KB body comes in two DATA frames and which ends with trailers; and one asking
- * for a 256 KiB answer past its stream's first window (the rest waits, copied, for the
- * WINDOW_UPDATE that follows) and for an answer whose 64 KB head takes CONTINUATION frames;
- * then the httpasm client's own requests (a small answer, a 256 KiB one, one whose 64 KB head
- * outgrows the client's input, and one whose own 5 KB head outgrows its output), the stop and
- * the destroy.
+ * for an answer whose 64 KB head takes CONTINUATION frames and for a 256 KiB answer past its
+ * stream's first window (the rest waits, copied, for the WINDOW_UPDATE that follows); then the
+ * httpasm client's own requests (a small answer, one whose 64 KB head outgrows the client's
+ * input, a 256 KiB one, and one whose own 5 KB head outgrows its output), the stop and the
+ * destroy.
  *
  *   1. Allocation failures. This program defines malloc, calloc and realloc (they interpose on
  *      the C library's for the whole process, libhttpasm.so included) and counts the calls; the
@@ -332,11 +332,13 @@ static void build_messages(void)
     static const unsigned char trailers[] = { 0x00, 3, 'x', '-', 't', 1, '1' };
     put_frame(1, 0x05, 3, trailers, sizeof trailers);                               /* HEADERS: trailers, END_STREAM */
 
-    /* The second HTTP/2 connection: the connection's window raised by 1 MiB; stream 1 GET /big,
-     * whose 256 KiB answer outruns the stream's first window (65,535: the server sends that,
-     * then keeps a copy of the rest); stream 3 GET /large-head, whose 64 KB answer head takes
-     * HEADERS and CONTINUATION frames, each growing the output; then stream 1's window raised
-     * by 1 MiB, which lets the rest of /big go. */
+    /* The second HTTP/2 connection: the connection's window raised by 1 MiB; stream 1 GET
+     * /large-head, whose 64 KB answer head takes HEADERS and CONTINUATION frames, each growing
+     * the output from its first 16 KiB (first: an output /big's DATA had grown already would
+     * take them without growing, and their allocations would never be failed); stream 3 GET
+     * /big, whose 256 KiB answer outruns the stream's first window (65,535 octets: the server
+     * sends that, then keeps a copy of the rest); then stream 3's window raised by 1 MiB, which
+     * lets the rest of /big go. */
     for (size_t i = 0; i < sizeof large_value; i++)
         large_value[i] = 'l';
     static const unsigned char raise[] = { 0x00, 0x10, 0x00, 0x00 };              /* 1 MiB */
@@ -344,11 +346,11 @@ static void build_messages(void)
     h2_window_length = sizeof preface - 1;
     put_frame_into(h2_window, &h2_window_length, 4, 0, 0, "", 0);                   /* SETTINGS */
     put_frame_into(h2_window, &h2_window_length, 8, 0, 0, raise, sizeof raise);     /* WINDOW_UPDATE, the connection */
-    static const unsigned char big[] = { 0x82, 0x86, 0x04, 4, '/', 'b', 'i', 'g', 0x41, 1, 'a' };
-    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 1, big, sizeof big);      /* HEADERS, END_STREAM */
-    static const unsigned char large[] = { 0x82, 0x86, 0x04, 11, '/', 'l', 'a', 'r', 'g', 'e', '-', 'h', 'e', 'a', 'd', 0xbe };
-    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 3, large, sizeof large);  /* HEADERS, END_STREAM */
-    put_frame_into(h2_window, &h2_window_length, 8, 0, 1, raise, sizeof raise);     /* WINDOW_UPDATE, stream 1 */
+    static const unsigned char large[] = { 0x82, 0x86, 0x04, 11, '/', 'l', 'a', 'r', 'g', 'e', '-', 'h', 'e', 'a', 'd', 0x41, 1, 'a' };
+    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 1, large, sizeof large);  /* HEADERS, END_STREAM */
+    static const unsigned char big[] = { 0x82, 0x86, 0x04, 4, '/', 'b', 'i', 'g', 0xbe };
+    put_frame_into(h2_window, &h2_window_length, 1, 0x05, 3, big, sizeof big);      /* HEADERS, END_STREAM */
+    put_frame_into(h2_window, &h2_window_length, 8, 0, 3, raise, sizeof raise);     /* WINDOW_UPDATE, stream 3 */
 }
 
 /* client_get: one GET by the httpasm client. Returns httpasm_client_send's result. */
@@ -434,7 +436,10 @@ static int scenario(void)
     if (c == NULL) {
         result = 3;
     } else {
-        if (client_get(c, "/") != 0 || client_get(c, "/big") != 0 || client_get(c, "/large-head") != 0 || client_get_padded(c) != 0)
+        /* /large-head before /big: /big's body grows the client's input to 512 KiB, after
+         * which the 64 KB head would fit without the growth (and its allocations) it is here
+         * to cause. */
+        if (client_get(c, "/") != 0 || client_get(c, "/large-head") != 0 || client_get(c, "/big") != 0 || client_get_padded(c) != 0)
             result = 4;
         httpasm_client_close(c);
     }
