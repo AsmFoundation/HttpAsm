@@ -501,10 +501,45 @@ HTTP/2, the drivers, the client):
        entry again. Once the output is full it now writes nothing and only measures, at a
        constant cost per octet (`HpackTests.WritesNothingOnceTheOutputIsFull`: a canary
        after the records survives every kind of field; the old decoder overwrote it).
+     - **The HTTP/2 floods** (RFC 9113 10.5). `tests/native/floods` runs 17 published floods
+       against a server in its own process, on each backend, and checks three things. Each
+       flood must be served or cut with ENHANCE_YOUR_CALM, as it should be. The server's CPU
+       per octet must stay within 4x a PING flood's (an HPACK bomb within 4x a same-size block
+       of static references). A client that never reads must not grow the heap (malloc is
+       interposed). The before and after (fastest of 3 runs, WSL, i9-13900K):
+
+       | Flood | Published as | Before | After |
+       |---|---|---|---|
+       | SETTINGS of 2,730 `INITIAL_WINDOW_SIZE` values, 100 streams open | RFC 9113 10.5 | 11.19x | 0.69x |
+       | WINDOW_UPDATE on stream 0, 100 streams open | RFC 9113 10.5 | 10.61x | 0.53x |
+       | empty SETTINGS | CVE-2019-9515 | 5.10x | 2.32x |
+       | WINDOW_UPDATE on each of 100 streams | RFC 9113 10.5 | 3.20x | 1.37x |
+       | 1-octet references to a 400-octet entry | RFC 7541 7.3 | 5.89x plain | 1.10x plain |
+       | PRIORITY, empty DATA, unknown types | CVE-2019-9513, 9518 | served | cut |
+       | resets the server is made to send | CVE-2025-8671 | served | cut |
+
+       The fixes (src/HttpAsm/h2.asm):
+       - **A glitch budget** (nghttp2 1.71's: 10,000 at once, 330 a second): PRIORITY, empty
+         DATA without END_STREAM, unknown frame types, refusals, and every stream error the
+         peer causes.
+       - **Server-provoked resets count:** resets the peer makes the server send count for
+         the rapid-reset rule like its own (CVE-2025-8671, "MadeYouReset").
+       - **SETTINGS:** checks each `INITIAL_WINDOW_SIZE` in order, then applies the frame's
+         net change in one walk over the streams.
+       - **WINDOW_UPDATE on stream 0** walks the streams only when a body waits for the
+         connection's window.
+       - **Stream lookup:** a stream is found by four ids per SSE2 compare.
+       - **Empty copies are skipped:** an empty `rep movsb` costs about 30 ns here, because
+         FSRM's fast path starts at 1 octet. It made every empty SETTINGS frame's ACK cost
+         2.3 times a PING's.
+       A non-reading client never grew the heap: the server stops reading the moment its
+       socket refuses output, before the 1 MiB mark. `Http2FrameTests` holds the protocol
+       side: each glitch flood, the budget's refill, four ways to provoke resets, and
+       `INITIAL_WINDOW_SIZE` repeated in one frame (in order, and only the net change applied).
    - **Still to do:**
-     - the rest of the published attack corpora: the HTTP/2 floods (CVE-2019-9511 to 9518,
-       and CVE-2025-8671's server-provoked resets), slowloris and slow reads on both versions,
-       and request-smuggling mutations;
+     - the rest of the published attack corpora: slowloris and slow reads on both versions
+       (and the deadline that cuts any transfer longer than the idle timeout), and
+       request-smuggling mutations;
      - then `unreachable.tsv` and the gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,

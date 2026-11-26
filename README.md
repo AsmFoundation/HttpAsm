@@ -101,6 +101,10 @@ or listed with its RFC reason in `tests/fuzz/*.triage`.
   16 system calls, each in a child that must end by itself (no crash, no hang, no spinning);
   and a server out of descriptors on each backend, which must rest rather than spin, then
   answer the connections that waited;
+- **runs `tests/native/floods`** on each backend: 17 published HTTP/2 floods (CVE-2019-9511 to
+  9518, rapid reset, CONTINUATION, MadeYouReset, the HPACK bomb), each served or cut with
+  ENHANCE_YOUR_CALM as it must be, none costing the server more than 4 times a PING flood's
+  CPU per octet, and none growing its heap when the client never reads;
 - **runs `tests/native/signals`:** 2,000 client connects under a 100 µs timer signal, all of
   which must connect;
 - **runs `tests/native/tiers`:** every multi-version routine at every tier, against an oracle

@@ -32,10 +32,22 @@
 ;          (8.2.3), connection-specific fields refused in responses as well; a malformed
 ;          request head gets 400 and then RST_STREAM(PROTOCOL_ERROR) (h2_bad_request);
 ;   8.4    a client's PUSH_PROMISE is a PROTOCOL_ERROR.
-; Hardening: rapid resets (CVE-2023-44487) beyond HA_H2_RESET_FLOOR and half of the streams
-; opened are ENHANCE_YOUR_CALM; field blocks are bounded in octets and CONTINUATION frames
-; (CVE-2024-27316); output past HA_OUTPUT_HIGH stops the input (the same back-pressure as
-; HTTP/1.1).
+; Hardening (the published floods, RFC 9113 10.5):
+;   - resets: past HA_H2_RESET_FLOOR, more than one reset for every two streams opened is
+;     ENHANCE_YOUR_CALM (h2_count_reset), whether the peer sends them (CVE-2023-44487, rapid
+;     reset) or provokes this side's (CVE-2025-8671, "MadeYouReset": h2_peer_stream_error);
+;   - glitches: PRIORITY, empty DATA without END_STREAM, unknown frame types, refusals and
+;     every stream error the peer causes spend a token bucket (h2_glitch: 10,000 at once, 330
+;     a second, nghttp2's defaults); spent, ENHANCE_YOUR_CALM (CVE-2019-9513, 9514, 9518);
+;   - field blocks are bounded in octets and CONTINUATION frames (CVE-2024-27316), and HPACK
+;     past the limits only measures (the core's decoder: no HPACK bomb);
+;   - no frame costs more than its size and the active streams once: SETTINGS applies a frame's
+;     net window change in one walk (h2_settings), a WINDOW_UPDATE on stream 0 walks the
+;     streams only when a body waits for that window (H2F_CONN_BLOCKED), and a stream is found
+;     by four ids per compare (h2_slot);
+;   - output past HA_OUTPUT_HIGH stops the input (the same back-pressure as HTTP/1.1), so a
+;     peer that does not read cannot make PING, SETTINGS or reset answers pile up
+;     (CVE-2019-9512, 9514, 9515).
 ;
 ; Memory: the connection's state (this file's h2, with both HPACK tables) is one block; each
 ; stream is one block plus its request's fields (one block), trailers, body and pending output.
@@ -160,7 +172,7 @@ h2_frame:
     add     rdi, H2_FRAME_HEADER
     mov     rsi, [rsp + F_PAYLOAD]
     mov     rcx, [rsp + F_LENGTH]
-    rep     movsb
+    COPY_OCTETS                             ; empty for every SETTINGS ACK
     mov     rax, [rsp + F_LENGTH]
     add     rax, H2_FRAME_HEADER
     add     [rbx + conn.wlen], rax
@@ -351,24 +363,56 @@ ha_h2_notice:
 .end:
 
 ; -----------------------------------------------------------------------------
-; h2_find: the active stream with an id. In: r12 = h2, edi = id. Out: rax = stream, or 0.
-;   Clobbers rcx, rdx and the flags.
+; h2_slot: the slot of the active stream with an id, by four ids per compare from h2.ids (SSE2,
+; the x86-64 baseline: no tier needed for at most HA_H2_MAX_STREAMS ids). Every frame that names
+; a stream looks it up, so the cost is per frame: the scan it replaced followed each active
+; stream's pointer to read its id, up to 100 dependent loads even for a stream long gone. A
+; slot past stream_count holds a stale id (a removed stream's, or 0), so a match there means
+; none; ids are never reused (they only increase), so no active stream shares a stale id.
+;   In: r12 = h2, edi = id. Out: eax = the slot, or -1 (rax's upper half 0 either way with a
+;   slot; -1 sign-extended otherwise). Clobbers rcx, rdx, xmm0, xmm1 and the flags.
+; -----------------------------------------------------------------------------
+align 16
+h2_slot:
+    mov     ecx, [r12 + h2.stream_count]
+    movd    xmm0, edi
+    pshufd  xmm0, xmm0, 0                   ; the id in all four lanes
+    xor     edx, edx
+.block:
+    cmp     edx, ecx
+    jae     .none
+    movdqu  xmm1, [r12 + h2.ids + rdx * 4]  ; the padding keeps the last load inside h2
+    pcmpeqd xmm1, xmm0
+    pmovmskb eax, xmm1
+    test    eax, eax
+    jnz     .match
+    add     edx, 4
+    jmp     .block
+.match:
+    bsf     eax, eax                        ; the first matching lane: an active one comes
+    shr     eax, 2                          ; before any stale one of this block
+    add     eax, edx
+    cmp     eax, ecx
+    jae     .none                           ; a stale id past the active ones
+    ret
+.none:
+    mov     rax, -1
+    ret
+
+; -----------------------------------------------------------------------------
+; h2_find: the active stream with an id (h2_slot).
+;   In: r12 = h2, edi = id. Out: rax = the stream, or 0. Clobbers rcx, rdx, xmm0, xmm1 and the
+;   flags (callers rely on it calling nothing: it touches no other register).
 ; -----------------------------------------------------------------------------
 align 16
 h2_find:
-    mov     ecx, [r12 + h2.stream_count]
-    xor     edx, edx
-.next:
-    cmp     edx, ecx
-    jae     .none
-    mov     rax, [r12 + h2.streams + rdx * 8]
-    cmp     [rax + h2stream.id], edi
-    je      .out
-    inc     edx
-    jmp     .next
+    call    h2_slot
+    test    eax, eax
+    js      .none
+    mov     rax, [r12 + h2.streams + rax * 8]
+    ret
 .none:
     xor     eax, eax
-.out:
     ret
 
 ; -----------------------------------------------------------------------------
@@ -449,19 +493,16 @@ h2_close:
     mov     r13, rdi
     mov     edi, [r13 + h2stream.id]
     call    h2_remember
-    mov     ecx, [r12 + h2.stream_count]    ; out of the active set: the last one takes its slot
-    xor     edx, edx
-.find:
-    cmp     edx, ecx
-    jae     .removed
-    cmp     [r12 + h2.streams + rdx * 8], r13
-    je      .found
-    inc     edx
-    jmp     .find
-.found:
+    mov     edi, [r13 + h2stream.id]        ; out of the active set: the last one takes its
+    call    h2_slot                         ; slot, in both arrays
+    test    eax, eax
+    js      .removed                        ; not active (closed before): nothing to move
+    mov     ecx, [r12 + h2.stream_count]
     dec     ecx
-    mov     rax, [r12 + h2.streams + rcx * 8]
-    mov     [r12 + h2.streams + rdx * 8], rax
+    mov     rdx, [r12 + h2.streams + rcx * 8]
+    mov     [r12 + h2.streams + rax * 8], rdx
+    mov     edx, [r12 + h2.ids + rcx * 4]
+    mov     [r12 + h2.ids + rax * 4], edx
     mov     [r12 + h2.stream_count], ecx
 .removed:
     test    dword [r13 + h2stream.flags], HSF_DEFERRED | HSF_IN_HANDLER
@@ -472,6 +513,112 @@ h2_close:
     mov     rdi, r13
     call    h2_free_stream
 .out:
+    pop     r13
+    ret
+
+; -----------------------------------------------------------------------------
+; h2_glitch: spends one glitch of the connection's budget (RFC9113-10.5-6: "track the use of
+; these features and set limits on their use"). A glitch is a frame that costs this side work
+; and moves no request forward: PRIORITY, an empty DATA frame without END_STREAM, a frame of an
+; unknown type, or any frame that makes this side reset a stream (h2_peer_stream_error). Each
+; is legal and cheap alone; floods of them are CVE-2019-9513 (PRIORITY), CVE-2019-9518 (empty
+; frames), CVE-2019-9514 and CVE-2025-8671 (resets the peer provokes). The budget is a token
+; bucket in thousandths of a glitch: it refills by HA_H2_GLITCH_RATE a second, by the worker's
+; clock (refreshed after every wait), and holds at most HA_H2_GLITCH_BURST. Spent, the
+; connection ends with ENHANCE_YOUR_CALM (RFC9113-10.5-6#2).
+;   In: rbx = conn, r12 = h2. Out: eax = 1 when the connection is closing now (the caller acts
+;   on the frame no further), else 0. Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+align 16
+h2_glitch:
+    mov     rax, [rbx + conn.worker]
+    mov     rax, [rax + worker.now_ms]
+    mov     rcx, rax
+    sub     rcx, [r12 + h2.glitch_time]     ; the ms since the last refill (never negative:
+    mov     [r12 + h2.glitch_time], rax     ; the clock is monotonic)
+    imul    rcx, rcx, HA_H2_GLITCH_RATE     ; thousandths earned: rate per second = per 1000 ms
+    add     rcx, [r12 + h2.glitch_tokens]
+    mov     edx, HA_H2_GLITCH_BURST * 1000
+    cmp     rcx, rdx
+    cmova   rcx, rdx                        ; a full bucket holds the burst, no more
+    sub     rcx, 1000                       ; this glitch
+    jb      .spent
+    mov     [r12 + h2.glitch_tokens], rcx
+    xor     eax, eax
+    ret
+.spent:
+    mov     qword [r12 + h2.glitch_tokens], 0
+    sub     rsp, 8
+    mov     edi, H2_ENHANCE_YOUR_CALM
+    call    h2_connection_error
+    add     rsp, 8
+    mov     eax, 1
+    ret
+
+; -----------------------------------------------------------------------------
+; h2_count_reset: one more active stream ended by a reset - the peer's RST_STREAM, or one this
+; side sent because of the peer's frames (h2_peer_stream_error). Either frees a stream slot
+; while the request's handler may still be at work: CVE-2023-44487 (rapid reset) does it with
+; the client's own RST_STREAM, CVE-2025-8671 ("MadeYouReset") by provoking the server's. Past
+; HA_H2_RESET_FLOOR resets, more than one reset for every two streams opened is
+; ENHANCE_YOUR_CALM (RFC9113-10.5-6#2).
+;   In: rbx = conn, r12 = h2. Out: eax = 1 when the connection is closing now, else 0.
+;   Clobbers every caller-saved register.
+; -----------------------------------------------------------------------------
+align 16
+h2_count_reset:
+    inc     dword [r12 + h2.resets]
+    mov     eax, [r12 + h2.resets]
+    cmp     eax, HA_H2_RESET_FLOOR
+    jbe     .fine
+    shl     rax, 1
+    cmp     rax, [r12 + h2.opened]
+    jbe     .fine
+    sub     rsp, 8
+    mov     edi, H2_ENHANCE_YOUR_CALM
+    call    h2_connection_error
+    add     rsp, 8
+    mov     eax, 1
+    ret
+.fine:
+    xor     eax, eax
+    ret
+
+; -----------------------------------------------------------------------------
+; h2_peer_stream_error: a stream error the peer's frames caused (a malformed request, a frame
+; on a closed stream, a WINDOW_UPDATE of 0, a window past 2^31 - 1, ...): RST_STREAM with the
+; error, as h2_stream_error. It is also a glitch (h2_glitch), and when the stream was active,
+; one more reset for the rapid-reset rule (h2_count_reset): a client that makes this side reset
+; its streams frees their slots as surely as one that resets them itself (CVE-2025-8671). When
+; either ends the connection, the RST_STREAM is not sent: the GOAWAY says it all. Stream errors
+; of this side's own making (no memory, an early answer's NO_ERROR) use h2_stream_error.
+;   In: rbx = conn, r12 = h2, edi = id, esi = the error code. Clobbers every caller-saved
+;   register.
+; -----------------------------------------------------------------------------
+align 16
+h2_peer_stream_error:
+    push    r13
+    push    r14
+    sub     rsp, 8
+    mov     r13d, edi
+    mov     r14d, esi
+    call    h2_glitch
+    test    eax, eax
+    jnz     .out
+    mov     edi, r13d
+    call    h2_find
+    test    rax, rax
+    jz      .reset                          ; not active: no slot freed, nothing to count
+    call    h2_count_reset
+    test    eax, eax
+    jnz     .out
+.reset:
+    mov     edi, r13d
+    mov     esi, r14d
+    call    h2_stream_error
+.out:
+    add     rsp, 8
+    pop     r14
     pop     r13
     ret
 
@@ -616,6 +763,10 @@ ha_h2_start:
     mov     dword [r12 + h2.peer_window], H2_DEFAULT_WINDOW
     mov     dword [r12 + h2.peer_frame], H2_MIN_FRAME_SIZE
     mov     dword [r12 + h2.state], H2S_PREFACE
+    mov     qword [r12 + h2.glitch_tokens], HA_H2_GLITCH_BURST * 1000  ; the whole burst
+    mov     rax, [rbx + conn.worker]
+    mov     rax, [rax + worker.now_ms]
+    mov     [r12 + h2.glitch_time], rax
 
     ; SETTINGS: three 6-octet entries, big-endian.
     mov     word [rsp], 0x0300              ; MAX_CONCURRENT_STREAMS (3)
@@ -802,7 +953,10 @@ ha_h2_process:
     je      .window_update
     cmp     edx, H2_CONTINUATION
     je      .continuation
-    jmp     .next                           ; an extension frame: ignored (RFC 9113 5.5)
+    ; An extension frame (a type this side does not know: RFC 9218's PRIORITY_UPDATE, say) is
+    ; ignored (RFC 9113 5.5), and is a glitch (h2_glitch): a flood of them is pure overhead.
+    call    h2_glitch
+    jmp     .next
 .data:
     call    h2_data
     jmp     .next
@@ -895,7 +1049,7 @@ ha_h2_process:
     mov     rcx, [rbx + conn.rlen]
     sub     rcx, r13
     mov     [rbx + conn.rlen], rcx
-    rep     movsb
+    COPY_OCTETS                             ; nothing left when the input was all whole frames
     xor     r13d, r13d
 .compacted:
     ret
@@ -930,13 +1084,29 @@ h2_payload:
 
 ; -----------------------------------------------------------------------------
 ; h2_settings: a SETTINGS frame (RFC 9113 6.5): the peer's parameters, then an ACK.
+;   SETTINGS_INITIAL_WINDOW_SIZE changes every active stream's send window by the change
+;   (RFC 9113 6.9.2). A frame may repeat it (up to 2,730 times in 16 KiB), and applying each one
+;   to every stream cost 2,730 x 100 window updates for one frame: the abuse RFC 9113 10.5
+;   names ("changing the same setting multiple times in the same frame"). The parameters are
+;   still processed in order, with the same outcome as applying them one by one: each value is
+;   checked at once against the largest stream window before the frame plus the change so far
+;   (a window past 2^31 - 1 at any step is a FLOW_CONTROL_ERROR, RFC9113-6.9.2-3.1#2, ahead of
+;   any later parameter's error). Only the frame's net change is applied, once per stream. The
+;   waiting bodies resume (h2_resume) only when the windows grew. The cost is linear in the
+;   frame and the streams.
 ;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
+S_OLD       equ 0       ; the peer's INITIAL_WINDOW_SIZE before the frame (zero-extended)
+S_MAX       equ 8       ; the largest active stream's send window before the frame (signed)
+S_SEEN      equ 16      ; 1 once the frame had an INITIAL_WINDOW_SIZE (S_MAX computed)
+S_FRAME     equ 32      ; three pushes + 32: rsp stays 16-byte aligned for the calls
+
 align 16
 h2_settings:
     push    r13
     push    r14
     push    r15
+    sub     rsp, S_FRAME
     cmp     dword [r12 + h2.frame_stream], 0
     jne     .protocol_error
     mov     eax, [r12 + h2.frame_length]
@@ -953,6 +1123,9 @@ h2_settings:
     jnz     .frame_size_error               ; not whole 6-octet parameters
     mov     r13, [r12 + h2.frame_payload]
     mov     r14d, eax                       ; parameters left
+    mov     eax, [r12 + h2.peer_window]
+    mov     [rsp + S_OLD], rax
+    mov     qword [rsp + S_SEEN], 0
 .parameter:
     test    r14d, r14d
     jz      .acknowledge
@@ -983,24 +1156,35 @@ h2_settings:
 .initial_window:
     cmp     r15d, H2_MAX_WINDOW
     ja      .flow_control_error             ; past 2^31 - 1 (RFC9113-6.5.2-2.8.1)
-    ; Every stream's send window moves by the change, and may go negative (RFC 9113 6.9.2).
-    mov     ecx, [r12 + h2.peer_window]
-    mov     eax, r15d
-    sub     rax, rcx                        ; the change, signed (both are below 2^31)
-    mov     [r12 + h2.peer_window], r15d
+    cmp     qword [rsp + S_SEEN], 0
+    jne     .largest_known
+    ; The frame's first one: the largest active stream window, once. With no stream, a value
+    ; far below any window: the check below then never fails, and cannot overflow.
+    mov     rax, -(1 << 62)
     mov     ecx, [r12 + h2.stream_count]
     xor     edx, edx
-.stream_window:
+.largest:
     cmp     edx, ecx
-    jae     .parameter
+    jae     .largest_found
     mov     rsi, [r12 + h2.streams + rdx * 8]
     mov     rdi, [rsi + h2stream.send_window]
-    add     rdi, rax
-    cmp     rdi, H2_MAX_WINDOW
-    jg      .flow_control_error
-    mov     [rsi + h2stream.send_window], rdi
+    cmp     rdi, rax
+    cmovg   rax, rdi
     inc     edx
-    jmp     .stream_window
+    jmp     .largest
+.largest_found:
+    mov     [rsp + S_MAX], rax
+    mov     qword [rsp + S_SEEN], 1
+.largest_known:
+    ; Applied one by one, after this value every window would be its own plus (value - old),
+    ; and may go negative (RFC 9113 6.9.2); the largest must not pass 2^31 - 1.
+    mov     eax, r15d
+    sub     rax, [rsp + S_OLD]              ; the change so far, signed (both below 2^31)
+    add     rax, [rsp + S_MAX]
+    cmp     rax, H2_MAX_WINDOW
+    jg      .flow_control_error
+    mov     [r12 + h2.peer_window], r15d    ; new streams start from it (h2_new_stream)
+    jmp     .parameter
 .max_frame:
     cmp     r15d, H2_MIN_FRAME_SIZE
     jb      .protocol_error                 ; 16384 to 2^24 - 1 (RFC9113-6.5.2-2.10.1)
@@ -1009,6 +1193,25 @@ h2_settings:
     mov     [r12 + h2.peer_frame], r15d
     jmp     .parameter
 .acknowledge:
+    ; The frame's net change to INITIAL_WINDOW_SIZE, once to every active stream (the checks
+    ; above proved no window passes 2^31 - 1 at any step).
+    xor     r15d, r15d                      ; 1 when the windows grew: bodies may resume
+    cmp     qword [rsp + S_SEEN], 0
+    je      .windows_done
+    mov     eax, [r12 + h2.peer_window]
+    sub     rax, [rsp + S_OLD]              ; the net change, signed
+    jz      .windows_done
+    setg    r15b
+    mov     ecx, [r12 + h2.stream_count]
+    xor     edx, edx
+.stream_window:
+    cmp     edx, ecx
+    jae     .windows_done
+    mov     rsi, [r12 + h2.streams + rdx * 8]
+    add     [rsi + h2stream.send_window], rax
+    inc     edx
+    jmp     .stream_window
+.windows_done:
     mov     edi, H2_SETTINGS
     mov     esi, H2_FLAG_ACK
     xor     edx, edx
@@ -1019,7 +1222,9 @@ h2_settings:
     jne     .resume
     mov     dword [r12 + h2.state], H2S_OPEN
 .resume:
-    call    h2_resume                       ; windows may have grown
+    test    r15d, r15d
+    jz      .out                            ; no window grew: nothing waiting can move
+    call    h2_resume
     jmp     .out
 .protocol_error:
     mov     edi, H2_PROTOCOL_ERROR
@@ -1033,6 +1238,7 @@ h2_settings:
     mov     edi, H2_FLOW_CONTROL_ERROR
     call    h2_connection_error
 .out:
+    add     rsp, S_FRAME
     pop     r15
     pop     r14
     pop     r13
@@ -1109,7 +1315,9 @@ h2_goaway:
 
 ; -----------------------------------------------------------------------------
 ; h2_priority: PRIORITY (RFC 9113 6.3). The priority scheme is deprecated and not acted on, but
-; the frame is checked; it never opens a stream (RFC 9113 5.1.1: only HEADERS does).
+; the frame is checked; it never opens a stream (RFC 9113 5.1.1: only HEADERS does). Every
+; PRIORITY frame is a glitch (h2_glitch): it costs work and moves nothing (CVE-2019-9513
+; shuffled priorities endlessly; nghttp2 counts each frame too).
 ;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 align 16
@@ -1126,14 +1334,15 @@ h2_priority:
     and     eax, 0x7FFFFFFF
     cmp     eax, edi
     je      .self                           ; a stream cannot depend on itself (RFC 9113 5.3.1)
-    jmp     .out
+    call    h2_glitch                       ; a valid one: the budget's (an invalid one's error
+    jmp     .out                            ; below is a glitch of its own)
 .self:
     mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .frame_size_error:
     mov     esi, H2_FRAME_SIZE_ERROR        ; a stream error (RFC9113-6.3-6.2)
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .protocol_error:
     mov     edi, H2_PROTOCOL_ERROR
@@ -1144,8 +1353,8 @@ h2_priority:
 
 ; -----------------------------------------------------------------------------
 ; h2_rst_stream: RST_STREAM (RFC 9113 6.4): the stream closes, as reset by the peer. Reset
-; storms are refused (CVE-2023-44487): past HA_H2_RESET_FLOOR resets, more than one reset for
-; every two streams opened is ENHANCE_YOUR_CALM.
+; storms are refused (CVE-2023-44487): h2_count_reset's rule, shared with the resets the peer
+; provokes (h2_peer_stream_error).
 ;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 align 16
@@ -1167,15 +1376,7 @@ h2_rst_stream:
     mov     rdi, rax
     mov     esi, H2C_PEER_RESET
     call    h2_close
-    inc     dword [r12 + h2.resets]
-    mov     eax, [r12 + h2.resets]
-    cmp     eax, HA_H2_RESET_FLOOR
-    jbe     .out
-    shl     rax, 1
-    cmp     rax, [r12 + h2.opened]
-    jbe     .out
-    mov     edi, H2_ENHANCE_YOUR_CALM
-    call    h2_connection_error
+    call    h2_count_reset                  ; ENHANCE_YOUR_CALM past the rule: nothing follows
     jmp     .out
 .protocol_error:
     mov     edi, H2_PROTOCOL_ERROR
@@ -1210,6 +1411,11 @@ h2_window_update_frame:
     add     [r12 + h2.send_window], rsi
     cmp     qword [r12 + h2.send_window], H2_MAX_WINDOW
     jg      .flow_control_error
+    ; Only a body that waits for the connection's window can move now (H2F_CONN_BLOCKED, set
+    ; by h2_send_out). Clients send these as they read, most of the time with nothing waiting;
+    ; walking every stream for each would make a stream of them cost O(streams) per frame.
+    test    dword [r12 + h2.flags], H2F_CONN_BLOCKED
+    jz      .out
     call    h2_resume
     jmp     .out
 .stream:
@@ -1233,12 +1439,12 @@ h2_window_update_frame:
     call    h2_send_data
     jmp     .out
 .stream_protocol_error:
-    mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error
+    mov     esi, H2_PROTOCOL_ERROR          ; CVE-2025-8671's favorite: a reset the server
+    call    h2_peer_stream_error            ; sends on a stream whose answer may be in progress
     jmp     .out
 .stream_flow_control_error:
     mov     esi, H2_FLOW_CONTROL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .protocol_error:
     mov     edi, H2_PROTOCOL_ERROR
@@ -1444,7 +1650,7 @@ h2_block_append:
     add     rdi, [r12 + h2.block_length]
     mov     rsi, [r12 + h2.frame_payload]
     mov     ecx, r13d
-    rep     movsb
+    COPY_OCTETS                             ; an empty fragment (a CONTINUATION flood's)
     mov     [r12 + h2.block_length], r14
     jmp     .out
 .no_memory:
@@ -1482,6 +1688,7 @@ h2_new_stream:
     mov     qword [rax + h2stream.recv_window], HA_H2_WINDOW
     mov     ecx, [r12 + h2.stream_count]
     mov     [r12 + h2.streams + rcx * 8], rax
+    mov     [r12 + h2.ids + rcx * 4], r13d  ; h2_slot finds it by this
     inc     ecx
     mov     [r12 + h2.stream_count], ecx
 .out:
@@ -1619,18 +1826,22 @@ h2_block_done:
     jmp     .out
 
 .too_large:
-    mov     rdi, r13                        ; the field section past max_head (RFC9113-10.5.1-4)
-    mov     esi, 431
-    call    h2_error_response
-    jmp     .out
+    mov     esi, 431                        ; the field section past max_head (RFC9113-10.5.1-4)
+    jmp     .refusal
 .body_too_large:
-    mov     rdi, r13
     mov     esi, 413
-    call    h2_error_response
-    jmp     .out
+    jmp     .refusal
 .expectation_failed:
-    mov     rdi, r13
     mov     esi, 417
+.refusal:
+    ; A refusal the peer earned is a glitch (h2_glitch): a stream of oversized heads costs
+    ; their decoding and an answer each, and moves nothing.
+    mov     [rsp + B_KIND], esi             ; the status, across the call (the kind is used up)
+    call    h2_glitch
+    test    eax, eax
+    jnz     .out
+    mov     rdi, r13
+    mov     esi, [rsp + B_KIND]
     call    h2_error_response
     jmp     .out
 .bad_request:
@@ -1640,17 +1851,17 @@ h2_block_done:
 .malformed:
     mov     edi, [rsp + B_ID]               ; RFC9113-8.1.1-3: a stream error PROTOCOL_ERROR
     mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .refuse:
-    mov     edi, [rsp + B_ID]
+    mov     edi, [rsp + B_ID]               ; past SETTINGS_MAX_CONCURRENT_STREAMS
     mov     esi, H2_REFUSED_STREAM
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .closed:
     mov     edi, [rsp + B_ID]
     mov     esi, H2_STREAM_CLOSED
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .internal_error:
     mov     edi, [rsp + B_ID]
@@ -1934,6 +2145,16 @@ h2_data:
     jc      .protocol_error
     mov     r14, rsi                        ; the data
     mov     r15d, ecx                       ; its octets
+    ; A DATA frame with no data that ends nothing is a glitch (h2_glitch): legal, and useless
+    ; (CVE-2019-9518 floods them; an empty one with END_STREAM ends a request, and is not).
+    test    r15d, r15d
+    jnz     .not_empty
+    test    dword [r12 + h2.frame_flags], H2_FLAG_END_STREAM
+    jnz     .not_empty
+    call    h2_glitch
+    test    eax, eax
+    jnz     .out                            ; the budget is spent: the connection is ending
+.not_empty:
     ; The connection's window.
     mov     eax, [r12 + h2.frame_length]
     cmp     rax, [r12 + h2.recv_window]
@@ -1995,7 +2216,7 @@ h2_data:
     add     rdi, [r13 + h2stream.body_length]
     mov     rsi, r14
     mov     ecx, r15d
-    rep     movsb
+    COPY_OCTETS                             ; an empty DATA frame (END_STREAM, or a glitch)
     add     [r13 + h2stream.body_length], r15
     test    dword [r12 + h2.frame_flags], H2_FLAG_END_STREAM
     jz      .more_to_come
@@ -2027,24 +2248,27 @@ h2_data:
 .stream_closed_id:
     mov     edi, [r12 + h2.frame_stream]
     mov     esi, H2_STREAM_CLOSED
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .stream_closed:
-    mov     edi, [r13 + h2stream.id]
-    mov     esi, H2_STREAM_CLOSED
-    call    h2_stream_error
+    mov     edi, [r13 + h2stream.id]        ; DATA after END_STREAM: the stream may be at its
+    mov     esi, H2_STREAM_CLOSED           ; handler (CVE-2025-8671 provokes exactly this)
+    call    h2_peer_stream_error
     jmp     .out
 .stream_flow_control_error:
     mov     edi, [r13 + h2stream.id]
     mov     esi, H2_FLOW_CONTROL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .malformed:
     mov     edi, [r13 + h2stream.id]
     mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
     jmp     .out
 .too_large:
+    call    h2_glitch                       ; a refusal the peer earned
+    test    eax, eax
+    jnz     .out
     mov     rdi, r13
     mov     esi, 413
     call    h2_error_response
@@ -2093,9 +2317,9 @@ h2_body_ended:
     call    h2_close
     jmp     .out
 .malformed:
-    mov     edi, [rdi + h2stream.id]
+    mov     edi, [rdi + h2stream.id]        ; content-length and the DATA disagree
     mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error
+    call    h2_peer_stream_error
 .out:
     add     rsp, 8
     ret
@@ -2276,7 +2500,10 @@ h2_continue:
 ;   response holds :status and the worker's date (RFC 9110 6.6.1: a 4xx carries Date), encoded
 ;   by the connection's encoder like every block, so the HPACK tables stay in step.
 ;   Not for trailers or DATA (there the 400 may contradict an answer in progress, and
-;   RFC9113-8.2.1-6 itself exempts trailers): those get the reset alone (h2_stream_error).
+;   RFC9113-8.2.1-6 itself exempts trailers): those get the reset alone (h2_peer_stream_error).
+;   The reset is h2_peer_stream_error's: a glitch, and one more reset for the rapid-reset
+;   rule, so a stream of malformed requests ends the connection like any other reset storm;
+;   when it does, the 400 is followed by the GOAWAY instead of the RST_STREAM.
 ;   In: rbx = conn, r12 = h2, rdi = stream (active, not dispatched). Clobbers every caller-saved
 ;   register; the stream is closed (reset) afterwards, and freed unless a handler holds it.
 ; -----------------------------------------------------------------------------
@@ -2324,9 +2551,9 @@ h2_bad_request:
     mov     r8, rax
     call    h2_frame
 .reset:
-    mov     edi, [r13 + h2stream.id]
-    mov     esi, H2_PROTOCOL_ERROR
-    call    h2_stream_error                 ; closes the stream as reset by this side
+    mov     edi, [r13 + h2stream.id]        ; closes the stream as reset by this side; the
+    mov     esi, H2_PROTOCOL_ERROR          ; peer's doing, so a glitch and a reset counted
+    call    h2_peer_stream_error
     add     rsp, BR_FRAME
     pop     r13
     ret
@@ -2724,6 +2951,13 @@ h2_send_out:
     xor     eax, eax
     jmp     .out
 .waiting:
+    ; Held back by the connection's window (spent, or both are): a WINDOW_UPDATE on stream 0
+    ; must walk the streams again (H2F_CONN_BLOCKED). By its own window alone, only its own
+    ; WINDOW_UPDATE or a SETTINGS change can move it.
+    cmp     qword [r12 + h2.send_window], 0
+    jg      .own_window
+    or      dword [r12 + h2.flags], H2F_CONN_BLOCKED
+.own_window:
     test    r15d, r15d
     jz      .kept
     ; The caller's body: copy what is left.
@@ -2767,7 +3001,9 @@ h2_send_data:
 ; -----------------------------------------------------------------------------
 ; h2_resume: every active stream with a waiting body sends what the windows now allow. A stream
 ; that finishes leaves the active set (its slot taken by the last one), so the index advances
-; only past streams that stay.
+; only past streams that stay. H2F_CONN_BLOCKED starts over: h2_send_out sets it again for a
+; body the connection's window holds back, and so does a walk cut short by that window (the
+; streams it did not reach may wait too).
 ;   In: rbx = conn, r12 = h2. Clobbers every caller-saved register.
 ; -----------------------------------------------------------------------------
 align 16
@@ -2775,12 +3011,13 @@ h2_resume:
     push    r13
     push    r14
     sub     rsp, 8
+    and     dword [r12 + h2.flags], ~H2F_CONN_BLOCKED
     xor     r13d, r13d
 .stream:
     cmp     r13d, [r12 + h2.stream_count]
     jae     .out
     cmp     qword [r12 + h2.send_window], 0
-    jle     .out                            ; the connection's window is spent
+    jle     .spent                          ; the connection's window is spent
     mov     r14, [r12 + h2.streams + r13 * 8]
     mov     rdi, r14
     call    h2_send_data
@@ -2790,6 +3027,8 @@ h2_resume:
     jne     .stream                         ; it finished: another stream has this slot now
     inc     r13d
     jmp     .stream
+.spent:
+    or      dword [r12 + h2.flags], H2F_CONN_BLOCKED
 .out:
     add     rsp, 8
     pop     r14

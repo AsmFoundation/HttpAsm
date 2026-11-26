@@ -1044,6 +1044,205 @@ public sealed class Http2FrameTests
     }
 
     /// <summary>
+    /// Frames that cost the server work and move no request forward are glitches, which the
+    /// server tracks and limits (RFC9113-10.5-6). These are PRIORITY (CVE-2019-9513 shuffled
+    /// priorities endlessly), empty DATA that ends nothing (CVE-2019-9518), and frames of a type
+    /// the server does not know. The budget is 10,000 at once, refilled at 330 a second
+    /// (nghttp2 1.71's defaults). 9,000 glitches pass, and the connection still answers a PING;
+    /// 2,000 more end it with ENHANCE_YOUR_CALM.
+    /// </summary>
+    /// <param name="kind">Which glitch floods.</param>
+    [Theory]
+    [InlineData("priority")]
+    [InlineData("empty-data")]
+    [InlineData("unknown-type")]
+    [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5-6#2")]
+    public void RefusesGlitchFloods(string kind)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+        if (kind == "empty-data")
+        {
+            c.SendRequest(1, endStream: false, "POST", "/echo");    // an open stream for the DATA
+        }
+
+        Glitches(c, kind, 9_000);
+        c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
+        Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // within the budget: served
+        Glitches(c, kind, 2_000);
+
+        Assert.Equal(EnhanceYourCalm, c.ExpectGoAway());
+    }
+
+    /// <summary>
+    /// The glitch budget refills with time, so a client that glitches now and then is never
+    /// cut. After 9,900 PRIORITY frames, 1.5 seconds earn about 495 more; 500 then pass (with
+    /// the refill during the first burst as margin), and 700 more do not.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5-6#2")]
+    public void RefillsTheGlitchBudgetWithTime()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        Glitches(c, "priority", 9_900);
+        c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
+        Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // all taken: about 100 left
+        Thread.Sleep(1_500);
+        Glitches(c, "priority", 500);
+        c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
+        Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // the refill paid for them
+        Glitches(c, "priority", 700);
+
+        Assert.Equal(EnhanceYourCalm, c.ExpectGoAway());
+    }
+
+    /// <summary>
+    /// Resets the client makes the server send count as resets (CVE-2025-8671, "MadeYouReset").
+    /// A client opens a stream, then breaks a rule on it: a WINDOW_UPDATE of 0, DATA after
+    /// END_STREAM, a window past 2^31 - 1, or a malformed request head. Each draws an
+    /// RST_STREAM, which frees the stream's slot just as the client's own reset would
+    /// (CVE-2023-44487). The client's initial window of 0 keeps each answered stream active,
+    /// its DATA waiting for window. Past the rapid-reset rule (128 resets, and more than one for
+    /// every two streams opened), the connection ends with ENHANCE_YOUR_CALM.
+    /// </summary>
+    /// <param name="how">The rule each stream breaks.</param>
+    [Theory]
+    [InlineData("window-update-0")]
+    [InlineData("data-after-end")]
+    [InlineData("window-overflow")]
+    [InlineData("malformed-head")]
+    [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5-6#2")]
+    public void CountsTheResetsItIsMadeToSend(string how)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port, true, (4, 0));
+
+        for (int i = 0; i < 300; i++)
+        {
+            int id = 1 + i * 2;
+            switch (how)
+            {
+                case "window-update-0":
+                    c.SendRequest(id);                                  // answered; its DATA waits
+                    c.SendU32(WindowUpdate, id, 0);                     // a stream error PROTOCOL_ERROR
+                    break;
+                case "data-after-end":
+                    c.SendRequest(id);
+                    c.SendFrame(Data, 0, id, [1]);                      // half-closed (remote): STREAM_CLOSED
+                    break;
+                case "window-overflow":
+                    c.SendRequest(id, endStream: false, "POST", "/echo"); // open, its handler not run yet
+                    c.SendU32(WindowUpdate, id, 0x7FFFFFFF);            // 0 + 2^31 - 1: the most
+                    c.SendU32(WindowUpdate, id, 1);                     // past it: FLOW_CONTROL_ERROR
+                    break;
+                default:
+                    c.SendRequest(id, true, "GET", "/", ("Bad-Name", "x")); // 400, then RST_STREAM
+                    break;
+            }
+        }
+
+        Assert.Equal(EnhanceYourCalm, c.ExpectGoAway());
+    }
+
+    /// <summary>
+    /// SETTINGS_INITIAL_WINDOW_SIZE repeated in one frame acts as if the values were applied in
+    /// order (RFC9113-6.9.2-7). A value that takes a stream's window past 2^31 - 1 even for a
+    /// moment is a FLOW_CONTROL_ERROR, though the frame's last value would bring it back. A dip
+    /// below and back is no error. The server applies only the frame's net change to the
+    /// windows, in one walk over the streams, where it used to walk them once per value (2,730
+    /// values fit in one frame).
+    /// </summary>
+    /// <param name="first">The frame's first value (the stream's window is 2^31 - 1 at 65,535).</param>
+    /// <param name="error">Whether the frame is a connection error.</param>
+    [Theory]
+    [InlineData(65_536u, true)]
+    [InlineData(65_534u, false)]
+    [Requirement("RFC9113-6.9.2-7", "RFC9113-6.9.2-3")]
+    public void TakesRepeatedWindowSettingsInOrder(uint first, bool error)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, path: "/slow");                            // stays active for a second
+        c.SendU32(WindowUpdate, 1, 0x7FFFFFFF - 65535);             // the stream's window: 2^31 - 1
+        c.SendSettings((4, first), (4, 65535));                     // net 0; + 1 for a moment, or - 1
+
+        if (error)
+        {
+            Assert.Equal(FlowControlError, c.ExpectGoAway());
+        }
+        else
+        {
+            Assert.Equal(Ack, c.Expect(Settings).Flags & Ack);
+            Assert.Equal("late", Encoding.ASCII.GetString(c.Expect(Data, 1).Payload));   // and served
+        }
+    }
+
+    /// <summary>
+    /// Only a SETTINGS frame's net change moves the windows, and a body waiting for window gets
+    /// what the last value allows, after the frame: with the window at 0, a frame of 50, 0 and
+    /// then 7 lets exactly 7 octets go, and a later 107 the rest.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-6.9.2-3")]
+    public void AppliesASettingsFramesNetWindowChange()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port, true, (4, 0));
+        string body = new('b', 100);
+
+        c.SendRequest(1, endStream: false, "POST", "/echo");
+        c.SendFrame(Data, EndStream, 1, Encoding.ASCII.GetBytes(body));
+        Assert.Equal(0, c.Expect(Headers, 1).Flags & EndStream);    // its body waits for window
+        c.SendSettings((4, 50), (4, 0), (4, 7));
+        H2Frame some = c.Expect(Data, 1);
+        Assert.Equal(7, some.Payload.Length);
+        Assert.Equal(0, some.Flags & EndStream);
+        c.SendSettings((4, 107));
+        H2Frame rest = c.Expect(Data, 1);
+
+        Assert.Equal(body[7..], Encoding.ASCII.GetString(rest.Payload));
+        Assert.Equal(EndStream, rest.Flags & EndStream);
+    }
+
+    /// <summary>Sends glitches: frames that are legal and move no request forward.</summary>
+    /// <param name="c">The connection.</param>
+    /// <param name="kind">"priority" (on idle stream 3, depending on 0), "empty-data" (on open
+    /// stream 1, no END_STREAM), or "unknown-type" (type 0xFE on stream 0).</param>
+    /// <param name="count">How many.</param>
+    /// <exception cref="ArgumentOutOfRangeException">An unknown kind.</exception>
+    private static void Glitches(H2Connection c, string kind, int count)
+    {
+        // One send of all of them: the server takes them in a few reads, so the budget's refill
+        // during the burst stays a few tokens (330 a second), far inside the tests' margins.
+        (int type, int stream, byte[] payload) = kind switch
+        {
+            "priority" => (Priority, 3, new byte[] { 0, 0, 0, 0, 15 }),
+            "empty-data" => (Data, 1, []),
+            "unknown-type" => (0xFE, 0, []),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "not a glitch this test knows"),
+        };
+        byte[] frames = new byte[count * (9 + payload.Length)];
+        for (int i = 0; i < count; i++)
+        {
+            Span<byte> frame = frames.AsSpan(i * (9 + payload.Length));
+            frame[2] = (byte)payload.Length;
+            frame[3] = (byte)type;
+            BinaryPrimitives.WriteInt32BigEndian(frame[5..], stream);
+            payload.CopyTo(frame[9..]);
+        }
+
+        c.SendRaw(frames);
+    }
+
+    /// <summary>
     /// A field section larger than the server's limit (its max_head, advertised as
     /// SETTINGS_MAX_HEADER_LIST_SIZE) is answered 431, a 4xx as the semantics require. The block
     /// was still decoded whole, so the HPACK tables stay in step: the next request refers to an

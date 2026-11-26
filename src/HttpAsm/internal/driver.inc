@@ -94,6 +94,21 @@ UT_SEND             equ 3       ; its SEND
 UT_MASK             equ 15
 
 ; -----------------------------------------------------------------------------
+; COPY_OCTETS: rep movsb (rdi <- rsi, rcx octets), skipped when rcx is 0. An empty rep movsb
+; is not free: it costs about 30 ns on the i9-13900K (measured by tests/native/floods,
+; 2026-11-26), because the fast short-copy path (FSRM) starts at 1 octet. That made each empty
+; SETTINGS frame's ACK cost 2.3 times a PING's. Use it where a peer decides the length and
+; can make it 0 on every frame: an empty frame's payload, an empty fragment, an empty DATA
+; frame, input consumed whole. Leaves rdi, rsi and rcx as rep movsb does (rcx 0).
+; -----------------------------------------------------------------------------
+%macro COPY_OCTETS 0
+    test    rcx, rcx
+    jz      %%copied
+    rep     movsb
+%%copied:
+%endmacro
+
+; -----------------------------------------------------------------------------
 ; The server: the options it was created with, and its workers.
 ; -----------------------------------------------------------------------------
 struc server
@@ -304,6 +319,14 @@ HA_H2_FRAME             equ 16384       ; SETTINGS_MAX_FRAME_SIZE: the default, 
 HA_H2_CLOSED_RING       equ 64          ; recently closed streams remembered, with how they closed
 HA_H2_MAX_CONTINUATIONS equ 128         ; CONTINUATION frames in one field block (a flood beyond)
 HA_H2_RESET_FLOOR       equ 128         ; peer resets tolerated before the rapid-reset rule applies
+; The glitch budget (h2_glitch): frames that cost work and move no request forward - PRIORITY,
+; empty DATA without END_STREAM, unknown frame types, and every stream error the peer's frames
+; provoke. A token bucket per connection: HA_H2_GLITCH_BURST at once, refilled by
+; HA_H2_GLITCH_RATE a second; spent, the connection ends with ENHANCE_YOUR_CALM (RFC9113-10.5-6).
+; nghttp2 1.71's defaults (NGHTTP2_DEFAULT_GLITCH_BURST and _RATE), which carried it through the
+; 2023-2025 flood disclosures: no ordinary client comes near them.
+HA_H2_GLITCH_BURST      equ 10000
+HA_H2_GLITCH_RATE       equ 330
 
 struc h2
     .decoder:           resq 1  ; the HPACK decoder's table (in this block, after the stream table)
@@ -315,6 +338,8 @@ struc h2
     .recv_window:       resq 1  ; what the peer may still send on it
     .recv_unacked:      resq 1  ; received DATA octets not given back with WINDOW_UPDATE yet
     .opened:            resq 1  ; streams the peer opened (rapid-reset accounting)
+    .glitch_tokens:     resq 1  ; the glitch budget left, in thousandths of a glitch (h2_glitch)
+    .glitch_time:       resq 1  ; monotonic ms the budget was last refilled to
     .frame_payload:     resq 1  ; the frame being handled: its payload
     .frame_length:      resd 1  ;   its length
     .frame_stream:      resd 1  ;   its stream id (the reserved bit cleared)
@@ -330,10 +355,15 @@ struc h2
     .block_frames:      resd 1  ; CONTINUATION frames so far
     .peer_window:       resd 1  ; the peer's SETTINGS_INITIAL_WINDOW_SIZE
     .peer_frame:        resd 1  ; the peer's SETTINGS_MAX_FRAME_SIZE
-    .resets:            resd 1  ; streams the peer reset
+    .resets:            resd 1  ; active streams reset: by the peer, or by this side because of
+                                ; the peer's frames (h2_count_reset)
     .closed_next:       resd 1  ; the ring's next slot
     .closed:            resq HA_H2_CLOSED_RING  ; id | H2C_* << 32
     .streams:           resq HA_H2_MAX_STREAMS  ; the active streams, unordered
+    ; Each active stream's id, in the same slot as .streams: h2_slot compares four per SSE2
+    ; instruction from this one array instead of following every stream's pointer. Slots past
+    ; stream_count hold stale ids (or 0), and the 4 past the last slot pad its 16-octet loads.
+    .ids:               resd HA_H2_MAX_STREAMS + 4
 endstruc
 
 H2S_PREFACE         equ 0       ; the client's preface is next
@@ -347,6 +377,9 @@ H2F_NOTICE          equ 0x04    ; a graceful stop's first GOAWAY (last stream 2^
 H2F_NOTICE_ACKED    equ 0x08    ; the PING sent after that GOAWAY came back: everything the client
                                 ; sent before it saw the notice has arrived (RFC 9113 6.8's round
                                 ; trip), so an idle connection may now close with the final GOAWAY
+H2F_CONN_BLOCKED    equ 0x10    ; a body may wait for the connection's window (h2_send_out found it
+                                ; spent): only then does a WINDOW_UPDATE on stream 0 walk the
+                                ; streams (h2_resume); otherwise the frame costs nothing more
 
 ; How a remembered stream closed: what a later frame on it means (RFC 9113 5.1).
 H2C_NORMAL          equ 1       ; both sides ended it: DATA or HEADERS are a connection error STREAM_CLOSED

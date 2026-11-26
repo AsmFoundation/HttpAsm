@@ -149,8 +149,13 @@ run_native() {
   [ "$runner" = native ] && sde="$tools/sde"
   replay='$HOME/.cache/httpasm/replay-'"$config"
   [ "$runner" = native ] && replay="$here/tests/fuzz/.work/replay-$config"
-  echo "run-linux.sh: tests/native/fallback, signals, faults, cpu and tiers, natively" >&2
-  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/faults; \$b/cpu; \$b/tiers" || code=$?
+  # tests/native/floods measures the published HTTP/2 floods on both backends. Its CPU ratios
+  # are only reported in the Coverage configuration, whose instrumented blocks distort them.
+  local floods_env=''
+  [ "$config" = Coverage ] && floods_env='HTTPASM_FLOODS_CPU=report'
+  echo "run-linux.sh: tests/native/fallback, signals, faults, floods (epoll, io_uring), cpu and tiers, natively" >&2
+  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/faults; \
+    $floods_env \$b/floods; $floods_env HTTPASM_TEST_IO=uring \$b/floods; \$b/cpu; \$b/tiers" || code=$?
   # The CPU detection on CPUs this machine is not: tests/native/cpu under SDE's models, each
   # with the x86-64 level it must reach exactly, from SSE3-only (p4p) to AVX-512 with SHA512
   # (future), the AVX-512-less hybrids (adl, arl) included. Every branch of cpu.asm's
