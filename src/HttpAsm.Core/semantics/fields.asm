@@ -34,8 +34,10 @@ httpasm_token_length:
 ;   In: rdi = p, rsi = n. Out: rax. Clobbers rcx, rdx, vector registers 0-5 (YMM/ZMM upper
 ;   halves included), k1-k3 and the flags.
 ;   Versions (cpu.inc): v4 (AVX-512 BW, 64 octets per step, masked tail), v3 (AVX2, 32 octets
-;   per step, for values of 32 octets or more), v1 (SSE2, 16 octets per step). Each returns the
-;   same index for every input.
+;   per step), v1 (SSE2, 16 octets per step). Each returns the same index for every input.
+;   Values under 32 octets take the v1 version at every tier, before ha_cpu is even read: there
+;   the wider versions only add work (2026-11-26, benchmarks/README.md: on a Xeon 6975P-C, 8
+;   octets took 1.54 ns in v1, 1.67 in v3 and 1.81 in v4 when each tier dispatched first).
 ;   Memory: see HA_FIELD_VALUE_SCAN. It never reads outside p[0..n), except that the v1 and v3
 ;   versions may read a short value as 16 octets that lie in the same 4 KiB page as p, which
 ;   cannot fault.
@@ -43,14 +45,14 @@ httpasm_token_length:
 global httpasm_field_value_scan:function (httpasm_field_value_scan.end - httpasm_field_value_scan)
 align 16
 httpasm_field_value_scan:
+    cmp     rsi, 32
+    jb      .v1                             ; short: the 16-octet version, whatever the tier
     HA_CPU_PICK1 HTTPASM_CPU_V4, .v4
     HA_CPU_PICK1 HTTPASM_CPU_V3, .v3
 .v1:
     HA_FIELD_VALUE_SCAN rdi, rsi, rax, rcx, ecx, rdx, xmm0, xmm1, xmm2, xmm3, xmm4, xmm5
     ret
-.v3:
-    cmp     rsi, 32
-    jb      .v1                             ; under 32 octets the 16-octet version reads as much
+.v3:                                        ; rsi >= 32, as HA_FIELD_VALUE_SCAN_V3 requires
     HA_FIELD_VALUE_SCAN_V3 rdi, rsi, rax, rcx, ecx, rdx, ymm0, ymm1, ymm2, ymm3, ymm4, ymm5
     vzeroupper
     ret
