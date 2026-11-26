@@ -18,7 +18,9 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 >   h2spec. Hardened against the published floods (each measured by `tests/native/floods`)
 >   and slow clients: the idle timeout is a window a transfer keeps by moving at least
 >   `min_data_rate` octets a second, so large transfers take as long as they need while
->   slowloris, slow bodies and slow reads are cut;
+>   slowloris, slow bodies and slow reads are cut. Every published request-smuggling mutation
+>   (defparam/smuggler's and PortSwigger's, 1,671 requests with the variants) is framed as RFC
+>   9112 frames it, or refused;
 > - **a client** (`httpasm_client_*`): one blocking HTTP/1.1 connection, tested against this
 >   server and against Kestrel;
 > - **the codecs** behind them, callable on their own: HTTP/1.1 parsing and writing in both

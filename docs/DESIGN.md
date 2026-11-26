@@ -571,9 +571,24 @@ HTTP/2, the drivers, the client):
          kernel buffered;
        - `ClosesIdleConnectionsThatOnlyPing`;
        - `AnswersStuckStreams408`: a stuck upload behind a stream of real requests.
-   - **Still to do:**
-     - the published request-smuggling mutations;
-     - then `unreachable.tsv` and the gate in CI.
+     - **Request smuggling** (`SmugglingTests`). The two published mutation sets are
+       reproduced octet for octet from their pinned sources (`SmugglingCorpus`):
+       - defparam/smuggler's default and exhaustive configs, 750 mutations, UTF-8 as
+         smuggler.py sends them;
+       - PortSwigger's HTTP Request Smuggler, 94 HTTP/1 Transfer-Encoding and Content-Length
+         permutations.
+
+       Each case is judged twice: by `httpasm_h1_parse_request`, and by a strict RFC 9112
+       head check written for the test alone. The two agree on all of them. Both tools send
+       Content-Length with every mutation, so a server that refuses the two together never
+       reads the mangled coding at all. Each Transfer-Encoding mutation therefore runs again
+       without Content-Length (827 more), where the coding alone decides.
+
+       Against the parser from before `2ce3f44`, 132 of those disagree (for example,
+       `chunked X: X` taken as chunked). The published sets alone would not have caught it.
+       PortSwigger's 12 HTTP/2 permutations (CR LF in values, names with spaces, stuffed
+       pseudo-fields, `h2CL`) are each refused before any handler sees them.
+   - **Still to do:** `unreachable.tsv` and the coverage gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,
    chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.
