@@ -827,7 +827,13 @@ ha_h2_start:
     mov     eax, HA_H1_DEFAULT_MAX_HEAD
     test    r15d, r15d
     cmovz   r15d, eax
-    cmp     qword [r13 + worker.h2_fields], 0
+    ; The worker's decoding scratch, made at its first HTTP/2 connection: both buffers or
+    ; neither. The space is allocated last, so it alone says the scratch is whole, and when its
+    ; allocation fails the fields array goes too. Until 2026-11-26 the fields alone were
+    ; checked: after the space's allocation failed, the next HTTP/2 connection found the fields,
+    ; took the scratch as ready, and decoded its first field block into a NULL space - a crash
+    ; in hp_string (tests/native/faults, the 26th allocation failing).
+    cmp     qword [r13 + worker.h2_space], 0
     jne     .scratch_ready
     mov     eax, [r14 + server.limits + httpasm_h1_limits.max_fields]
     mov     ecx, HA_H1_DEFAULT_MAX_FIELDS
@@ -842,7 +848,7 @@ ha_h2_start:
     mov     edi, r15d
     call    malloc wrt ..plt
     test    rax, rax
-    jz      .no_memory
+    jz      .no_scratch_space
     mov     [r13 + worker.h2_space], rax
 .scratch_ready:
     ; One block: the state, then the decoder's and the encoder's HPACK tables.
@@ -910,6 +916,12 @@ ha_h2_start:
     jnz     .no_memory
     xor     eax, eax
     jmp     .out
+.no_scratch_space:
+    ; The fields array without its space is no scratch: freed, so the next connection makes
+    ; both again (r13 = the worker; the frame keeps rsp aligned for the call).
+    mov     rdi, [r13 + worker.h2_fields]
+    call    free wrt ..plt
+    mov     qword [r13 + worker.h2_fields], 0
 .no_memory:
     mov     eax, -ENOMEM
 .out:
