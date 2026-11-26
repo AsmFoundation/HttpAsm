@@ -227,38 +227,52 @@
 ;   klen, kflag, ktmp    opmask scratch registers (k1-k7).
 ;   Flags are clobbered. The caller ends its routine with vzeroupper.
 ; -----------------------------------------------------------------------------
+;
+;   The whole vectors are read with plain loads; only the tail is masked. Per 64 octets: three
+;   compares and one test. The AND of "at most 0x1F" with "not HTAB" costs nothing (the second
+;   compare is written under the first's mask), and kortestq ORs the CTL mask with the DEL mask
+;   as it tests them. The first version (a masked load, a mask move, KANDN and KOR every 64
+;   octets) measured 1.35-1.45x slower than the AVX2 version on CI's AMD EPYC 9V74 (Zen 4).
 %macro HA_FIELD_VALUE_SCAN_V4 12
     vpbroadcastb %7, [rel ha_x16_1f]
     vpbroadcastb %8, [rel ha_x16_09]
     vpbroadcastb %9, [rel ha_x16_7f]
     xor     %3, %3                          ; out: the offset of the next vector
-%%vector:
-    mov     %4, %2
-    sub     %4, %3                          ; octets left
-    jbe     %%all                           ; none (the last vector may have run past len)
-    mov     %5, -1
-    cmp     %4, 64
-    jae     %%load                          ; a whole vector
-    bzhi    %5, %5, %4                      ; one bit per octet left
-%%load:
-    kmovq   %10, %5
-    vmovdqu8 %6{%10}{z}, [%1 + %3]
-    vpcmpub %11{%10}, %6, %7, 2             ; octet <= 0x1F, among the octets loaded
-    vpcmpeqb %12{%10}, %6, %8               ; HTAB
-    kandnq  %11, %12, %11                   ; CTLs below SP, except HTAB
-    vpcmpeqb %12{%10}, %6, %9               ; DEL
-    korq    %11, %11, %12
-    kortestq %11, %11
+    lea     %4, [%3 + 64]
+    cmp     %4, %2
+    ja      %%tail                          ; fewer than 64 octets: the tail alone
+%%vector:                                   ; invariant: out + 64 <= len
+    vmovdqu64 %6, [%1 + %3]
+    vpcmpub %11, %6, %7, 2                  ; octet <= 0x1F
+    vpcmpneqb %11{%11}, %6, %8              ; ... and not HTAB: the CTLs a value may not hold
+    vpcmpeqb %12, %6, %9                    ; DEL
+    kortestq %11, %12
     jnz     %%found
     add     %3, 64
-    jmp     %%vector
-%%found:
-    kmovq   %5, %11
-    tzcnt   %5, %5
-    add     %3, %5
+    lea     %4, [%3 + 64]
+    cmp     %4, %2
+    jbe     %%vector
+%%tail:
+    mov     %4, %2
+    sub     %4, %3                          ; octets left: 0 to 63
+    jz      %%done                          ; none: out == len
+    mov     %5, -1
+    bzhi    %5, %5, %4                      ; one bit per octet left
+    kmovq   %10, %5
+    vmovdqu8 %6{%10}{z}, [%1 + %3]          ; faults suppressed on the masked-off octets
+    vpcmpub %11{%10}, %6, %7, 2             ; the same three compares, among the octets loaded
+    vpcmpneqb %11{%11}, %6, %8
+    vpcmpeqb %12{%10}, %6, %9
+    kortestq %11, %12
+    jnz     %%found
+    mov     %3, %2                          ; every octet valid
     jmp     %%done
-%%all:
-    mov     %3, %2
+%%found:                                    ; kflag: the CTLs, ktmp: the DELs, of the vector at out
+    kmovq   %4, %11
+    kmovq   %5, %12
+    or      %4, %5
+    tzcnt   %4, %4
+    add     %3, %4
 %%done:
 %endmacro
 
