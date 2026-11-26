@@ -110,6 +110,34 @@ public sealed partial class Http2Tests
     }
 
     /// <summary>
+    /// The server's receive window for the whole connection is refilled as bodies arrive: 20
+    /// uploads of 1,000,000 octets on one connection, 20 MB against the 16 MiB window the
+    /// server opens at the start, are all echoed. The server sends its connection-level
+    /// WINDOW_UPDATE once half the window is consumed; without it HttpClient would stop sending
+    /// at 16 MiB and the 17th upload would never finish. (No test before sent more than half
+    /// the window on one connection: the refill had never run.)
+    /// </summary>
+    /// <returns>The test.</returns>
+    [Fact]
+    [Requirement("RFC9113-6.9-11")]
+    public async Task RefillsTheConnectionsReceiveWindow()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var server = new TestServer(x => x.Respond(200, x.Body), maxBody: 1 << 20);
+        using var client = NewClient();
+        byte[] body = new byte[1_000_000];
+        new Random(5).NextBytes(body);
+
+        for (int i = 0; i < 20; i++)
+        {
+            using var response = await client.PostAsync(server.Address, new ByteArrayContent(body), ct);
+            byte[] echoed = await response.Content.ReadAsByteArrayAsync(ct);
+            Assert.True(body.AsSpan().SequenceEqual(echoed), $"upload {i}");
+        }
+    }
+
+    /// <summary>
     /// h2spec 2.6.0, every case (generic, RFC 9113 and HPACK): the server must pass all 146. It
     /// runs when HTTPASM_H2SPEC names the binary (tests/run-linux.sh sets it after fetching the
     /// pinned release); HTTPASM_REQUIRE_H2SPEC=1 makes a missing binary a failure.

@@ -841,9 +841,10 @@ public sealed class Http2FrameTests
     /// then a PING. A request the client sent before answering the PING was on its way when the
     /// notice went out, so it is served. The final GOAWAY, naming that request's stream as the
     /// last, and the close come only after the PING's ACK: RFC 9113 6.8's round trip, measured.
-    /// The ACK itself is not answered (RFC9113-6.7-7.2#2). Closing an idle connection at once,
-    /// as the server first did, refused such a request; ShutsDownGracefully failed that way
-    /// under the slower coverage build (2026-11-26).
+    /// The ACK itself is not answered (RFC9113-6.7-7.2#2), and an ACK carrying another payload
+    /// is not the round trip: nothing follows it. Closing an idle connection at once, as the
+    /// server first did, refused such a request; ShutsDownGracefully failed that way under the
+    /// slower coverage build (2026-11-26).
     /// </summary>
     /// <returns>A task.</returns>
     [Fact]
@@ -861,6 +862,10 @@ public sealed class Http2FrameTests
         Assert.Equal((0x7FFFFFFFu, NoError), (first, code));
         H2Frame ping = c.Expect(Ping);
         Assert.Equal(0, ping.Flags & Ack);
+        byte[] other = [.. ping.Payload];
+        other[0] ^= 0xFF;
+        c.SendFrame(Ping, Ack, 0, other);                           // an ACK of another PING: not the round trip
+        Assert.True(c.QuietFor(300));                               // no final GOAWAY for it
         c.SendRequest(1);                                           // already on its way: served
         c.SendFrame(Ping, Ack, 0, ping.Payload);                    // the round trip completes
         Assert.Equal(200, c.ReadResponse(1).Status);
@@ -1564,6 +1569,223 @@ public sealed class Http2FrameTests
         H2Response response = c.ReadResponse(1);
 
         Assert.Equal((200, "body"), (response.Status, Encoding.ASCII.GetString(response.Body)));
+    }
+
+    /// <summary>
+    /// The connection's flow-control window binds every stream together (RFC 9113 6.9.1): with
+    /// each stream's window opened wide (SETTINGS_INITIAL_WINDOW_SIZE 2^31 - 1) and the
+    /// connection's left at its initial 65,535 octets, the 8 MiB answer stops after exactly
+    /// 65,535 octets and waits; a connection-level WINDOW_UPDATE lets the rest through, intact.
+    /// HttpClient opens the connection's window wide at once, so before this no test made the
+    /// server wait on it (its resume path never ran).
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-6.9.1-2#1", "RFC9113-6.9-11")]
+    public void ResumesAnAnswerBlockedOnTheConnectionWindow()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port, true, (4, 0x7FFFFFFF));
+        c.SendRequest(1, path: "/big");
+
+        var body = new List<byte>();
+        while (body.Count < 65535 && c.ReadFrame() is H2Frame frame)
+        {
+            if (frame.Type == Data && frame.Stream == 1)
+            {
+                body.AddRange(frame.Payload);
+            }
+        }
+
+        Assert.Equal(65535, body.Count);
+        Assert.True(c.QuietFor(300));                              // waiting on the connection's window
+        c.SendU32(WindowUpdate, 0, (uint)(Big.Length - 65535));
+        bool ended = false;
+        while (!ended && c.ReadFrame() is H2Frame frame)
+        {
+            if (frame.Type == Data && frame.Stream == 1)
+            {
+                body.AddRange(frame.Payload);
+                ended = (frame.Flags & EndStream) != 0;
+            }
+        }
+
+        Assert.True(ended);
+        Assert.True(Big.AsSpan().SequenceEqual(body.ToArray()), "the answer arrived changed");
+    }
+
+    /// <summary>
+    /// A stream half-closed (remote) - its request ended with END_STREAM, its answer still to
+    /// come (/slow answers a second later) - takes no further field block: HEADERS on it is a
+    /// stream error STREAM_CLOSED (RFC 9113 5.1). The deferred answer that comes later finds
+    /// its stream gone and is dropped, and the connection serves on.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-5.1-7.12.2")]
+    public void RefusesHeadersOnAHalfClosedStream()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, path: "/slow");
+        c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("x-after-the-end", "1")));
+
+        Assert.Equal(StreamClosed, c.ExpectReset(1));
+        Thread.Sleep(1200);                                         // /slow's answer comes, and is dropped
+        c.SendRequest(3);
+        Assert.Equal(200, c.ReadResponse(3).Status);
+        Assert.False(c.Decoded.ContainsKey(1) && c.Decoded[1].Any(f => f.Name == ":status"), "the reset stream was answered");
+    }
+
+    /// <summary>
+    /// content-length must equal the DATA that follows (RFC 9113 8.1.1): HEADERS that end the
+    /// stream may carry "content-length: 0" (no body, as promised) but not a larger one, and a
+    /// body that ends short of the length is malformed - a stream error PROTOCOL_ERROR - however
+    /// it ends; one that matches is answered.
+    /// </summary>
+    /// <param name="length">content-length's value.</param>
+    /// <param name="data">The DATA sent (null: END_STREAM on the HEADERS).</param>
+    /// <param name="valid">Whether the request is well-formed.</param>
+    [Theory]
+    [InlineData("0", null, true)]
+    [InlineData("5", null, false)]
+    [InlineData("10", "abc", false)]
+    [InlineData("3", "abc", true)]
+    [InlineData("3", "", false)]
+    [Requirement("RFC9113-8.1.1-3#2")]
+    public void HoldsTheBodyToItsContentLength(string length, string? data, bool valid)
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: data is null, "POST", "/echo", ("content-length", length));
+        if (data is not null)
+        {
+            c.SendFrame(Data, EndStream, 1, Encoding.ASCII.GetBytes(data));
+        }
+
+        if (valid)
+        {
+            H2Response response = c.ReadResponse(1);
+            Assert.Equal((200, data ?? ""), (response.Status, Encoding.ASCII.GetString(response.Body)));
+        }
+        else
+        {
+            Assert.Equal(ProtocolError, c.ExpectReset(1));
+        }
+    }
+
+    /// <summary>
+    /// A body with no content-length is held to max_body as it arrives: once its DATA passes
+    /// the limit (1 MiB here) the stream is answered 413 (Content Too Large), the rest refused
+    /// unread, and the connection serves on.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-15.5.14-1#1", "RFC9113-8.1.1-5")]
+    public void Answers413WhenABodyOutgrowsTheLimit()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer();
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/echo");
+        byte[] piece = new byte[16384];
+        for (int i = 0; i < 65; i++)                                // 1,064,960 octets: past 1 MiB
+        {
+            c.SendFrame(Data, 0, 1, piece);
+        }
+
+        c.SendFrame(Data, EndStream, 1, piece);
+        Assert.Equal(413, ReadStatus(c, 1));
+        c.SendRequest(3);
+        Assert.Equal(200, c.ReadResponse(3).Status);
+    }
+
+    /// <summary>
+    /// Two answers stuck on their streams' windows (the client never opens them past the
+    /// initial 65,535 octets) while a third stream keeps the connection busy: once a window
+    /// passes with no progress, each stuck stream is reset CANCEL on its own - answered streams
+    /// cannot be answered 408 - and the busy one is served throughout. The sweep judges the
+    /// streams in place, the last taking a removed one's slot, so both are cut, not just one.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9113-10.5-6#1")]
+    public void CancelsAnswersStuckOnTheirWindows()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+        c.SendRequest(1, path: "/big");
+        c.SendRequest(3, path: "/big");
+        c.SendU32(WindowUpdate, 0, 0x7FFF0000);                    // the connection's window is not the limit
+        var clock = Stopwatch.StartNew();
+
+        var reset = new HashSet<int>();
+        int answered = 0;
+        for (int id = 5; id < 300 && reset.Count < 2; id += 2)
+        {
+            c.SendRequest(id);
+            foreach (H2Frame frame in c.FramesWithin(50))
+            {
+                if (frame.Type == RstStream && frame.Stream is 1 or 3)
+                {
+                    Assert.Equal(Cancel, BinaryPrimitives.ReadUInt32BigEndian(frame.Payload));
+                    reset.Add(frame.Stream);
+                }
+                else if (frame.Type == Headers && frame.Stream >= 5)
+                {
+                    answered++;
+                }
+            }
+        }
+
+        Assert.Equal([1, 3], reset.Order());
+        Assert.True(answered > 0);
+        Assert.InRange(clock.ElapsedMilliseconds, 250, 3000);
+    }
+
+    /// <summary>
+    /// A deferred stream is the handler's to answer, however long it takes: the idle timeout
+    /// judges neither it nor its connection while it waits. /slow answers after a second,
+    /// three idle timeouts here, and the answer comes, with no reset and no GOAWAY.
+    /// </summary>
+    [Fact]
+    public void LeavesDeferredStreamsToTheirHandlers()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, path: "/slow");
+
+        H2Response response = c.ReadResponse(1);
+        Assert.Equal((200, "late"), (response.Status, Encoding.ASCII.GetString(response.Body)));
+        Assert.Equal(0, c.GoAwayCount);
+    }
+
+    /// <summary>
+    /// A slow upload that keeps a modest pace - 100 octets every 100 ms, four times the 240
+    /// octets a second min_data_rate asks for - outlives the idle timeout window after window:
+    /// each window its stream is judged and kept, and the whole body is answered.
+    /// </summary>
+    [Fact]
+    public void KeepsSlowUploadsThatKeepThePace()
+    {
+        Platform.RequireLinuxX64();
+        using var server = NewServer(idleMs: 300);
+        using var c = new H2Connection(server.Port);
+
+        c.SendRequest(1, endStream: false, "POST", "/echo", ("content-length", "1500"));
+        for (int i = 0; i < 15; i++)
+        {
+            Thread.Sleep(100);
+            c.SendFrame(Data, i == 14 ? EndStream : 0, 1, new byte[100]);
+        }
+
+        H2Response response = c.ReadResponse(1);
+        Assert.Equal((200, 1500), (response.Status, response.Body.Length));
     }
 
     /// <summary>Reads a stream's final status (its HEADERS), without waiting for its end.</summary>

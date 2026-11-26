@@ -580,6 +580,16 @@ internal sealed class H2Connection : IDisposable
         return frames;
     }
 
+    /// <summary>
+    /// Resets the TCP connection (SO_LINGER 0, then the close): the server sees RST, a peer gone
+    /// for good, with no GOAWAY first. The HPACK tables stay until <see cref="Dispose"/>.
+    /// </summary>
+    public void Abort()
+    {
+        socket.LingerState = new LingerOption(true, 0);
+        socket.Close();
+    }
+
     /// <summary>Closes the socket and frees the HPACK tables.</summary>
     public void Dispose()
     {

@@ -322,6 +322,7 @@ public sealed class ServerTests
     [InlineData("INVALID CONNECTION PREFACE\r\n\r\n", false)]
     [InlineData("\r\nSSH-2.0-OpenSSH_9.6\r\n\r\n", false)]
     [InlineData("GET /a b HTTP/1.1\r\nHost: t\r\n\r\n", true)]
+    [InlineData("\u0016\u0003\u0001\u0002\u0000\u0001\u0000\u0001ü\u0003\u0003\r\n\r\n", false)]   // binary: a TLS ClientHello's start
     [Requirement("RFC9112-2.2-9")]
     public void ClosesSilentlyOnWhatIsNotHttp(string request, bool answered)
     {
@@ -1142,6 +1143,137 @@ public sealed class ServerTests
             DefaultRequestVersion = HttpVersion.Version11,
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
         };
+
+    /// <summary>
+    /// workers 0 asks for one worker per CPU the process may run on (its affinity mask, read
+    /// with sched_getaffinity): the server starts and serves. No other test leaves the count to
+    /// the library.
+    /// </summary>
+    [Fact]
+    public void RunsOneWorkerPerCpuByDefault()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "ok"), workers: 0);
+        using var c = new RawConnection(server.Port);
+
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+
+        Assert.Equal("ok", c.ReadResponse().Text);
+    }
+
+    /// <summary>
+    /// The life-cycle calls take what C callers may hand them: httpasm_server_create without
+    /// options is -EINVAL (into *error, or nowhere when error is NULL too), and destroying or
+    /// closing NULL does nothing; a client whose connect fails returns NULL with error NULL.
+    /// </summary>
+    [Fact]
+    public unsafe void TakesNullWhereTheApiAllowsIt()
+    {
+        Platform.RequireLinuxX64();
+        int error = 0;
+        Assert.Equal(0, Native.ServerCreate(null, &error));
+        Assert.Equal(-22, error);                                   // -EINVAL
+        Assert.Equal(0, Native.ServerCreate(null, null));
+        Native.ServerDestroy(0);
+        Native.ClientClose(0);
+
+        // A port nothing listens on: the connect is refused, and there is nowhere to say so.
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        ushort closed = (ushort)((IPEndPoint)probe.LocalEndPoint!).Port;
+        Assert.Equal(0, Native.ClientConnect(0x0100007F, closed, 1000, null));
+    }
+
+    /// <summary>
+    /// An idle timeout past what one wait can take (epoll_wait's timeout is an int of
+    /// milliseconds; uint.MaxValue is 49.7 days) is waited in pieces of at most 2^31 - 1 ms: the
+    /// server starts, serves, and keeps the connection.
+    /// </summary>
+    [Fact]
+    public void TakesIdleTimeoutsPastOneWaitsRange()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x => x.Respond(200, "ok"), idleMs: uint.MaxValue);
+        using var c = new RawConnection(server.Port);
+
+        for (int i = 0; i < 3; i++)
+        {
+            c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+            Assert.Equal("ok", c.ReadResponse().Text);
+        }
+
+        Assert.True(c.QuietFor(100));
+    }
+
+    /// <summary>
+    /// A client may send its request and half-close (shutdown SHUT_WR) before the answer: it
+    /// finished sending, not reading. A deferred answer that comes after the half-close is
+    /// still sent whole, then the connection closes (nothing more can come on it).
+    /// </summary>
+    [Fact]
+    public void AnswersAfterTheClientHalfClosesWhileDeferred()
+    {
+        Platform.RequireLinuxX64();
+        using var server = new TestServer(x =>
+        {
+            x.Defer();
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(300);
+                x.Respond(200, "after the half-close");
+            });
+        });
+        using var c = new RawConnection(server.Port);
+
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        c.ShutdownSend();
+
+        Assert.Equal("after the half-close", c.ReadResponse().Text);
+        Assert.True(c.ServerClosed());
+    }
+
+    /// <summary>
+    /// An answer's head larger than the first room the connection reserves for it (512 octets)
+    /// is written whole: the room doubles until the head fits. 20 fields of 100 octets each.
+    /// </summary>
+    [Fact]
+    public void WritesHeadsLargerThanTheirFirstRoom()
+    {
+        Platform.RequireLinuxX64();
+        (string, string)[] fields = [.. Enumerable.Range(0, 20).Select(i => ($"X-Field-{i}", new string((char)('a' + i), 100)))];
+        using var server = new TestServer(x => x.Respond(200, "big head", fields));
+        using var c = new RawConnection(server.Port);
+
+        c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        RawResponse response = c.ReadResponse();
+
+        Assert.Equal("big head", response.Text);
+        Assert.All(fields, f => Assert.Equal(f.Item2, response.Field(f.Item1)));
+    }
+
+    /// <summary>
+    /// A server stopping finishes the requests in progress: one whose body is still arriving
+    /// when the stop begins is not closed as idle (only connections between requests are), and
+    /// its answer goes out once the body is whole.
+    /// </summary>
+    /// <returns>A task.</returns>
+    [Fact]
+    public async Task FinishesARequestWhoseBodyIsArrivingWhenTheStopBegins()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var server = new TestServer(x => x.Respond(200, x.Body));
+        using var c = new RawConnection(server.Port);
+
+        c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 10\r\n\r\nhello");
+        Thread.Sleep(100);                                          // the head is read; the body waits
+        Task stop = Task.Run(server.Stop, ct);
+        Thread.Sleep(100);
+        c.Send("world");
+
+        Assert.Equal("helloworld", c.ReadResponse().Text);
+        await stop.WaitAsync(TimeSpan.FromSeconds(10), ct);
+    }
 
     /// <summary>Octets that are the same on every run (seeded by the length).</summary>
     /// <param name="length">How many.</param>

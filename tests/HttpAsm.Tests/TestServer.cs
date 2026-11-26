@@ -93,6 +93,13 @@ internal sealed unsafe class Exchange
     /// <returns>0, or -EINVAL outside the handler.</returns>
     public int Defer() => Native.ExchangeDefer(pointer);
 
+    /// <summary>
+    /// The native exchange, for a test that calls the C ABI itself (a NULL argument, say).
+    /// </summary>
+    /// <remarks>Valid only while the exchange is: inside the handler, or until a deferred
+    /// exchange is answered. A test must not use it after that.</remarks>
+    public nint Pointer => pointer;
+
     /// <summary>Copies one field record.</summary>
     /// <param name="f">The record.</param>
     /// <returns>The copy.</returns>

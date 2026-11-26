@@ -230,6 +230,17 @@ internal sealed class RawConnection : IDisposable
     /// <returns>True when the connection stayed silent.</returns>
     public bool QuietFor(int ms) => start == end && !socket.Poll(ms * 1000, SelectMode.SelectRead);
 
+    /// <summary>
+    /// Resets the connection (SO_LINGER 0, then the close): the server sees RST - EPOLLERR or
+    /// EPOLLHUP, a peer gone for good - where <see cref="Dispose"/>'s FIN is only the end of the
+    /// peer's sending, after which the server may still answer.
+    /// </summary>
+    public void Abort()
+    {
+        socket.LingerState = new LingerOption(true, 0);
+        socket.Close();
+    }
+
     /// <summary>Closes the socket.</summary>
     public void Dispose() => socket.Dispose();
 
