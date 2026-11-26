@@ -50,7 +50,6 @@ extern ha_x16_1f            ; 16 bytes of 0x1F: the highest CTL below SP, for pm
 extern ha_x16_09            ; 16 bytes of 0x09: HTAB, the one CTL a field value may hold
 extern ha_x16_7f            ; 16 bytes of 0x7F: DEL, the CTL above the visible range
 extern ha_x16_0a            ; 16 bytes of 0x0A: LF, the end of every HTTP/1.1 line
-extern ha_x16_0d            ; 16 bytes of 0x0D: CR, which every HTTP/1.1 line's end starts with
 extern ha_x16_0f            ; 16 bytes of 0x0F: the low nibble, what pshufb's index keeps
 extern ha_tchar_lo          ; 16 bytes: tchar by low nibble, for pshufb (tables.asm says how)
 extern ha_tchar_hi          ; 16 bytes: tchar by high nibble; an octet is a tchar when its two

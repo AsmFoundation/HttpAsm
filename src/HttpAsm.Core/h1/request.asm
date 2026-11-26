@@ -240,10 +240,11 @@ ha_h1_fields:
 
 ; ---- v2: a line's name and value, 16 octets a step (SSSE3's pshufb; every v2 CPU has it).
 ;
-; A 16-octet load at a stays in the caller's memory when it does not cross into the next 4 KiB
-; page (the page that holds a's first octet is mapped, so all of it is), or when it ends within
-; the head (the head is the caller's to the last octet). Otherwise the line goes to v1, which
-; reads octet by octet: only in the last 15 octets of a page that is the head's last.
+; A 16-octet load stays in the caller's memory when it ends within the head (the head is the
+; caller's to its last octet: one compare, against the head's end less 16, settles nearly every
+; step) or when it does not cross into the next 4 KiB page (the page that holds its first octet
+; is mapped, so all of it is). Otherwise the line goes to v1 (.name_scalar, .value_scalar),
+; which reads octet by octet: only near the end of a page that is the head's last.
 
 ; .name_v2: r14 = the length of the token at the line's start (as HA_TOKEN_SCAN), then the
 ; checks after .name_scanned. Each step classifies 16 octets: an octet's low nibble indexes
@@ -256,17 +257,16 @@ ha_h1_fields:
     movdqa  xmm5, [rel ha_x16_0f]
     pxor    xmm6, xmm6
     lea     rdi, [rbx + r13]                ; the name's first octet
-    lea     rsi, [rbx + rbp + 2]            ; the head's end
+    lea     rsi, [rbx + rbp - 14]           ; the head's end less 16: the last step within it
     xor     r14d, r14d
 .name_v2_step:
     lea     rax, [rdi + r14]
+    cmp     rax, rsi
+    jbe     .name_v2_load                   ; it ends within the head
     mov     ecx, eax
     and     ecx, 4095
     cmp     ecx, 4096 - 16
-    jbe     .name_v2_load                   ; within its page
-    lea     rcx, [rax + 16]
-    cmp     rcx, rsi
-    ja      .name_scalar                    ; into a page past the head: octet by octet
+    ja      .name_scalar                    ; it would reach a page past the head: v1
 .name_v2_load:
     movdqu  xmm0, [rax]
     movdqa  xmm1, xmm0
@@ -289,54 +289,46 @@ ha_h1_fields:
     add     r14, rcx
     jmp     .name_scanned
 
-; .value_v2: from the value's first octet (r15, past the colon and OWS) to its line's CR, 16
-; octets a step: the first CR in the line is its end when the LF follows it, and every octet
-; before that CR must be one a field value may hold (HA_FIELD_VALUE_CLASSIFY: no CTL but HTAB).
-; A CR the LF does not follow is a bare CR: a CTL inside the value, refused as v1 refuses it
-; (ha_find_lf finds the line's LF beyond it, and HA_FIELD_VALUE_SCAN meets the CR). The OWS
-; between the value and the CR is valid, so checking up to the CR checks the trimmed value.
-; Then the trailing OWS is trimmed as v1 trims it, and the line joins .value_checked with rdi,
-; rsi and .line_lf as v1 leaves them.
+; .value_v2: from the value's first octet (r15, past the colon and OWS), 16 octets a step, to the
+; first octet a field value may not hold (HA_FIELD_VALUE_CLASSIFY: a CTL other than HTAB). In a
+; valid line that octet is the line's CR, with its LF next: the line ends there, and every
+; octet before it is allowed. Anything else - a CTL, or a CR the LF does not follow (a bare CR) -
+; is refused, which is v1's outcome too: v1 finds the line's end (ha_find_lf) and then meets that
+; octet inside the value (HA_FIELD_VALUE_SCAN). One classification serves both questions, where
+; looking for the CR apart would cost a compare and a mask more a step. The OWS between the value
+; and the CR is valid, so the octets checked are the trimmed value's. Then the trailing OWS is
+; trimmed as v1 trims it, and the line joins .value_checked with rdi, rsi and .line_lf as v1
+; leaves them.
 .value_v2:
     movdqa  xmm3, [rel ha_x16_1f]
     movdqa  xmm4, [rel ha_x16_09]
     movdqa  xmm5, [rel ha_x16_7f]
-    movdqa  xmm6, [rel ha_x16_0d]
-    lea     rsi, [rbx + rbp + 2]            ; the head's end
+    lea     rsi, [rbx + rbp - 14]           ; the head's end less 16: the last step within it
     mov     rdx, r15                        ; the step's offset
 .value_v2_step:
     lea     rax, [rbx + rdx]
+    cmp     rax, rsi
+    jbe     .value_v2_load                  ; it ends within the head
     mov     ecx, eax
     and     ecx, 4095
     cmp     ecx, 4096 - 16
-    jbe     .value_v2_load                  ; within its page
-    lea     rcx, [rax + 16]
-    cmp     rcx, rsi
-    ja      .value_scalar                   ; into a page past the head: v1 takes the value
+    ja      .value_scalar                   ; it would reach a page past the head: v1
 .value_v2_load:
     movdqu  xmm0, [rax]
-    movdqa  xmm1, xmm0
-    pcmpeqb xmm1, xmm6                      ; CR
-    pmovmskb r8d, xmm1
-    HA_FIELD_VALUE_CLASSIFY xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, edi
-    test    r8d, r8d
-    jnz     .value_v2_cr
-    test    edi, edi
-    jnz     .bad_value                      ; an octet a value may not hold, before any CR
+    HA_FIELD_VALUE_CLASSIFY xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, ecx
+    test    ecx, ecx
+    jnz     .value_v2_stop
     add     rdx, 16
     jmp     .value_v2_step
-.value_v2_cr:
-    bsf     ecx, r8d                        ; the first CR from here
-    mov     eax, 1
-    shl     eax, cl
-    dec     eax                             ; the octets before it
-    test    edi, eax
-    jnz     .bad_value                      ; a CTL other than HTAB (RFC9110-5.5-5#1, -5#2)
-    add     rdx, rcx                        ; the CR's offset
+.value_v2_stop:
+    bsf     ecx, ecx                        ; the first octet a value may not hold
+    add     rdx, rcx
+    cmp     byte [rbx + rdx], 13
+    jne     .bad_value                      ; a CTL other than HTAB (RFC9110-5.5-5#1, -5#2)
     cmp     byte [rbx + rdx + 1], 10
     jne     .bad_value                      ; a bare CR: a CTL inside the value
     lea     rax, [rdx + 1]
-    mov     [r12 + h1ctx.line_lf], rax
+    mov     [r12 + h1ctx.line_lf], rax      ; rdx = the line's CR
 .value_v2_trailing:                         ; as .trailing_ows: OWS before the CR is not value
     cmp     rdx, r15
     jbe     .value_v2_trimmed

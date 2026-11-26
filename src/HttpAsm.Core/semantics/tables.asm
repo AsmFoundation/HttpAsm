@@ -101,9 +101,6 @@ ha_x16_7f:  times 16 db 0x7F        ; DEL
 global ha_x16_0a:data hidden (ha_x16_0a.end - ha_x16_0a)
 ha_x16_0a:  times 16 db 0x0A        ; LF
 .end:
-global ha_x16_0d:data hidden (ha_x16_0d.end - ha_x16_0d)
-ha_x16_0d:  times 16 db 0x0D        ; CR
-.end:
 global ha_x16_0f:data hidden (ha_x16_0f.end - ha_x16_0f)
 ha_x16_0f:  times 16 db 0x0F        ; a nibble: what pshufb's index keeps of an octet
 .end:
