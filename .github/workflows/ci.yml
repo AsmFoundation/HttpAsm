@@ -24,7 +24,10 @@
 #      there; upstream b59cabf9b4ac reverted the charge, and backports reach kernels at
 #      different times): RingBudgetTests asks the kernel and checks the library follows it,
 #      and tests/native/fallback refuses io_uring with seccomp, deterministically.
-#   4. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
+#   4. tests/coverage/run.sh: the Coverage build (every block and branch edge marked by
+#      tests/coverage/instrument.cs), the same runs as step 3 against it, and the report - for
+#      now report-only, until tests/coverage/unreachable.tsv and the tests make the gate pass.
+#   5. benchmarks/micro: single-thread measurements of the multi-version routines at every tier,
 #      written to the job summary with the runner's CPU. Informational: a shared runner is no
 #      measuring machine, but it is where AVX-512 versions get timed when the runner has it.
 #
@@ -53,7 +56,7 @@ jobs:
   test:
     name: Registry, build and tests (linux-x64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       HTTPASM_REQUIRE_LINUX: "1"
       DOTNET_NOLOGO: "1"
@@ -87,6 +90,14 @@ jobs:
         env:
           HTTPASM_RUNNER: native
         run: bash tests/run-linux.sh Release
+
+      - name: Coverage - every block and branch edge of libhttpasm.so under every test (report only, to the job summary)
+        env:
+          HTTPASM_RUNNER: native
+        run: |
+          bash tests/coverage/run.sh --report-only > coverage.md
+          { echo "### Coverage of libhttpasm.so"; echo; sed -n '/^Coverage of/,/^Not run/p' coverage.md | sed '$d'; tail -1 coverage.md; } >> "$GITHUB_STEP_SUMMARY"
+          tail -1 coverage.md
 
       - name: Single-thread measurements per tier (informational, to the job summary)
         run: |

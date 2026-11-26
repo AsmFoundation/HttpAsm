@@ -6,6 +6,8 @@
 # Usage: tests/run-linux.sh [Debug|Release] [test-app arguments...]   (default Debug)
 #        HTTPASM_RUNNER=docker|wsl|native tests/run-linux.sh ...       (default: the first that works)
 #        HTTPASM_TEST_CPUS="v1 v3" tests/run-linux.sh ...              (tiers; default "v1 v2 v3 v4")
+#        HTTPASM_COVERAGE_DIR=<dir> tests/run-linux.sh Coverage         (tests/coverage/run.sh does this:
+#                                                                        every process writes its marks there)
 #
 # How: the host builds everything (AsmFoundation.Sdk assembles and links libhttpasm.so for
 # linux-x64 on Windows, macOS or Linux alike), then the test app runs from its output folder on
@@ -85,6 +87,11 @@ on_linux() {
   fi
 }
 
+# A coverage run (tests/coverage/run.sh) names the directory its processes write their markers
+# to; every Linux-side command gets it, as the Linux side sees that path.
+linux_env=""
+if [ -n "${HTTPASM_COVERAGE_DIR:-}" ]; then linux_env="export HTTPASM_COVERAGE_DIR='$(lpath "$HTTPASM_COVERAGE_DIR")';"; fi
+
 # Whether the Linux side's CPU has AVX-512 (BW is the part every v4 routine relies on).
 avx512=0
 if [ "$runner" = docker ]; then
@@ -107,7 +114,7 @@ run_suite() {
     native|wsl)
       local dotnet=dotnet
       if [ "$runner" = wsl ]; then dotnet='$HOME/.dotnet/dotnet'; fi
-      on_linux "cd '$(lpath "$out")' && HTTPASM_CPU=$cpu HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC='$(lpath "$tools")/h2spec' HTTPASM_REQUIRE_H2SPEC=1 HTTPASM_REQUIRE_URING=$require_uring HTTPASM_TEST_IO=$test_io DOTNET_NOLOGO=1 $dotnet HttpAsm.Tests.dll $*"
+      on_linux "$linux_env cd '$(lpath "$out")' && HTTPASM_CPU=$cpu HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC='$(lpath "$tools")/h2spec' HTTPASM_REQUIRE_H2SPEC=1 HTTPASM_REQUIRE_URING=$require_uring HTTPASM_TEST_IO=$test_io DOTNET_NOLOGO=1 $dotnet HttpAsm.Tests.dll $*"
       ;;
     docker)
       # Docker Desktop on Windows needs a Windows path; Git Bash's /k/... form means nothing to it.
@@ -137,12 +144,12 @@ run_native() {
   sde='$HOME/.cache/httpasm/sde'
   [ "$runner" = native ] && sde="$tools/sde"
   echo "run-linux.sh: tests/native/fallback and tests/native/tiers, natively" >&2
-  on_linux "set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers"
+  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers"
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep
     # would report grep's), and only then searched for the v4 tier.
-    on_linux "set -e; s=$sde; if [ ! -x \$s/sde64 ]; then mkdir -p \$s; tar -xJf '$(lpath "$tools")/$sde_archive' -C \$s --strip-components=1; fi; \
+    on_linux "$linux_env set -e; s=$sde; if [ ! -x \$s/sde64 ]; then mkdir -p \$s; tar -xJf '$(lpath "$tools")/$sde_archive' -C \$s --strip-components=1; fi; \
       o=\$(\$s/sde64 -spr -- $bin/tiers); echo \"\$o\"; \
       printf '%s\n' \"\$o\" | grep -Eq ' v4=0x[0-9a-f]*7$' || { echo 'run-linux.sh: the SDE run did not reach v4' >&2; exit 1; }"
   fi

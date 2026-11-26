@@ -78,6 +78,7 @@ dotnet run specs/specs.cs -- extract --check       # the registry matches the pi
 dotnet run specs/generate.cs -- --check            # the generated tables match them too
 benchmarks/run.sh                                  # HttpAsm, nginx and h2o, side by side (Linux)
 $(bash tests/native/build.sh Release)/micro        # each routine's CPU tiers, single-threaded
+tests/coverage/run.sh                              # every block and branch edge the tests run, and the gate
 ```
 
 `tests/run-linux.sh` fetches h2spec and Intel SDE (each pinned by SHA-256), then:

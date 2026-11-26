@@ -10,3 +10,6 @@ TestResults/
 .idea/
 *.user
 tests/.tools/
+
+# The coverage run's marks (tests/coverage/run.sh)
+tests/coverage/.dumps/

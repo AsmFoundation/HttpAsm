@@ -336,7 +336,19 @@ HTTP/2, the drivers, the client):
      (`benchmarks/README.md`).
 2. *The instruments:*
    - **instruction coverage** of `libhttpasm.so` under the tests, and its gate: every block
-     runs, or is listed with the reason it cannot;
+     runs, or is listed with the reason it cannot. Built 2026-11-26 (`tests/coverage/`):
+     - **How it works:** the Coverage configuration assembles each source through
+       `instrument.cs`. That expands macros with NASM's `-E` and inserts a flag-neutral marker
+       store at every block and on both edges of every conditional branch (the taken edge
+       through a trampoline). It also marks code after `jmp`/`ret` that no label reaches.
+       `coverage_rt.asm` writes the marks when a process exits.
+     - **What runs:** `run.sh` runs everything `run-linux.sh` runs against that build, and
+       `report.cs` merges the marks and gates against `unreachable.tsv`.
+     - **The first measurement,** every tier, both backends, the native programs and SDE:
+       4,022 markers; blocks 91.8%, branch edges 79.5%, no dead code; 678 markers not run, the
+       work list of step 3. It found code no test reached, such as the default worker count,
+       which every test sets explicitly. `semantics/tables.asm` is data only and cannot be
+       preprocessed alone (an `%if` over symbols), so it is listed as not instrumented.
    - **coverage-guided fuzzing** of every parser and state machine (HTTP/1.1 requests and
      responses, chunked bodies, HPACK, HTTP/2 frames and connections). It uses AFL++ in
      binary-instrumentation mode, since assembly has no compiler instrumentation. The seed

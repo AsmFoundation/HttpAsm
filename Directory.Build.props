@@ -38,4 +38,22 @@
   <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'H1Only'">
     <AsmFlags>$(AsmFlags) -DHTTPASM_H1_ONLY</AsmFlags>
   </PropertyGroup>
+
+  <!--
+    The Coverage configuration (tests/coverage/run.sh builds it; nothing ships it): the same
+    sources, assembled through tests/coverage/instrument.cs, which marks every block and every
+    branch edge, with tests/coverage/coverage_rt.asm linked into libhttpasm.so to write the marks
+    out when a process exits. The SDK's System toolchain lets the build name its own commands;
+    run.sh resolves the SDK's bundled NASM, lld and llvm-ar and passes their paths in the
+    environment, because the NuGet paths are not known yet when this file is evaluated.
+  -->
+  <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'Coverage'">
+    <AsmToolchain>System</AsmToolchain>
+    <AsmNasmCommand>dotnet run --file "$(MSBuildThisFileDirectory)tests/coverage/instrument.cs" -- --nasm "$(HTTPASM_COVERAGE_NASM)"</AsmNasmCommand>
+    <AsmLinkerCommand>"$(HTTPASM_COVERAGE_LLD)" -flavor gnu</AsmLinkerCommand>
+    <AsmArchiverCommand>"$(HTTPASM_COVERAGE_AR)"</AsmArchiverCommand>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'Coverage' and '$(MSBuildProjectName)' == 'HttpAsm'">
+    <AsmSource Include="$(MSBuildThisFileDirectory)tests/coverage/coverage_rt.asm" />
+  </ItemGroup>
 </Project>
