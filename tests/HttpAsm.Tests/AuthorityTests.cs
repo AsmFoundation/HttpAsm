@@ -76,6 +76,19 @@ public sealed unsafe class AuthorityTests
         { "[]", false, false },
         { "[", false, false },
         { "[::1]:8x", false, false },
+        // IPv6address, the range ending in each state (Host's value is the whole range; an
+        // absolute-form's authority ends at the "/" after it)
+        { "[:", false, false },
+        { "[::", false, false },
+        { "[1:", false, false },
+        { "[1::", false, false },
+        { "[1:2", false, false },
+        { "[::1.", false, false },
+        { "[::1.2.", false, false },
+        { "[::1.2.3.4", false, false },
+        { "[::1.2.3.0", false, false },
+        { "[::1.2.3.0]", true, false },
+        { "[::0.0.0.0]:1", true, true },
         // IPvFuture
         { "[v1.x]", true, false },
         { "[vF.a:b]:9", true, true },
@@ -88,6 +101,16 @@ public sealed unsafe class AuthorityTests
         { "[v1.%41]", false, false },
         { "[v1.x/y]", false, false },
         { "[v1.x]y", false, false },
+        { "[v12.x]", true, false },
+        { "[vAb.x:y]:80", true, true },
+        { "[v", false, false },
+        { "[v1", false, false },
+        { "[v1.", false, false },
+        { "[v1.\"]", false, false },
+        { "[v1. ]", false, false },
+        { "[v1.?]", false, false },
+        { "[v1.@]", false, false },
+        { "[v1.[]", false, false },
         // reg-name and IPv4address
         { "example.com", true, false },
         { "example.com:443", true, true },
@@ -161,6 +184,33 @@ public sealed unsafe class AuthorityTests
         Expect("HTTP/2 Host", host, Http2([(":method", "GET"), (":scheme", "http"), (":path", "/"), ("host", authority)]));
 
         Assert.True(verdicts.Count == 0, $"\"{authority}\":\n" + string.Join("\n", verdicts));
+    }
+
+    /// <summary>
+    /// No two octets an authority may hold differ only in bit 5 (0x20), but a letter and its
+    /// other case. httpasm_h2_request compares :authority with Host after both passed
+    /// uri-host's grammar, folding case by setting that bit, and refuses a pair that folds
+    /// alike without being letters: tests/coverage/unreachable.tsv lists that refusal as one
+    /// no input can reach, on the strength of this test. If the grammar ever admits such a
+    /// pair, this fails first, and the refusal becomes reachable (and needed).
+    /// </summary>
+    [Fact]
+    public void AdmitsNoOctetPairThatFoldsAlikeButLetters()
+    {
+        Platform.RequireLinuxX64();
+        // An octet counts as allowed when a Host takes it inside a reg-name or an IPvFuture's
+        // tail: the grammar's two widest octet sets (an IPv6address holds HEXDIG, ":" and ".",
+        // a port DIGIT, both inside them; "%" is allowed only before two HEXDIG, and 0x05, its
+        // partner, never is).
+        var allowed = Enumerable.Range(0, 256).Where(octet =>
+        {
+            string c = Encoding.Latin1.GetString([(byte)octet]);
+            return Parsed($"GET / HTTP/1.1\r\nHost: a{c}b\r\n\r\n") || Parsed($"GET / HTTP/1.1\r\nHost: [v1.a{c}b]\r\n\r\n")
+                || Parsed($"GET / HTTP/1.1\r\nHost: a{c}41\r\n\r\n");
+        }).ToHashSet();
+        Assert.Contains('~', allowed.Select(o => (char)o));
+        var pairs = allowed.Where(o => allowed.Contains(o ^ 0x20) && !char.IsAsciiLetter((char)o)).Select(o => $"0x{o:X2}").ToList();
+        Assert.True(pairs.Count == 0, "pairs that fold alike: " + string.Join(", ", pairs));
     }
 
     /// <summary>Whether httpasm_h1_parse_request takes a head.</summary>

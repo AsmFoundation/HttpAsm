@@ -80,10 +80,38 @@ internal static unsafe class H1Messages
         int status, (string, string)[]? fields = null, long? length = null, int version = 11, int method = 1,
         bool close = false, string? date = Date, int capacity = 4096)
     {
-        using var native = new NativeFields(fields ?? []);
         byte[] output = new byte[capacity];
-        byte[]? dateBytes = date is null ? null : Encoding.ASCII.GetBytes(date);
         fixed (byte* o = output)
+        {
+            long result = WriteResponseInto(o, capacity, status, out uint flags, fields, length, version, method, close, date);
+            string text = result > 0 ? Encoding.Latin1.GetString(o, (int)result) : "";
+            return (result, text, flags);
+        }
+    }
+
+    /// <summary>
+    /// Writes a response head into memory the caller owns: a test that places the output at
+    /// the end of a <see cref="GuardedBuffer"/> page proves the writer stays inside the capacity
+    /// it was given (an octet past it faults).
+    /// </summary>
+    /// <param name="output">At least <paramref name="capacity"/> writable octets.</param>
+    /// <param name="capacity">How many the writer may use.</param>
+    /// <param name="status">The status.</param>
+    /// <param name="flags">Receives the flags the writer reported.</param>
+    /// <param name="fields">The handler's fields.</param>
+    /// <param name="length">The body's length, or null when unknown.</param>
+    /// <param name="version">The request's version.</param>
+    /// <param name="method">The request's method id.</param>
+    /// <param name="close">Whether the connection closes after.</param>
+    /// <param name="date">The Date value, or null.</param>
+    /// <returns>httpasm_h1_write_response's result: the head's length, 0 when it did not fit,
+    /// or -HTTPASM_ERROR_*.</returns>
+    public static long WriteResponseInto(
+        byte* output, int capacity, int status, out uint flags, (string, string)[]? fields = null, long? length = null,
+        int version = 11, int method = 1, bool close = false, string? date = Date)
+    {
+        using var native = new NativeFields(fields ?? []);
+        byte[]? dateBytes = date is null ? null : Encoding.ASCII.GetBytes(date);
         fixed (byte* d = dateBytes)
         {
             var response = new HttpResponse
@@ -97,9 +125,9 @@ internal static unsafe class H1Messages
                 ContentLength = (ulong)(length ?? 0),
                 Flags = (length.HasValue ? Abi.ResponseLength : 0) | (close ? Abi.ResponseClose : 0),
             };
-            long result = Native.H1WriteResponse(o, (nuint)capacity, &response);
-            string text = result > 0 ? Encoding.Latin1.GetString(o, (int)result) : "";
-            return (result, text, response.Flags);
+            long result = Native.H1WriteResponse(output, (nuint)capacity, &response);
+            flags = response.Flags;
+            return result;
         }
     }
 
@@ -115,10 +143,34 @@ internal static unsafe class H1Messages
     public static (long Result, string Text) WriteRequest(
         string method, string target, string authority, (string, string)[]? fields = null, uint flags = 0, ulong length = 0, int capacity = 4096)
     {
-        using var native = new NativeFields(fields ?? []);
-        byte[] m = Encoding.Latin1.GetBytes(method), t = Encoding.Latin1.GetBytes(target), a = Encoding.Latin1.GetBytes(authority);
         byte[] output = new byte[capacity];
         fixed (byte* o = output)
+        {
+            long result = WriteRequestInto(o, capacity, method, target, authority, fields, flags, length);
+            return (result, result > 0 ? Encoding.Latin1.GetString(o, (int)result) : "");
+        }
+    }
+
+    /// <summary>
+    /// Writes a request head into memory the caller owns (see <see cref="WriteResponseInto"/>
+    /// for why).
+    /// </summary>
+    /// <param name="output">At least <paramref name="capacity"/> writable octets.</param>
+    /// <param name="capacity">How many the writer may use.</param>
+    /// <param name="method">The method.</param>
+    /// <param name="target">The request-target.</param>
+    /// <param name="authority">Host's value.</param>
+    /// <param name="fields">The caller's fields.</param>
+    /// <param name="flags">HTTPASM_REQUEST_* framing flags.</param>
+    /// <param name="length">content_length.</param>
+    /// <returns>httpasm_h1_write_request's result: the head's length, 0 when it did not fit, or
+    /// -HTTPASM_ERROR_*.</returns>
+    public static long WriteRequestInto(
+        byte* output, int capacity, string method, string target, string authority, (string, string)[]? fields = null,
+        uint flags = 0, ulong length = 0)
+    {
+        using var native = new NativeFields(fields ?? []);
+        byte[] m = Encoding.Latin1.GetBytes(method), t = Encoding.Latin1.GetBytes(target), a = Encoding.Latin1.GetBytes(authority);
         fixed (byte* mp = m)
         fixed (byte* tp = t)
         fixed (byte* ap = a)
@@ -129,8 +181,7 @@ internal static unsafe class H1Messages
                 Authority = ap, AuthorityLength = (uint)a.Length, Fields = native.Pointer, FieldCount = native.Count,
                 Flags = flags, ContentLength = length,
             };
-            long result = Native.H1WriteRequest(o, (nuint)capacity, &request);
-            return (result, result > 0 ? Encoding.Latin1.GetString(o, (int)result) : "");
+            return Native.H1WriteRequest(output, (nuint)capacity, &request);
         }
     }
 
@@ -139,11 +190,26 @@ internal static unsafe class H1Messages
     /// <param name="method">The request's method id.</param>
     /// <param name="joined">Receives the buffer after parsing (obs-fold is joined in place).</param>
     /// <returns>What the parser reported.</returns>
-    public static ParsedResponse ParseResponse(string text, int method, out string joined)
+    public static ParsedResponse ParseResponse(string text, int method, out string joined) =>
+        ParseResponse(text, new H1Limits { MaxFields = 64 }, method, out joined);
+
+    /// <summary>Parses a response head from the start of a buffer, under given limits.</summary>
+    /// <param name="text">The octets, as Latin-1 text.</param>
+    /// <param name="limits">The limits (MaxFields at most 64: the field array's size).</param>
+    /// <param name="method">The request's method id (GET by default).</param>
+    /// <returns>What the parser reported.</returns>
+    public static ParsedResponse ParseResponse(string text, H1Limits limits, int method = 1) => ParseResponse(text, limits, method, out _);
+
+    /// <summary>Parses a response head from the start of a buffer, under given limits.</summary>
+    /// <param name="text">The octets, as Latin-1 text.</param>
+    /// <param name="limits">The limits (MaxFields at most 64: the field array's size).</param>
+    /// <param name="method">The request's method id.</param>
+    /// <param name="joined">Receives the buffer after parsing (obs-fold is joined in place).</param>
+    /// <returns>What the parser reported.</returns>
+    private static ParsedResponse ParseResponse(string text, H1Limits limits, int method, out string joined)
     {
         byte[] buffer = Encoding.Latin1.GetBytes(text);
         var fields = new HttpField[64];
-        var limits = new H1Limits { MaxFields = 64 };
         nuint scanFrom = 0;
         ResponseHead head;
         fixed (byte* p = buffer)
@@ -225,11 +291,20 @@ internal static unsafe class H1Messages
     /// <param name="count">Receives how many trailer fields.</param>
     /// <param name="fields">Receives them.</param>
     /// <returns>The section's length, 0, or -status.</returns>
-    public static long ParseTrailers(string text, out uint count, out List<ParsedField> fields)
+    public static long ParseTrailers(string text, out uint count, out List<ParsedField> fields) =>
+        ParseTrailers(text, new H1Limits { MaxFields = 16 }, out count, out fields);
+
+    /// <summary>Parses a trailer section under given limits.</summary>
+    /// <param name="text">The octets after the last chunk's line.</param>
+    /// <param name="limits">The limits: MaxHead bounds the section, MaxFields (at most 16, the
+    /// record array's size) its fields.</param>
+    /// <param name="count">Receives how many trailer fields.</param>
+    /// <param name="fields">Receives them.</param>
+    /// <returns>The section's length, 0, or -status.</returns>
+    public static long ParseTrailers(string text, H1Limits limits, out uint count, out List<ParsedField> fields)
     {
         byte[] buffer = Encoding.Latin1.GetBytes(text);
         var records = new HttpField[16];
-        var limits = new H1Limits { MaxFields = 16 };
         nuint scanFrom = 0;
         uint n;
         long result;

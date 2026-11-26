@@ -119,6 +119,7 @@ public sealed class H1MessageTests
     [InlineData("transfer-encoding", "chunked", ParseError.FramingField)]
     [InlineData("Connection", "close", ParseError.FramingField)]
     [InlineData("Keep-Alive", "timeout=5", ParseError.FramingField)]
+    [InlineData("Proxy-Connection", "keep-alive", ParseError.FramingField)]
     [InlineData("TE", "trailers", ParseError.FramingField)]
     [InlineData("Bad Name", "v", ParseError.FieldName)]
     [InlineData("", "v", ParseError.FieldName)]
@@ -486,5 +487,228 @@ public sealed class H1MessageTests
         Assert.Equal(expected.ToArray(), decoded);
         Assert.Equal(Abi.ChunkedTrailers, state.State);
         Assert.Equal("X-Digest: sha-256=:abc:\r\n\r\n", Encoding.Latin1.GetString(rest));
+    }
+
+    /// <summary>
+    /// Every writer, at every capacity short of its message, returns 0 (the output is full)
+    /// and writes nothing past the capacity it was given, wherever the end falls: the status
+    /// line (a code with a phrase, one without), the request line, Host, each framing field,
+    /// Expect, Connection, the Date, a caller's field, the final CRLF; a chunk's size line, its
+    /// data, its CRLF; the last chunk with and without trailers. At the exact length each
+    /// writes the same octets as with room to spare.
+    /// </summary>
+    /// <remarks>
+    /// The output is placed at the end of a page whose next page is inaccessible, so one octet
+    /// written past the capacity kills the test process rather than passing unnoticed. Every
+    /// capacity from 0 to the message's length is tried: a writer checks its room piece by
+    /// piece, and each piece's check is its own branch.
+    /// </remarks>
+    [Fact]
+    public unsafe void WritesNothingPastItsCapacity()
+    {
+        Platform.RequireLinuxX64();
+        const uint contentLength = 0x2, chunked = 0x4, expect = 0x8, close = 0x80;
+        var writers = new (string Name, Func<nint, int, long> Write)[]
+        {
+            ("a 200 with a length, a field and close",
+                (o, c) => H1Messages.WriteResponseInto((byte*)o, c, 200, out _, [("X-A", "1")], length: 12345, close: true)),
+            ("a 299 (no phrase) with chunked framing", (o, c) => H1Messages.WriteResponseInto((byte*)o, c, 299, out _)),
+            ("an HTTP/1.0 response without a length", (o, c) => H1Messages.WriteResponseInto((byte*)o, c, 200, out _, version: 10)),
+            ("a 103 with a field", (o, c) => H1Messages.WriteResponseInto((byte*)o, c, 103, out _, [("Link", "</s.css>; rel=preload")])),
+            ("a POST with a length, Expect, close and a field",
+                (o, c) => H1Messages.WriteRequestInto((byte*)o, c, "POST", "/upload?x=1", "example.com:8080", [("Accept", "*/*")],
+                    contentLength | expect | close, 10)),
+            ("a chunked PUT", (o, c) => H1Messages.WriteRequestInto((byte*)o, c, "PUT", "/", "h", flags: chunked)),
+            ("a chunk of 0xabc octets", (o, c) => WriteChunk(o, c, 0xabc)),
+            ("a chunk of 1 octet", (o, c) => WriteChunk(o, c, 1)),
+            ("the last chunk with a trailer", (o, c) => WriteLastChunk(o, c, [("X-Digest", "sha-256=:abc:")])),
+            ("the last chunk alone", (o, c) => WriteLastChunk(o, c, [])),
+        };
+
+        using var guard = new GuardedBuffer();
+        foreach (var (name, write) in writers)
+        {
+            byte[] roomy = new byte[GuardedBuffer.PageSize];
+            long length;
+            fixed (byte* r = roomy)
+            {
+                length = write((nint)r, roomy.Length);
+            }
+
+            Assert.True(length > 0, $"{name}: {length} with room to spare");
+            for (int capacity = 0; capacity <= length; capacity++)
+            {
+                // A fresh zeroed region each time, its last octet the page's last.
+                byte* output = guard.AtPageEnd(new byte[capacity]);
+                long result = write((nint)output, capacity);
+                if (capacity < length)
+                {
+                    Assert.True(result == 0, $"{name}, capacity {capacity} of {length}: {result}");
+                }
+                else
+                {
+                    Assert.Equal(length, result);
+                    Assert.True(roomy.AsSpan(0, (int)length).SequenceEqual(new ReadOnlySpan<byte>(output, capacity)), $"{name}: other octets at the exact length");
+                }
+            }
+        }
+
+        // One chunk of random data: the data's own octets cannot be mistaken for framing.
+        static long WriteChunk(nint output, int capacity, int size)
+        {
+            byte[] data = new byte[size];
+            new Random(size).NextBytes(data);
+            fixed (byte* d = data)
+            {
+                return Native.H1WriteChunk((byte*)output, (nuint)capacity, d, (nuint)size);
+            }
+        }
+
+        static long WriteLastChunk(nint output, int capacity, (string, string)[] trailers)
+        {
+            using var native = new NativeFields(trailers);
+            return Native.H1WriteLastChunk((byte*)output, (nuint)capacity, native.Pointer, native.Count);
+        }
+    }
+
+    /// <summary>
+    /// The request writer owns Host, the framing, Expect (it writes "100-continue" from a flag)
+    /// and Upgrade (HttpAsm's client does not switch protocols): a caller's field of any of
+    /// these names is refused, never written beside the writer's own.
+    /// </summary>
+    /// <param name="name">The field's name.</param>
+    /// <param name="value">Its value.</param>
+    [Theory]
+    [InlineData("Host", "other")]
+    [InlineData("expect", "100-continue")]
+    [InlineData("Upgrade", "websocket")]
+    [InlineData("Content-Length", "0")]
+    [InlineData("Transfer-Encoding", "chunked")]
+    [InlineData("Connection", "close")]
+    [InlineData("Keep-Alive", "timeout=5")]
+    [InlineData("Proxy-Connection", "keep-alive")]
+    [InlineData("TE", "trailers")]
+    public void RefusesFieldsTheRequestWriterOwns(string name, string value)
+    {
+        Platform.RequireLinuxX64();
+        Assert.Equal(-(long)ParseError.FramingField, H1Messages.WriteRequest("POST", "/", "h", [(name, value)], 0x2, 1).Result);
+    }
+
+    /// <summary>
+    /// A trailer section may not carry Trailer itself, Host, framing, Expect or Upgrade (RFC
+    /// 9110 6.5.1: no field that frames, routes or controls the message): the last-chunk
+    /// writer refuses them as the request writer does.
+    /// </summary>
+    /// <param name="name">The field's name.</param>
+    [Theory]
+    [InlineData("Trailer")]
+    [InlineData("Host")]
+    [InlineData("Expect")]
+    [InlineData("Upgrade")]
+    [InlineData("Content-Length")]
+    [InlineData("Transfer-Encoding")]
+    [Requirement("RFC9110-6.5.1-2")]
+    public unsafe void RefusesTrailersThatFrameOrRoute(string name)
+    {
+        Platform.RequireLinuxX64();
+        byte[] output = new byte[256];
+        using var trailers = new NativeFields((name, "x"));
+        fixed (byte* o = output)
+        {
+            Assert.Equal(-(long)ParseError.FramingField, Native.H1WriteLastChunk(o, (nuint)output.Length, trailers.Pointer, trailers.Count));
+        }
+    }
+
+    /// <summary>
+    /// An absolute-form target's own authority: "http:" and "http:/" have no room for one and
+    /// are refused; one ending at "?" (no path) is read up to it, so "http://example.com?q=1"
+    /// is written as it is.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC9110-4.2.1-4#1")]
+    public void BoundsAnAbsoluteFormsAuthority()
+    {
+        Platform.RequireLinuxX64();
+        Assert.Equal(-(long)ParseError.TargetForm, H1Messages.WriteRequest("GET", "http:", "h").Result);
+        Assert.Equal(-(long)ParseError.TargetForm, H1Messages.WriteRequest("GET", "http:/", "h").Result);
+        Assert.Equal(-(long)ParseError.TargetForm, H1Messages.WriteRequest("GET", "https:x", "h").Result);
+        Assert.Equal("GET http://example.com?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            H1Messages.WriteRequest("GET", "http://example.com?q=1", "example.com").Text);
+        Assert.Equal(-(long)ParseError.TargetForm, H1Messages.WriteRequest("GET", "http://?q=1", "h").Result);
+    }
+
+    /// <summary>
+    /// A response head is bounded by max_head as a request head is, wherever the limit falls:
+    /// inside a field line, inside the final empty line (the last field line ends within the
+    /// limit and the head's CRLF crosses it), or in a head still arriving. A head of exactly
+    /// max_head octets is taken.
+    /// </summary>
+    [Fact]
+    public void BoundsResponseHeads()
+    {
+        Platform.RequireLinuxX64();
+        string head = $"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Pad: {new string('p', 40)}\r\n\r\n";
+        Assert.Equal(head.Length, H1Messages.ParseResponse(head, new H1Limits { MaxHead = (uint)head.Length, MaxFields = 64 }).Result);
+        // Short by 1 or 2: the final CRLF crosses the limit; by 3: the last field line does.
+        for (int shortBy = 1; shortBy <= 3; shortBy++)
+        {
+            ParsedResponse over = H1Messages.ParseResponse(head, new H1Limits { MaxHead = (uint)(head.Length - shortBy), MaxFields = 64 });
+            Assert.Equal(-431, over.Result);
+            Assert.Equal(ParseError.HeadTooLarge, over.Error);
+        }
+
+        // Still arriving, every line so far within the limit, the octets already past it:
+        // refused without waiting for the end.
+        ParsedResponse endless = H1Messages.ParseResponse($"HTTP/1.1 200 OK\r\nX-Big: {new string('x', 100)}", new H1Limits { MaxHead = 40, MaxFields = 64 });
+        Assert.Equal(-431, endless.Result);
+        Assert.Equal(ParseError.HeadTooLarge, endless.Error);
+        // Within the limit and still arriving: wait for more.
+        Assert.Equal(0, H1Messages.ParseResponse("HTTP/1.1 200 OK\r\nX-Big: xx", new H1Limits { MaxHead = 40, MaxFields = 64 }).Result);
+    }
+
+    /// <summary>
+    /// A trailer section is bounded by max_head as a head is, wherever the limit falls (see
+    /// <see cref="BoundsResponseHeads"/>), an empty section ("\r\n") included: under a limit of
+    /// one octet even it crosses.
+    /// </summary>
+    [Fact]
+    public void BoundsTrailerSections()
+    {
+        Platform.RequireLinuxX64();
+        string section = "X-Checksum: abc\r\nX-Count: 3\r\n\r\n";
+        Assert.Equal(section.Length, H1Messages.ParseTrailers(section, new H1Limits { MaxHead = (uint)section.Length, MaxFields = 16 }, out uint count, out _));
+        Assert.Equal(2u, count);
+        for (int shortBy = 1; shortBy <= 3; shortBy++)
+        {
+            Assert.Equal(-431, H1Messages.ParseTrailers(section, new H1Limits { MaxHead = (uint)(section.Length - shortBy), MaxFields = 16 }, out _, out _));
+        }
+
+        Assert.Equal(-431, H1Messages.ParseTrailers("\r\n", new H1Limits { MaxHead = 1, MaxFields = 16 }, out _, out _));
+        Assert.Equal(2, H1Messages.ParseTrailers("\r\n", new H1Limits { MaxHead = 2, MaxFields = 16 }, out _, out _));
+        Assert.Equal(-431, H1Messages.ParseTrailers($"X-Big: {new string('x', 100)}", new H1Limits { MaxHead = 50, MaxFields = 16 }, out _, out _));
+        Assert.Equal(0, H1Messages.ParseTrailers("X-Big: xx", new H1Limits { MaxHead = 50, MaxFields = 16 }, out _, out _));
+    }
+
+    /// <summary>
+    /// After the last chunk the decoder takes nothing more: the trailer section that follows is
+    /// httpasm_h1_parse_trailers', so a call in the TRAILERS state consumes and produces nothing,
+    /// leaves the octets as they are, and keeps its state and its total.
+    /// </summary>
+    [Fact]
+    public unsafe void TakesNothingAfterTheLastChunk()
+    {
+        Platform.RequireLinuxX64();
+        var state = new ChunkedState { State = Abi.ChunkedTrailers, Total = 5 };
+        byte[] trailers = Encoding.ASCII.GetBytes("X-T: 1\r\n\r\n");
+        nuint produced = 99;
+        fixed (byte* p = trailers)
+        {
+            Assert.Equal(0, Native.H1ChunkedDecode(&state, p, (nuint)trailers.Length, &produced));
+        }
+
+        Assert.Equal(0u, (uint)produced);
+        Assert.Equal(Abi.ChunkedTrailers, state.State);
+        Assert.Equal(5ul, state.Total);
+        Assert.Equal("X-T: 1\r\n\r\n", Encoding.ASCII.GetString(trailers));
     }
 }

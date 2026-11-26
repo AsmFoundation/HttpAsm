@@ -641,6 +641,19 @@ public sealed class H1RequestTests
         // Incomplete but already past the limit: refused without waiting for the end.
         ParsedRequest endless = H1Parsing.Parse($"GET / HTTP/1.1\r\n{Host}X-Big: {new string('x', 2000)}", new H1Limits { MaxHead = 1000 });
         Assert.Equal(-431, endless.Result);
+
+        // At the limit exactly: a head of max_head octets is taken; one octet less and it is
+        // refused, wherever the limit falls. Short by 1 or 2, the last field line ends within
+        // the limit and the final CRLF crosses it (its own check); short by 3, the field line
+        // itself crosses.
+        string exact = $"GET / HTTP/1.1\r\n{Host}X-Pad: {new string('p', 40)}\r\n\r\n";
+        Assert.Equal(exact.Length, H1Parsing.Parse(exact, new H1Limits { MaxHead = (uint)exact.Length }).Result);
+        for (int shortBy = 1; shortBy <= 3; shortBy++)
+        {
+            ParsedRequest over = H1Parsing.Parse(exact, new H1Limits { MaxHead = (uint)(exact.Length - shortBy) });
+            Assert.Equal(-431, over.Result);
+            Assert.Equal(ParseError.HeadTooLarge, over.Error);
+        }
     }
 
     /// <summary>Known fields get their ids whatever the case; others get 0; the ids name the right field.</summary>

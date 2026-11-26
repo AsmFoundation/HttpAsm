@@ -23,11 +23,12 @@
 // Exit status: 0, 1 when the gate fails, 2 for a usage error or unreadable input.
 // =============================================================================
 using System.Text;
+using System.Text.RegularExpressions;
 
 return Coverage.Run(args);
 
 /// <summary>The coverage report and gate: see this file's header.</summary>
-internal static class Coverage
+internal static partial class Coverage
 {
     /// <summary>The magic at the start of every object's region of markers.</summary>
     private static readonly byte[] Magic = "HACOV001"u8.ToArray();
@@ -48,11 +49,22 @@ internal static class Coverage
         /// The identity unreachable.tsv lists a marker by: its file, kind, scope and text, but
         /// neither its id nor its line. With the line in it, every edit that moved code down a
         /// file staled every entry below it, and a gate in CI would have failed on edits that
-        /// changed nothing it guards. Markers alike in all four (two "jz .out" of one function,
-        /// one macro expanded twice there) are a multiset: listed once per marker.
+        /// changed nothing it guards. For the same reason a macro-local label's number goes
+        /// ("jz ..@221.skip" is keyed "jz ..@.skip"): NASM numbers every expansion of the file
+        /// in order, so one macro call added near the top renumbers every expansion below it.
+        /// Markers alike in all four (two "jz .out" of one function, one macro expanded twice
+        /// there) are a multiset: listed once per marker.
         /// </summary>
-        public string Key => $"{File}\t{Kind}\t{Scope}\t{Text}";
+        public string Key => $"{File}\t{Kind}\t{Scope}\t{MacroLocal().Replace(Text, "..@.")}";
     }
+
+    /// <summary>
+    /// A NASM macro-local label's prefix with its expansion number ("..@221."), which
+    /// <see cref="Marker.Key"/> drops.
+    /// </summary>
+    /// <returns>The pattern.</returns>
+    [GeneratedRegex(@"\.\.@\d+\.")]
+    private static partial Regex MacroLocal();
 
     /// <summary>One object's map, and which of its markers ran.</summary>
     /// <param name="Source">The source it came from.</param>
