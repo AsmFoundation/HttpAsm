@@ -8,8 +8,9 @@
 ;   - integers with N-bit prefixes, at most 5 continuation octets and 2^32-1 (RFC7541-5.1-p15);
 ;   - strings raw or Huffman-coded, with RFC 7541 5.2's padding and EOS rules: at v1 4 bits per
 ;     step through the generated automaton (generated/huffman.inc); from v2 up by a table
-;     decoder, up to two symbols per lookup of the next 12 bits (hp_string's .huffman_v2: the
-;     same octets, length and errors, 1.49x faster on a browser request's block);
+;     decoder, up to two symbols per lookup of the next 12 bits (hp_string's .huffman_v2, and
+;     at v3 .huffman_v3 with BMI2's shifts: the same octets, length and errors, 1.50x and 1.57x
+;     faster than v1 on a browser request's block);
 ;   - indexed fields (index 0 and indices past both tables are errors), literals with
 ;     incremental indexing, without indexing and never indexed (the last keeps
 ;     HTTPASM_FIELD_FLAG_NEVER_INDEXED on its record, so a forwarder can keep it so);
@@ -407,8 +408,11 @@ hp_int:
 ;         whether the string may end there: on a symbol boundary, or within 7 bits of all ones
 ;         (the start of EOS's code). Each step's table load waits for the one before: two per
 ;         octet, about 10 cycles per symbol.
-;     v2  a table decoder (.huffman_v2, described there): one lookup per 12 bits, up to two
-;         symbols, about half the latency per symbol.
+;     v2  a table decoder (.huffman_v2, H2_DECODER below): one lookup per 12 bits, up to two
+;         symbols, about half the latency per symbol;
+;     v3  the same decoder with BMI2's shlx for the window's shifts (.huffman_v3): shl by cl
+;         merges the flags on Intel cores, so each lookup's shift waited for the compare before
+;         it; shlx touches no flags. 3.5-5% faster than v2 in the same build.
 ; -----------------------------------------------------------------------------
 align 16
 hp_string:
@@ -439,6 +443,7 @@ hp_string:
     lea     r11, [r12 + rax]                ; the string's end
     mov     r10, rdi                        ; the output's start
     add     r9, rdi                         ; the output's room ends here
+    HA_CPU_PICK1 HTTPASM_CPU_V3, .huffman_v3
     HA_CPU_PICK1 HTTPASM_CPU_V2, .huffman_v2
     xor     edx, edx                        ; the automaton's state
     mov     r8d, HA_HUFF_ACCEPT             ; an empty string is valid
@@ -524,8 +529,21 @@ hp_string:
 ; below it), r14 the string's bits left, r15 its bits in all (r14 and r15 saved here), rdx the
 ; window, rsi ha_huff_pair, rdi the output, r9 the room's end, r10 the output's start.
 
-; H2_WINDOW: rdx = the window at the string's next bit (bit r15 - r14). Clobbers rax, rcx, r8.
-%macro H2_WINDOW 0
+; H2_SHIFT bmi2: rdx <<= the low 6 bits of rcx. bmi2 1 (v3): shlx, one uop that neither reads
+; nor writes the flags; 0 (v2): shl by cl, which on Intel cores merges the flags (a shift by 0
+; leaves them), so its result waits for the flags of the compare before it. In the lookups that
+; is the latency chain of every symbol: load, then this shift.
+%macro H2_SHIFT 1
+ %if %1
+    shlx    rdx, rdx, rcx
+ %else
+    shl     rdx, cl
+ %endif
+%endmacro
+
+; H2_WINDOW bmi2: rdx = the window at the string's next bit (bit r15 - r14). Clobbers rax, rcx,
+; r8.
+%macro H2_WINDOW 1
     mov     rax, r15
     sub     rax, r14                        ; the bits read
     shr     rax, 3                          ; the octet that holds the next bit
@@ -551,10 +569,14 @@ hp_string:
     mov     rcx, r15
     sub     rcx, r14
     and     ecx, 7
-    shl     rdx, cl                         ; the next bit at bit 63
+    H2_SHIFT %1                             ; the next bit at bit 63
 %endmacro
 
-.huffman_v2:
+; H2_DECODER label, bmi2: the table decoder below, entered at label (hp_string's .huffman_v2 or
+; .huffman_v3). bmi2 picks the window's shifts (H2_SHIFT); everything else is one source, so the
+; two versions cannot drift apart, and tests/native/tiers compares both with v1.
+%macro H2_DECODER 2
+%1:
     push    r14
     push    r15
     lea     rsi, [rel ha_huff_pair]
@@ -562,21 +584,21 @@ hp_string:
     sub     r14, r12
     shl     r14, 3                          ; the string's bits, all left
     mov     r15, r14
-.h2_group:
+%%h2_group:
     test    r14, r14
-    jz      .h2_done                        ; every bit decoded: the string ended on a code
-    H2_WINDOW
+    jz      %%h2_done                        ; every bit decoded: the string ended on a code
+    H2_WINDOW %2
     lea     rcx, [rdi + 16]
     cmp     rcx, r9
-    ja      .h2_little_room                 ; the stores could pass the room's end
+    ja      %%h2_little_room                 ; the stores could pass the room's end
 %rep 4
     mov     r8, rdx
-    shr     r8, 64 - 12                     ; the next 12 bits (kept for .h2_partial)
+    shr     r8, 64 - 12                     ; the next 12 bits (kept for %%h2_partial)
     mov     ecx, [rsi + r8 * 4]             ; cl = the bits, ch = the count, then the symbols
     movzx   eax, cl
     cmp     rax, r14
-    ja      .h2_partial                     ; past the string's end: its last bits
-    shl     rdx, cl                         ; the chain: the load, then this shift
+    ja      %%h2_partial                     ; past the string's end: its last bits
+    H2_SHIFT %2                             ; the chain: the load, then this shift
     sub     r14, rax
     mov     eax, ecx
     shr     eax, 16
@@ -585,32 +607,32 @@ hp_string:
     add     rdi, rax
 %endrep
     test    cl, cl
-    jz      .h2_single                      ; a long code stopped the lookups (dword 0)
-    jmp     .h2_group
-.h2_little_room:
+    jz      %%h2_single                      ; a long code stopped the lookups (dword 0)
+    jmp     %%h2_group
+%%h2_little_room:
     cmp     rdi, r9
-    jb      .h2_single                      ; some room left: filled one symbol at a time
-.h2_count:                                  ; no room: the same lookups, counting only
+    jb      %%h2_single                      ; some room left: filled one symbol at a time
+%%h2_count:                                  ; no room: the same lookups, counting only
 %rep 4
     mov     r8, rdx
     shr     r8, 64 - 12
     mov     ecx, [rsi + r8 * 4]
     movzx   eax, cl
     cmp     rax, r14
-    ja      .h2_partial
-    shl     rdx, cl
+    ja      %%h2_partial
+    H2_SHIFT %2
     sub     r14, rax
     movzx   eax, ch
     add     rdi, rax
 %endrep
     test    cl, cl
-    jz      .h2_single
+    jz      %%h2_single
     test    r14, r14
-    jz      .h2_done
-    H2_WINDOW
-    jmp     .h2_count
+    jz      %%h2_done
+    H2_WINDOW %2
+    jmp     %%h2_count
 
-.h2_partial:
+%%h2_partial:
     ; The entry's bits pass the string's end (r14 bits left; ecx = the entry, r8 = the 12 bits
     ; looked up, rdx the window there). Its first code is the string's when it fits: the code at
     ; this position is unique (a prefix code), whatever the bits past the end are. It is written
@@ -621,57 +643,57 @@ hp_string:
     lea     rcx, [rel ha_huff_first_bits]
     movzx   ecx, byte [rcx + r8]            ; the first code's bits alone
     cmp     rcx, r14
-    ja      .h2_padding
+    ja      %%h2_padding
     cmp     rdi, r9
-    jae     .h2_partial_counted
+    jae     %%h2_partial_counted
     shr     eax, 16
     mov     [rdi], al
-.h2_partial_counted:
+%%h2_partial_counted:
     inc     rdi
     sub     r14, rcx
     shl     rdx, cl
-    jmp     .h2_padding                     ; (none left: .h2_padding ends the string)
+    jmp     %%h2_padding                     ; (none left: %%h2_padding ends the string)
 
-.h2_single:                                 ; one symbol, by the canonical tables
+%%h2_single:                                 ; one symbol, by the canonical tables
     test    r14, r14
-    jz      .h2_done                        ; the string ended on a code inside a group: no
+    jz      %%h2_done                        ; the string ended on a code inside a group: no
                                             ; window then (it would read past the block's end)
-    H2_WINDOW
+    H2_WINDOW %2
     mov     r8d, 5                          ; the shortest code's length
-.h2_length:
+%%h2_length:
     cmp     r8, r14
-    ja      .h2_padding                     ; no code within the bits left: they are padding
+    ja      %%h2_padding                     ; no code within the bits left: they are padding
     mov     ecx, 64
     sub     ecx, r8d
     mov     rax, rdx
     shr     rax, cl                         ; the next r8 bits
     lea     rcx, [rel ha_huff_limit]
     cmp     eax, [rcx + r8 * 4]
-    jb      .h2_code
+    jb      %%h2_code
     inc     r8d
-    jmp     .h2_length                      ; the code is complete: a length up to 30 fits
-.h2_code:
+    jmp     %%h2_length                      ; the code is complete: a length up to 30 fits
+%%h2_code:
     lea     rcx, [rel ha_huff_offset]
     add     eax, [rcx + r8 * 4]             ; its index in canonical order
     lea     rcx, [rel ha_huff_sorted]
     movzx   eax, word [rcx + rax * 2]
     cmp     eax, 256
-    je      .h2_bad                         ; EOS inside the string (RFC7541-5.2-p10#3)
+    je      %%h2_bad                         ; EOS inside the string (RFC7541-5.2-p10#3)
     cmp     rdi, r9
-    jae     .h2_counted                     ; past the room: counted, not written
+    jae     %%h2_counted                     ; past the room: counted, not written
     mov     [rdi], al
-.h2_counted:
+%%h2_counted:
     inc     rdi
     sub     r14, r8
-    jmp     .h2_group
-.h2_padding:
+    jmp     %%h2_group
+%%h2_padding:
     ; r14 bits are left and no code fits in them: at most 7, all ones (EOS's start). None left
-    ; is no padding at all (a string that ends on a code, met by .h2_partial's next lookup); it
+    ; is no padding at all (a string that ends on a code, met by %%h2_partial's next lookup); it
     ; must not reach the shift below, whose count 64 x86 takes as 0.
     test    r14, r14
-    jz      .h2_done
+    jz      %%h2_done
     cmp     r14, 7
-    ja      .h2_bad
+    ja      %%h2_bad
     mov     ecx, 64
     sub     ecx, r14d
     mov     rax, rdx
@@ -681,18 +703,22 @@ hp_string:
     shl     edx, cl
     dec     edx                             ; r14 ones
     cmp     eax, edx
-    jne     .h2_bad
-.h2_done:
+    jne     %%h2_bad
+%%h2_done:
     mov     r12, r11                        ; past the string
     mov     rax, rdi
     sub     rax, r10                        ; the decoded length
     pop     r15
     pop     r14
     ret
-.h2_bad:
+%%h2_bad:
     pop     r15
     pop     r14
     jmp     .bad
+%endmacro
+
+    H2_DECODER .huffman_v2, 0
+    H2_DECODER .huffman_v3, 1
 
 ; -----------------------------------------------------------------------------
 ; int64_t httpasm_hpack_decode(httpasm_hpack *table, const uint8_t *block, size_t length,

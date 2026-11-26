@@ -189,6 +189,21 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-26: phase H step 4, HPACK's Huffman decoding at v3 (BMI2).** The v2 table decoder
+shifts its window by `cl` after each lookup's bounds compare; on Intel cores `shl` by `cl` merges
+the flags (a shift by 0 keeps them), so the shift waits for the compare, on the chain that sets
+the time. At v3 the same decoder (one source, `H2_DECODER`, expanded twice) uses BMI2's `shlx`,
+which touches no flags. `tiers/hpack_decode`, every tier in one build, 61 and 81 rounds:
+
+| Tier | Instructions | Median ns (61 / 81 rounds) | Over v1 [95% CI], 81 rounds |
+|---|---:|---:|---:|
+| v1 (automaton) | 19,592 | 2,309 / 2,302 | baseline |
+| v2 | 11,472 | 1,533 / 1,513 | 1.517x [1.513-1.523] |
+| v3 (shlx) | 11,424 | 1,450 / 1,478 | 1.571x [1.558-1.582] |
+| v4 (v3's code) | 11,424 | 1,491 / 1,450 | 1.593x [1.579-1.624] |
+
+Both contenders that run the shlx code sit above v2 in both runs, intervals apart: v3 is kept.
+
 **2026-11-26: phase H step 4, HPACK's Huffman decoding at v2.** An HTTP/2 server decodes a header
 block on every request; the browser request's block (18 fields, 563 octets, 515 of them in
 Huffman strings) took 2.3 us at v1, 60% of it in the Huffman automaton: two dependent table loads

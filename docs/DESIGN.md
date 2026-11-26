@@ -689,7 +689,10 @@ HTTP/2, the drivers, the client):
      (its last symbol and its padding, without a search). Errors, padding and the room are v1's
      exactly: `tests/native/tiers` compares every tier on 233,032 decodes of valid and arbitrary
      Huffman strings against the guard page, with the room from none to plenty. The block
-     decodes 1.49x faster than at v1, and nghttp2 is now 2.2x slower than HttpAsm.
+     decodes 1.49x faster than at v1, and nghttp2 is now 2.2x slower than HttpAsm. At v3 the
+     same decoder (one macro, `H2_DECODER`) shifts its window with BMI2's `shlx`, which
+     touches no flags (`shl` by `cl` merges them, so each shift waited for the compare before
+     it): 3.5-5% faster than v2 in the same build, two runs agreeing (`tiers/hpack_decode`).
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's
