@@ -16,15 +16,19 @@
  *
  *   1. Allocation failures. This program defines malloc, calloc and realloc (they interpose on
  *      the C library's for the whole process, libhttpasm.so included) and counts the calls; the
- *      scenario runs once to count them, then once per allocation N in a child process where
- *      allocation N returns NULL. Every child must end by itself - the scenario succeeding, or
- *      an API call reporting the failure - never by a signal, and within 20 s. The calls are
- *      counted per thread role: the scenario's own thread (the server's create, start, stop and
- *      destroy, the client), and the others (the worker, the threads that answer deferred
- *      requests). Each role's allocations come in one order every run; a count shared by both
- *      raced (the worker accepts while the client still allocates), so the N-th allocation
- *      named a different site from run to run and some were never failed (the client's third,
- *      2026-11-26).
+ *      scenario runs to count them, then once per allocation in a child process where that
+ *      allocation returns NULL. Every child must end by itself - the scenario succeeding, or
+ *      an API call reporting the failure - never by a signal, and within 20 s. An allocation
+ *      is named so that it is the same one in every run: on the scenario's own thread (the
+ *      server's create, start, stop and destroy, the client), by its ordinal, as that thread
+ *      allocates in one order; on the others (the worker, the threads that answer deferred
+ *      requests), by the scenario's step (each connection is one), its call site (the return
+ *      address into the code that asked) and which call of that site it is. Ordinals over
+ *      threads that run at once named a different site from run to run, and some were never
+ *      failed: a count shared by both roles missed the client's third (the worker accepts while
+ *      the client allocates), and a count over the other threads missed the HTTP/2 answer's
+ *      copy (an earlier output grew in one step or two as the socket took the octets), both
+ *      2026-11-26. "faults sites" prints the steps' sites, with their calls over three runs.
  *   2. System-call failures, lasting. For each system call the server and the client make, a
  *      child installs a seccomp filter that fails every call of it with an errno (EMFILE,
  *      ENOMEM, ENOBUFS, ...), then runs the scenario; again it must end by itself.
@@ -53,6 +57,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <link.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -90,40 +95,242 @@ static _Atomic long allocations;     /* every allocation so far, both roles */
  * requests). A child inherits 1: fork copies only the calling thread, main's. */
 static _Thread_local int main_thread;
 
-/* Each role's allocations so far, and the one of them that fails (1-based; -1: none). The
- * main thread's count is touched by that thread alone; the others' by several, atomically. */
+/* The scenario's own thread: its allocations so far, and the one of them that fails (1-based;
+ * -1: none). Touched by that thread alone, and in one order every run, so an ordinal names
+ * one allocation. */
 static long main_allocations;
 static long main_fail_at = -1;
-static _Atomic long other_allocations;
-static long other_fail_at = -1;
 
-/* fails: counts an allocation under its thread's role; whether this one is to fail (errno is
- * then ENOMEM, as a real allocator's failure leaves it: glibc's pthread_create asserts that it
- * does). The others' count is atomic: the worker and an answering thread may allocate at once,
- * and a lost increment would make two allocations fail, or none. */
-static int fails(void)
+/* The other threads' allocations so far: the count's report only. Their order is no identity
+ * (an ordinal over them named a different allocation from run to run: the h2_send_out copy
+ * of the HTTP/2 window step came 80th, 81st or 82nd in the instrumented build, and the three
+ * children failing those met it in none of them, 2026-11-26); fails() keys them by step and
+ * call site instead (below). */
+static _Atomic long other_allocations;
+
+/* STEPS: the scenario steps the site tables have room for. The scenario takes 13: its
+ * server's create and start, its ten raw connections, the client's, its stop and destroy. */
+#define STEPS 16
+
+/* step: the scenario's step, moved on by its own thread alone (step_enter) and only once the
+ * server's threads are done with the step before: every step is one connection, and the next
+ * begins after it closed, by which time the worker allocates nothing more for it (it closed
+ * the socket last) and its answering thread, if any, has handed its answer over. step_names:
+ * each step's name, for the reports. */
+static _Atomic int step;
+static const char *step_names[STEPS];
+
+/* SITES: the call sites one step's table holds. A step's other threads allocate from about a
+ * dozen; a call no slot can take is not counted and the count run fails (sites_full). */
+#define SITES 48
+
+/* site: one call site of the other threads in one step: its return address (0: a free slot),
+ * set once by whichever thread meets it first, and how many calls came from it so far. */
+struct site {
+    _Atomic uintptr_t address;
+    _Atomic long calls;
+};
+static struct site sites[STEPS][SITES];
+static _Atomic int sites_full;
+
+/* The other threads' allocation that fails: call fail_call (1-based) from the call site
+ * fail_site, in step fail_step (-1: none). Set in a child before its scenario, read by the
+ * server's threads, which start after it. */
+static int fail_step = -1;
+static uintptr_t fail_site;
+static long fail_call;
+
+/* site_call: counts one call from the return address `address` in step s's table, and returns
+ * which call of that site this is (1-based), or 0 when the table is full. Lock-free: the worker
+ * and an answering thread allocate at once. A slot is claimed by compare-and-swap from 0, so
+ * two threads meeting one new site share one slot, and a thread whose claim lost to another
+ * site moves on to the next. Per site, calls come in one order whatever the threads' interleaving:
+ * the one thread that makes them makes them in its own order. */
+static long site_call(int s, uintptr_t address)
+{
+    for (int i = 0; i < SITES; i++) {
+        uintptr_t seen = atomic_load(&sites[s][i].address);
+        if (seen == 0) {
+            uintptr_t expected = 0;
+            if (atomic_compare_exchange_strong(&sites[s][i].address, &expected, address))
+                return atomic_fetch_add(&sites[s][i].calls, 1) + 1;
+            seen = expected;
+        }
+        if (seen == address)
+            return atomic_fetch_add(&sites[s][i].calls, 1) + 1;
+    }
+    atomic_store(&sites_full, 1);
+    return 0;
+}
+
+/* fails: counts an allocation under its thread's role, and says whether this one is to fail
+ * (errno is then ENOMEM, as a real allocator's failure leaves it: glibc's pthread_create
+ * asserts that it does). The scenario's thread fails its main_fail_at-th allocation; the
+ * others fail call fail_call from fail_site in step fail_step, which names one allocation in
+ * every run however the worker, the answering threads and the socket's pace interleave.
+ *   caller  the return address of the allocator's caller: its call site. */
+static int fails(const void *caller)
 {
     atomic_fetch_add(&allocations, 1);
-    long n = main_thread ? ++main_allocations : atomic_fetch_add(&other_allocations, 1) + 1;
-    if (n != (main_thread ? main_fail_at : other_fail_at))
-        return 0;
+    if (main_thread) {
+        if (++main_allocations != main_fail_at)
+            return 0;
+    } else {
+        atomic_fetch_add(&other_allocations, 1);
+        int s = atomic_load(&step);
+        long call = site_call(s, (uintptr_t)caller);
+        if (s != fail_step || (uintptr_t)caller != fail_site || call != fail_call)
+            return 0;
+    }
     errno = ENOMEM;
     return 1;
 }
 
+/* debug_alloc: 1 in the debug modes ("faults alloc-main N", "faults alloc-other STEP SITE
+ * CALL"), which print the code that made the failing allocation (failed_from). */
+static int debug_alloc;
+
+/* site_lookup: one dl_iterate_phdr walk's question and answer, for site_name (an address in,
+ * the object holding it out) and for site_address (an object's file name in, its load bias
+ * out). */
+struct site_lookup {
+    uintptr_t address;          /* site_name: the address asked about */
+    const char *name;           /* site_address: the file name asked about (no directory) */
+    size_t name_length;
+    const char *found;          /* the object's file name, without its directory */
+    uintptr_t bias;             /* its load bias: an address minus it is the object's own */
+};
+
+/* object_holding: dl_iterate_phdr's callback for site_name: whether this object's loaded
+ * segments hold lookup->address (1 ends the walk). Returns 1 when found, 0 to go on. */
+static int object_holding(struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void)size;
+    struct site_lookup *lookup = data;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        uintptr_t start = info->dlpi_addr + ph->p_vaddr;
+        if (ph->p_type == PT_LOAD && lookup->address >= start && lookup->address < start + ph->p_memsz) {
+            const char *slash = strrchr(info->dlpi_name, '/');
+            lookup->found = info->dlpi_name[0] == 0 ? "faults" : slash != NULL ? slash + 1 : info->dlpi_name;
+            lookup->bias = info->dlpi_addr;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* object_named: dl_iterate_phdr's callback for site_address: whether this object's file name
+ * (without its directory; the program itself is "faults") is lookup->name. Returns 1 when it
+ * is (its bias in lookup->bias), 0 to go on. */
+static int object_named(struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void)size;
+    struct site_lookup *lookup = data;
+    const char *slash = strrchr(info->dlpi_name, '/');
+    const char *name = info->dlpi_name[0] == 0 ? "faults" : slash != NULL ? slash + 1 : info->dlpi_name;
+    if (strlen(name) != lookup->name_length || memcmp(name, lookup->name, lookup->name_length) != 0)
+        return 0;
+    lookup->bias = info->dlpi_addr;
+    return 1;
+}
+
+/* site_name: writes a call site as OBJECT+OFFSET ("libhttpasm.so+0x1f2e"): its object's file
+ * name and the object's own address of it, the address `nm -n` and objdump print, so the
+ * function is found from it even where it is hidden (libhttpasm.so exports only its API).
+ * Allocation-free, so failed_from may call it inside the allocator: dl_iterate_phdr walks the
+ * loaded objects without allocating, and the text goes to the caller's buffer. */
+static void site_name(uintptr_t address, char *out, size_t size)
+{
+    struct site_lookup lookup = { .address = address };
+    if (dl_iterate_phdr(object_holding, &lookup) == 1)
+        snprintf(out, size, "%s+%#lx", lookup.found, (unsigned long)(address - lookup.bias));
+    else
+        snprintf(out, size, "%#lx", (unsigned long)address);
+}
+
+/* site_address: the address an OBJECT+OFFSET name stands for in this process (the inverse of
+ * site_name, for the debug mode's command line). Returns 0 when the text has no '+' or no
+ * loaded object has that name. */
+static uintptr_t site_address(const char *text)
+{
+    const char *plus = strchr(text, '+');
+    if (plus == NULL)
+        return 0;
+    struct site_lookup lookup = { .name = text, .name_length = (size_t)(plus - text) };
+    if (dl_iterate_phdr(object_named, &lookup) != 1)
+        return 0;
+    return lookup.bias + (uintptr_t)strtoul(plus + 1, NULL, 0);
+}
+
+/* failed_from: in the debug modes, prints the call site of the allocation that fails, as
+ * site_name writes it. Allocation-free (it runs inside the allocator): the line is formatted on
+ * the stack and written with write(2). */
+static void failed_from(const void *caller)
+{
+    if (!debug_alloc)
+        return;
+    char where[160];
+    char line[224];
+    site_name((uintptr_t)caller, where, sizeof where);
+    int n = snprintf(line, sizeof line, "faults: the failing allocation came from %s\n", where);
+    if (n > 0 && write(2, line, (size_t)n) < 0)
+        return;
+}
+
+/* The allocator's entry points, interposed on the C library's for the whole process (the
+ * executable's definitions come first in symbol lookup, libhttpasm.so's calls included). Each
+ * passes its caller's return address to fails(): the call site that keys the other threads'
+ * allocations. */
 void *malloc(size_t n)
 {
-    return fails() ? NULL : __libc_malloc(n);
+    if (!fails(__builtin_return_address(0)))
+        return __libc_malloc(n);
+    failed_from(__builtin_return_address(0));
+    return NULL;
 }
 
 void *calloc(size_t count, size_t n)
 {
-    return fails() ? NULL : __libc_calloc(count, n);
+    if (!fails(__builtin_return_address(0)))
+        return __libc_calloc(count, n);
+    failed_from(__builtin_return_address(0));
+    return NULL;
 }
 
 void *realloc(void *p, size_t n)
 {
-    return fails() ? NULL : __libc_realloc(p, n);
+    if (!fails(__builtin_return_address(0)))
+        return __libc_realloc(p, n);
+    failed_from(__builtin_return_address(0));
+    return NULL;
+}
+
+/* step_reset: empties the site tables and returns to step 0 (the server's create and start), at
+ * a scenario's start: a child inherits the count run's tables from the parent, and must count
+ * its own calls from zero. Only the scenario's thread is running then. */
+static void step_reset(void)
+{
+    for (int s = 0; s < STEPS; s++) {
+        for (int i = 0; i < SITES; i++) {
+            atomic_store(&sites[s][i].address, 0);
+            atomic_store(&sites[s][i].calls, 0);
+        }
+    }
+    step_names[0] = "the server's create and start";
+    atomic_store(&step, 0);
+}
+
+/* step_enter: the scenario moves on to its next step, `name`. Called by the scenario's thread
+ * only between connections (step), so no other thread is allocating for the step before. The
+ * last table takes any step past STEPS (never: the scenario has 13). */
+static void step_enter(const char *name)
+{
+    int s = atomic_load(&step) + 1;
+    if (s >= STEPS)
+        s = STEPS - 1;
+    step_names[s] = name;
+    atomic_store(&step, s);
 }
 
 /* ---- The scenario. */
@@ -411,6 +618,10 @@ static int scenario(void)
     o.workers = scenario_workers;
     o.flags = scenario_flags;
     o.bind_address = htonl(INADDR_LOOPBACK);
+    /* Each connection below is a step of its own (step_enter before it): the other threads'
+     * allocations are keyed by step and call site (fails), and exchange_raw returns only once
+     * the server closed the connection, so a step's allocations never spill into the next. */
+    step_reset();
     int error = 0;
     httpasm_server *s = httpasm_server_create(&o, &error);
     if (s == NULL)
@@ -421,16 +632,27 @@ static int scenario(void)
     }
     uint16_t port = httpasm_server_port(s);
     (void)httpasm_server_io(s);                     /* what the workers run on: MIXED under some failures */
+    step_enter("HTTP/1.1 GET /");
     exchange_raw(port, h1, sizeof h1 - 1);
+    step_enter("HTTP/1.1 GET /defer");
     exchange_raw(port, h1_defer, sizeof h1_defer - 1);
+    step_enter("HTTP/1.1 GET /defer-big");
     exchange_raw(port, h1_defer_big, sizeof h1_defer_big - 1);
+    step_enter("HTTP/1.1 two pipelined GET /big");
     exchange_raw(port, h1_pipelined, sizeof h1_pipelined - 1);
+    step_enter("HTTP/1.1 a Content-Length upload");
     exchange_raw(port, length_upload, length_upload_length);
+    step_enter("HTTP/1.1 a body past max_body");
     exchange_raw(port, too_large, too_large_length);
+    step_enter("HTTP/1.1 a chunked upload");
     exchange_raw(port, chunked_upload, chunked_upload_length);
+    step_enter("HTTP/2 GET /");
     exchange_raw(port, h2, sizeof h2 - 1);
+    step_enter("HTTP/2 /defer, a CONTINUATION, DATA and trailers");
     exchange_raw(port, h2_more, h2_more_length);
+    step_enter("HTTP/2 /large-head and /big past its window");
     exchange_raw(port, h2_window, h2_window_length);
+    step_enter("the client's requests");
     int result = 0;
     httpasm_client *c = httpasm_client_connect(htonl(INADDR_LOOPBACK), port, 3000, &error);
     if (c == NULL) {
@@ -443,6 +665,7 @@ static int scenario(void)
             result = 4;
         httpasm_client_close(c);
     }
+    step_enter("the server's stop and destroy");
     httpasm_server_stop(s);
     httpasm_server_destroy(s);
     return result;
@@ -999,75 +1222,228 @@ static void set_main_fail_index(long i)
     main_fail_at = main_allocations + i + 1;
 }
 
-/* set_other_fail_index: as set_main_fail_index, for the (i + 1)-th allocation of the other
- * threads (the worker, the answering threads). */
-static void set_other_fail_index(long i)
-{
-    other_fail_at = atomic_load(&other_allocations) + i + 1;
-}
-
 /* configure_nothing: the allocation runs need no state set before their fork. */
 static void configure_nothing(long i)
 {
     (void)i;
 }
 
-/* Each role's allocation runs, for the reports. */
+/* The scenario's own thread's allocation runs, for its reports. */
 static long main_allocation_count;
-static long other_allocation_count;
 
 /* report_main_allocation: prints failing allocation run i of the scenario's own thread, which
- * did not end by itself. */
+ * did not end by itself, with the command that repeats it in one process (for a debugger). */
 static void report_main_allocation(long i, const char *how)
 {
-    fprintf(stderr, "faults: allocation %ld of %ld on the scenario's thread failing: %s\n", i + 1, main_allocation_count, how);
+    fprintf(stderr, "faults: allocation %ld of %ld on the scenario's thread failing: %s; in one process: faults alloc-main %ld\n",
+            i + 1, main_allocation_count, how, i + 1);
 }
 
-/* report_other_allocation: as report_main_allocation, for the other threads. */
+/* COUNT_RUNS: the whole runs of the scenario whose other threads' sites make the sweep's plan,
+ * each site at the most calls it made in any of them: a site whose calls follow the socket's
+ * pace (an output grown once more when the peer happened to read later) shows its most in one
+ * of them more surely than in one run. */
+#define COUNT_RUNS 3
+
+/* SITE_MARGIN: the calls past each site's most that the sweep fails too: a pace no count run
+ * met may grow a buffer once or twice more. A child whose extra call never comes runs whole. */
+#define SITE_MARGIN 2
+
+/* seen_site: one call site of one step of the other threads over the count runs: the fewest
+ * and the most calls it made in a run, and in how many runs it was met. */
+struct seen_site {
+    int step;
+    uintptr_t site;
+    long least;
+    long most;
+    int runs;
+};
+
+/* SEEN: the step sites the count runs may meet in all (the scenario meets about 45). */
+#define SEEN 512
+static struct seen_site seen[SEEN];
+static long seen_count;
+
+/* merge_sites: adds one count run's tables (sites) to seen: a site met before takes the fewest
+ * and the most of its calls, a new one is appended. Returns 0, or -1 when a table or seen
+ * overflowed (raise SITES or SEEN: a site left out would never be failed). */
+static int merge_sites(void)
+{
+    int last = atomic_load(&step);
+    for (int s = 0; s <= last; s++) {
+        for (int i = 0; i < SITES; i++) {
+            uintptr_t address = atomic_load(&sites[s][i].address);
+            if (address == 0)
+                continue;
+            long calls = atomic_load(&sites[s][i].calls);
+            long k = 0;
+            while (k < seen_count && (seen[k].step != s || seen[k].site != address))
+                k++;
+            if (k == seen_count) {
+                if (seen_count == SEEN)
+                    return -1;
+                seen[seen_count++] = (struct seen_site){ s, address, calls, calls, 0 };
+            }
+            if (calls < seen[k].least)
+                seen[k].least = calls;
+            if (calls > seen[k].most)
+                seen[k].most = calls;
+            seen[k].runs++;
+        }
+    }
+    return atomic_load(&sites_full) ? -1 : 0;
+}
+
+/* count_runs: runs the scenario `runs` times in this process, merging each run's sites (seen).
+ * Returns 0; the first run's result when a run did not go whole (the plan needs whole runs);
+ * or -1 when the tables overflowed. The scenario's own thread's allocations of the first run
+ * go to *main_count (they come in one order every run). */
+static int count_runs(int runs, long *main_count)
+{
+    for (int run = 0; run < runs; run++) {
+        long main_before = main_allocations;
+        int r = scenario();
+        if (run == 0)
+            *main_count = main_allocations - main_before;
+        if (r != 0)
+            return r;
+        if (merge_sites() != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* planned_call: one child of the other threads' sweep: call `call` from `site` in `step` fails. */
+struct planned_call {
+    int step;
+    uintptr_t site;
+    long call;
+};
+
+/* PLANNED: the children the other threads' sweep has room for (the scenario needs about 180:
+ * its 90 calls and SITE_MARGIN past each of its 45 step sites). */
+#define PLANNED 2048
+static struct planned_call plan[PLANNED];
+static long planned;
+
+/* plan_other_calls: the other threads' sweep from seen: every call of every step site, up to
+ * its most plus SITE_MARGIN. Returns 0, or -1 when the plan overflowed (raise PLANNED). */
+static int plan_other_calls(void)
+{
+    planned = 0;
+    for (long k = 0; k < seen_count; k++) {
+        for (long call = 1; call <= seen[k].most + SITE_MARGIN; call++) {
+            if (planned == PLANNED)
+                return -1;
+            plan[planned++] = (struct planned_call){ seen[k].step, seen[k].site, call };
+        }
+    }
+    return 0;
+}
+
+/* set_other_fail_call: a failing allocation run's setup in the child: plan[i]'s call fails. The
+ * child's scenario counts its own calls from zero (step_reset), so the call is that run's. */
+static void set_other_fail_call(long i)
+{
+    fail_step = plan[i].step;
+    fail_site = plan[i].site;
+    fail_call = plan[i].call;
+}
+
+/* report_other_allocation: prints failing allocation run i of the other threads, which did not
+ * end by itself: its step, call and site, and the command that repeats it in one process. */
 static void report_other_allocation(long i, const char *how)
 {
-    fprintf(stderr, "faults: allocation %ld of %ld on the other threads failing: %s\n", i + 1, other_allocation_count, how);
+    char where[160];
+    site_name(plan[i].site, where, sizeof where);
+    fprintf(stderr, "faults: call %ld from %s on the other threads in step %d (%s) failing: %s; in one process: faults "
+            "alloc-other %d %s %ld\n", plan[i].call, where, plan[i].step, step_names[plan[i].step], how, plan[i].step, where,
+            plan[i].call);
+}
+
+/* print_sites: the count runs' step sites (seen), by step: each site as OBJECT+OFFSET with its
+ * fewest and most calls in a run (0 fewest: a run that never met it), for "faults sites". */
+static void print_sites(int runs)
+{
+    int last = atomic_load(&step);
+    for (int s = 0; s <= last; s++) {
+        printf("step %d: %s\n", s, step_names[s]);
+        for (long k = 0; k < seen_count; k++) {
+            if (seen[k].step != s)
+                continue;
+            char where[160];
+            site_name(seen[k].site, where, sizeof where);
+            long least = seen[k].runs < runs ? 0 : seen[k].least;
+            if (least == seen[k].most)
+                printf("  %s: %ld\n", where, seen[k].most);
+            else
+                printf("  %s: %ld to %ld\n", where, least, seen[k].most);
+        }
+    }
 }
 
 /* main: counts the scenario's allocations, fails each, then each system call for good, then
- * each call of each system call in turn, then exhausts the descriptors.
- * "faults alloc-main N" and "faults alloc-other N" run the scenario once in this process with
- * the N-th allocation of that role failing (no child): for a debugger, when a child ended by a
- * signal. */
+ * each call of each system call in turn, then exhausts the descriptors. Exit status: 0 when
+ * every child ended by itself and every check held, 1 otherwise.
+ * Debug modes, each in this one process (no child; for a debugger, or to see a site's code):
+ *   "faults alloc-main N"              the N-th allocation of the scenario's thread fails;
+ *   "faults alloc-other STEP SITE N"   call N from SITE (OBJECT+OFFSET) in step STEP fails,
+ *                                      as a failing child's report names it;
+ *   "faults sites"                     the count runs' step sites, with their calls. */
 int main(int argc, char **argv)
 {
     int failures = 0;
     char how[128];
     main_thread = 1;
     build_messages();
-    if (argc == 3 && (strcmp(argv[1], "alloc-main") == 0 || strcmp(argv[1], "alloc-other") == 0)) {
-        long n = atol(argv[2]);
-        if (argv[1][6] == 'm')
-            main_fail_at = n;
-        else
-            other_fail_at = n;
+    if (argc == 3 && strcmp(argv[1], "alloc-main") == 0) {
+        main_fail_at = main_allocations + atol(argv[2]);    /* from the scenario's start, as a child's */
+        debug_alloc = 1;
         int r = scenario();
-        printf("faults: the scenario with allocation %ld (%s) failing returned %d\n", n, argv[1], r);
+        printf("faults: the scenario with allocation %s of its own thread failing returned %d\n", argv[2], r);
         return 0;
     }
-    /* The count, in a child too: the parent's own allocations stay out of it. */
-    long before = allocations, main_before = main_allocations, other_before = atomic_load(&other_allocations);
-    int r = scenario();
-    long count = allocations - before;
-    long main_count = main_allocations - main_before, other_count = atomic_load(&other_allocations) - other_before;
-    printf("faults: the scenario runs whole (%d) with %ld allocations, %ld on its own thread and %ld on the others\n", r, count,
-           main_count, other_count);
-    if (r != 0)
+    if (argc == 5 && strcmp(argv[1], "alloc-other") == 0) {
+        fail_step = atoi(argv[2]);
+        fail_site = site_address(argv[3]);
+        fail_call = atol(argv[4]);
+        if (fail_site == 0) {
+            fprintf(stderr, "faults: no loaded object is named as in %s (OBJECT+OFFSET, as a report prints it)\n", argv[3]);
+            return 1;
+        }
+        debug_alloc = 1;
+        int r = scenario();
+        printf("faults: the scenario with call %s from %s in step %s failing returned %d\n", argv[4], argv[3], argv[2], r);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "sites") == 0) {
+        long main_count = 0;
+        int r = count_runs(COUNT_RUNS, &main_count);
+        print_sites(COUNT_RUNS);
+        printf("faults: %d runs (%d), %ld allocations each on the scenario's thread\n", COUNT_RUNS, r, main_count);
+        return r == 0 ? 0 : 1;
+    }
+    /* The count: COUNT_RUNS whole runs in this process (the parent's own allocations before and
+     * after stay out of them). */
+    long before = allocations, other_before = atomic_load(&other_allocations);
+    long main_count = 0;
+    int r = count_runs(COUNT_RUNS, &main_count);
+    long other_count = (atomic_load(&other_allocations) - other_before) / COUNT_RUNS;
+    printf("faults: the scenario runs whole (%d) %d times with %ld allocations each, %ld on its own thread and about %ld on the "
+           "others, from %ld call sites of %d steps\n", r, COUNT_RUNS, (allocations - before) / COUNT_RUNS, main_count, other_count,
+           seen_count, atomic_load(&step) + 1);
+    if (r != 0 || plan_other_calls() != 0) {
+        if (r == -1 || r == 0)
+            fprintf(stderr, "faults: the site tables overflowed (SITES %d, SEEN %d, PLANNED %d): sites would go unfailed\n", SITES,
+                    SEEN, PLANNED);
         return 1;
-    /* A margin past each count: the scenario's own thread allocates in one order every run (two
-     * more is plenty); the others' count can move by a few (a thread made or not, a buffer
-     * grown in one step or two as the socket happens to take the octets): eight more. */
+    }
+    /* The scenario's own thread allocates in one order every run: two past its count is plenty. */
     main_allocation_count = main_count + 2;
-    other_allocation_count = other_count + 8;
     failures += run_parallel(main_allocation_count, configure_nothing, set_main_fail_index, report_main_allocation);
-    failures += run_parallel(other_allocation_count, configure_nothing, set_other_fail_index, report_other_allocation);
-    printf("faults: each of %ld allocations of the scenario's thread and %ld of the others failed in turn: %d children did not "
-           "end by themselves\n", main_allocation_count, other_allocation_count, failures);
+    failures += run_parallel(planned, configure_nothing, set_other_fail_call, report_other_allocation);
+    printf("faults: each of %ld allocations of the scenario's thread failed in turn, and each of %ld calls from the others' "
+           "%ld step sites: %d children did not end by themselves\n", main_allocation_count, planned, seen_count, failures);
 
     static const struct { int nr; int err; const char *name; } calls[] = {
         { SYS_socket, EMFILE, "socket EMFILE" },         { SYS_bind, EADDRINUSE, "bind EADDRINUSE" },

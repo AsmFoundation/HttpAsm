@@ -1094,6 +1094,63 @@ public sealed class ServerTests
         Assert.Equal(-22, server.Start());  // already running
     }
 
+    /// <summary>
+    /// A stop that reaches a busy worker with an idle connection's next request queued right
+    /// behind it: the two wait in one batch of events, the stop's wake first. The stop closes
+    /// the idle connection, between requests as it closes them (nothing of the new request had
+    /// been read), and the event that request raised, later in the same batch, is skipped: the
+    /// connection is closed and only waits for the batch's end to be freed, so acting on the
+    /// event would read and answer on a connection that is gone. The held request is answered,
+    /// the stop returns, and the server starts again.
+    /// </summary>
+    /// <remarks>
+    /// The order is the kernel's: epoll reports descriptors in the order they became ready,
+    /// and the worker, held in the handler, waits on nothing meanwhile. So the wake that
+    /// <see cref="TestServer.Stop"/> writes at once comes before the request sent 100 ms later.
+    /// One worker, so the held handler holds the idle connection's worker. On io_uring the same
+    /// story runs through the ring's completions (a closed connection's poll completion is
+    /// counted off, not acted on), and the test holds there too.
+    /// </remarks>
+    /// <returns>The test.</returns>
+    [Fact]
+    public async Task SkipsTheEventOfAConnectionTheStopClosedInTheSameWake()
+    {
+        Platform.RequireLinuxX64();
+        var ct = TestContext.Current.CancellationToken;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var server = new TestServer(x =>
+        {
+            if (x.Target == "/hold")
+            {
+                entered.Set();
+                _ = release.Wait(10000, ct);   // the worker itself waits: what comes meanwhile queues
+            }
+
+            x.Respond(200, x.Target);
+        }, workers: 1);
+        using var idle = new RawConnection(server.Port);
+        idle.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("/", idle.ReadResponse().Text);
+        using var holding = new RawConnection(server.Port);
+        holding.Send("GET /hold HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.True(entered.Wait(5000, ct));
+
+        Task stop = Task.Run(server.Stop, ct);
+        await Task.Delay(100, ct);                  // the stop's wake is written (then it joins the worker)
+        idle.Send("GET /late HTTP/1.1\r\nHost: t\r\n\r\n");
+        await Task.Delay(100, ct);                  // the request is in the socket, ready behind the wake
+        release.Set();
+
+        Assert.Equal("/hold", holding.ReadResponse().Text);
+        Assert.True(idle.ServerClosed());           // closed by the stop: its request never read nor answered
+        await stop.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        Assert.Equal(0, server.Start());
+        using var again = new RawConnection(server.Port);
+        again.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
+        Assert.Equal("/", again.ReadResponse().Text);
+    }
+
     /// <summary>A thousand requests from many connections at once, on four workers, are all answered right.</summary>
     /// <returns>The test.</returns>
     [Fact]

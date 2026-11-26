@@ -363,7 +363,10 @@ HTTP/2, the drivers, the client):
        4,022 markers; blocks 91.8%, branch edges 79.5%, no dead code; 678 markers not run, the
        work list of step 3. It found code no test reached, such as the default worker count,
        which every test sets explicitly. `semantics/tables.asm` is data only and cannot be
-       preprocessed alone (an `%if` over symbols), so it is listed as not instrumented.
+       preprocessed alone (an `%if` over symbols), so it is listed as not instrumented. A
+       source the build cannot mark is assembled as it is, and the gate fails when its object
+       holds instructions (`instrument.cs` counts them): `client.asm` once dropped out of
+       sight that way, silently, through one `%if` over `equ` symbols.
    - **coverage-guided fuzzing** of every parser and state machine (HTTP/1.1 requests and
      responses, chunked bodies, HPACK, HTTP/2 frames and connections). Built 2026-11-26
      (`tests/fuzz/`), starting with HTTP/1.1 requests:
@@ -591,7 +594,33 @@ HTTP/2, the drivers, the client):
        `chunked X: X` taken as chunked). The published sets alone would not have caught it.
        PortSwigger's 12 HTTP/2 permutations (CR LF in values, names with spaces, stuffed
        pseudo-fields, `h2CL`) are each refused before any handler sees them.
-   - **Still to do:** `unreachable.tsv` and the coverage gate in CI.
+   - **The coverage gate** (2026-11-26) is on in CI: every marker runs under the tests or is
+     listed in `tests/coverage/unreachable.tsv` with its reason, and no listed marker runs.
+     A reason is a proof (`unreachable:`), a named condition no test provokes yet (`rare:`),
+     or an exemption from going stale: a race (`race:`, between threads or between the worker
+     and the kernel's completions) or a kernel's behavior (`kernel:`, since the gate runs on
+     WSL's 5.15 and on CI's runner kernel). The walk read every unrun marker, from 678 at the
+     first measurement, and gave each a test or its entry. Reading why a branch never ran was
+     a bug detector of its own; it found and fixed:
+     - a remote heap overflow in the server's trailers, an out-of-bounds read in the client's
+       trailers, and an allocation sized by an untrusted Content-Length;
+     - a worker at 100% CPU, on both backends, for a client that half-closed and read nothing
+       while its answer waited for the socket (epoll's EPOLLRDHUP asked for while output
+       waited; io_uring's polls report POLLRDHUP to a poll for room on kernels before upstream
+       74c1f1048e44, so a writer's poll is multishot now);
+     - a stuck HTTP/2 stream's 408 or reset left unsent until the connection's next activity
+       (the expiry now flushes what the sweep answered), the client writing a request into a
+       CONNECT tunnel, a connect timeout reported as EINPROGRESS, and a server that could not
+       answer during the epoch's first second;
+     - tests whose comments claimed paths they never reached (each made to reach it, or its
+       claim corrected).
+     Fault injection became deterministic on the way (`tests/native/faults`). On the
+     scenario's own thread, an allocation is named by its ordinal. On the worker and the
+     answering threads, it is named by the scenario's step (one connection each), its call
+     site and which call of that site it is: an ordinal over threads that run at once named a
+     different allocation from run to run, and the HTTP/2 answer's copy went unfailed in one
+     coverage run. Every system call's k-th call fails through a seccomp supervisor. Three
+     floods joined the corpus, each ending at a glitch site of its own.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,
    chunk-size parsing, HPACK's Huffman code and integers, frame headers, and response writing.

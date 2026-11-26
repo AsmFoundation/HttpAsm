@@ -27,8 +27,10 @@
 #      different times): RingBudgetTests asks the kernel and checks the library follows it,
 #      and tests/native/fallback refuses io_uring with seccomp, deterministically.
 #   4. tests/coverage/run.sh: the Coverage build (every block and branch edge marked by
-#      tests/coverage/instrument.cs), the same runs as step 3 against it, and the report - for
-#      now report-only, until tests/coverage/unreachable.tsv and the tests make the gate pass.
+#      tests/coverage/instrument.cs), the same runs as step 3 against it, the report, and the
+#      gate: every marker of libhttpasm.so runs under the tests or is listed, with its reason,
+#      in tests/coverage/unreachable.tsv, and no listed one runs (bar the races and the
+#      kernel-dependent ones, which may run or not); code the build could not mark fails it.
 #   5. tests/fuzz/run.sh: each fuzzer for 30 s with libFuzzer, AddressSanitizer and
 #      UndefinedBehaviorSanitizer, steered by the assembly's own branch edges. A finding fails
 #      the run and is printed in base64, so the log alone reproduces it.
@@ -97,19 +99,20 @@ jobs:
           HTTPASM_RUNNER: native
         run: bash tests/run-linux.sh Release
 
-      - name: Coverage - every block and branch edge of libhttpasm.so under every test (report only, to the job summary)
+      - name: Coverage - every block and branch edge of libhttpasm.so under every test, or listed with its reason (the gate; the report to the job summary)
         env:
           HTTPASM_RUNNER: native
         # The runs' output goes to coverage.md with the report, so a failure prints what failed
-        # (xunit's [FAIL] blocks, and the end of the file) before the step ends: without it, a
-        # failing run in the Coverage build showed nothing but its exit status.
+        # (xunit's [FAIL] blocks, and the end of the file: the markers that did not run, the
+        # gate's line and any stale entry) before the step ends: without it, a failing run in
+        # the Coverage build showed nothing but its exit status.
         run: |
           status=0
-          bash tests/coverage/run.sh --report-only > coverage.md || status=$?
+          bash tests/coverage/run.sh > coverage.md || status=$?
           if [ "$status" -ne 0 ]; then
-            echo "::error::the coverage run failed with $status"
+            echo "::error::the coverage run or its gate failed with $status"
             grep -n -E '\[FAIL\]' -A 25 coverage.md | head -300 || true
-            tail -60 coverage.md
+            tail -120 coverage.md
             exit "$status"
           fi
           { echo "### Coverage of libhttpasm.so"; echo; sed -n '/^Coverage of/,/^Not run/p' coverage.md | sed '$d'; tail -1 coverage.md; } >> "$GITHUB_STEP_SUMMARY"

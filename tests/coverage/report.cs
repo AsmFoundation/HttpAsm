@@ -14,11 +14,17 @@
 // Writes a summary per source file, then every marker that did not run, to stdout (Markdown).
 //
 // The gate fails (exit 1) on a marker that did not run and is not listed, and on a listed one
-// that did run (the list must not go stale); --report-only prints without failing. One kind of
-// entry is exempt from the second rule: a reason that starts with "race:" names a branch only a
-// race between threads takes (two answers claiming one exchange at once, a push meeting
-// another). No test can force such a race, and none can rule it out either, so the entry may
-// run or not in any one run; it must still match a marker of the build.
+// that did run (the list must not go stale); --report-only prints without failing. Two kinds of
+// entry are exempt from the second rule, and may run or not in any one run (they must still
+// match markers of the build):
+//   - "race:" names a branch only a race takes, between threads (two answers claiming one
+//     exchange at once, a push meeting another) or between the worker and the kernel's
+//     completions: no test can force it, and none can rule it out;
+//   - "kernel:" names a branch whose reach depends on the kernel the tests run on (a
+//     behavior a kernel release changed: io_uring reporting POLLRDHUP to a poll for room
+//     before 2026-10-29). The gate runs on WSL's 5.15 here and on CI's runner kernel there,
+//     and an entry that is right for one must not fail the other.
+// A key's markers alike are one multiset entry, so all of a key's lines must be exempt, or none.
 // The gate also fails on a source the build assembled without markers when its object holds
 // instructions (instrument.cs records how many octets): that code would be invisible to every
 // rule above. A source of tables only is listed and passes.
@@ -171,8 +177,8 @@ internal static partial class Coverage
         }
         var notRunKeys = notRun.GroupBy(m => m.Key).ToDictionary(g => g.Key, g => g.Count());
         var unlisted = notRunKeys.Where(p => p.Value > listed.GetValueOrDefault(p.Key)).ToList();
-        // A race's entry may have run this time (it is not stale for that), but it must still
-        // name markers the build has: one that no longer exists at all is stale like any other.
+        // An exempt entry (race:, kernel:) may have run this time (it is not stale for that), but
+        // it must still name markers the build has: one that no longer exists is stale like any.
         var allKeys = maps.Values.SelectMany(m => m.Markers).GroupBy(m => m.Key).ToDictionary(g => g.Key, g => g.Count());
         var stale = listed.Where(p => races.Contains(p.Key)
             ? p.Value > allKeys.GetValueOrDefault(p.Key)
@@ -183,6 +189,13 @@ internal static partial class Coverage
         int hidden = Uninstrumented.Count(u => u.Code > 0);
         Console.WriteLine();
         Console.WriteLine($"Gate: {notRun.Count} markers did not run; {unlisted.Sum(p => p.Value - listed.GetValueOrDefault(p.Key))} of them are not in tests/coverage/unreachable.tsv; {stale.Count} listed entries ran or no longer exist; {hidden} sources with code are not instrumented.");
+        // Each failing key by name, under the gate's line: the end of a CI log is all a failure
+        // shows, and the "Not run" list above mixes the listed markers with the rest.
+        foreach (var (key, count) in unlisted)
+        {
+            Console.WriteLine($"- unlisted: {key.Replace('\t', ' ')} ({count - listed.GetValueOrDefault(key)} more than listed)");
+        }
+
         foreach (var (key, _) in stale)
         {
             Console.WriteLine($"- stale: {key.Replace('\t', ' ')}");
@@ -358,13 +371,13 @@ internal static partial class Coverage
 
     /// <summary>
     /// Reads unreachable.tsv as a multiset of marker keys (a missing file is empty), and the
-    /// keys whose reason names a race ("race: ..."), which the gate does not hold to staying
-    /// unrun.
+    /// keys whose reason makes them exempt from staying unrun: a race ("race: ...") or a
+    /// kernel's behavior ("kernel: ..."), which may run or not in a given run.
     /// </summary>
     /// <param name="path">The file.</param>
-    /// <returns>Each key and how many markers it covers; and the race keys.</returns>
+    /// <returns>Each key and how many markers it covers; and the exempt keys.</returns>
     /// <exception cref="InvalidDataException">A line without its five fields, a reason left
-    /// "TODO", or one key listed both as a race and not.</exception>
+    /// "TODO", or one key listed both as exempt and not.</exception>
     private static (Dictionary<string, int> Listed, HashSet<string> Races) ReadList(string path)
     {
         var listed = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -390,15 +403,16 @@ internal static partial class Coverage
 
             string key = string.Join('\t', f[..4]);
             listed[key] = listed.GetValueOrDefault(key) + 1;
-            (f[4].StartsWith("race:", StringComparison.Ordinal) ? races : plain).Add(key);
+            bool exempt = f[4].StartsWith("race:", StringComparison.Ordinal) || f[4].StartsWith("kernel:", StringComparison.Ordinal);
+            (exempt ? races : plain).Add(key);
         }
 
-        // Markers alike in their key are one multiset entry: a race's exemption covers all of
-        // them, so the same key may not also be listed as plainly unreachable.
+        // Markers alike in their key are one multiset entry: an exemption covers all of them,
+        // so the same key may not also be listed as plainly unreachable (or rare).
         string? both = races.FirstOrDefault(plain.Contains);
         if (both is not null)
         {
-            throw new InvalidDataException($"{path}: listed both as a race and not: {both.Replace('\t', ' ')}");
+            throw new InvalidDataException($"{path}: listed both as exempt (race:, kernel:) and not: {both.Replace('\t', ' ')}");
         }
 
         return (listed, races);
