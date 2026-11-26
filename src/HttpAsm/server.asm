@@ -226,6 +226,7 @@ worker_open:
     mov     r12, [rbx + worker.server]
     mov     dword [rbx + worker.stopping], 0
     mov     qword [rbx + worker.stop_deadline], 0
+    mov     qword [rbx + worker.accept_resume], 0   ; a new listener is watched from the start
     ; io_uring only when the options ask for it; a kernel without it (or a seccomp profile
     ; refusing it, or a user past RLIMIT_MEMLOCK where the kernel charges rings to it) leaves
     ; the worker on epoll,
@@ -712,7 +713,74 @@ httpasm_server_destroy:
 .end:
 
 ; -----------------------------------------------------------------------------
+; pause_accept: the listener rests for HA_ACCEPT_PAUSE_MS: accept4 ran out of descriptors or
+; memory (EMFILE, ENFILE, ENOBUFS, ENOMEM). The connection it could not take stays in the
+; backlog, so the listener stays readable: watched again at once (epoll's level-triggered
+; interest, or io_uring's poll, level-checked when armed), it would wake the worker again
+; and again, a core at full CPU for as long as the descriptors stay exhausted. It is watched
+; again (resume_accept) once the pause is over, and the backlog is taken then. nginx does the
+; same (it rests 500 ms).
+;   epoll: the listener's interest becomes 0 (EPOLL_CTL_MOD; a listening socket reports no
+;   error or hang-up). io_uring: its poll is simply not armed again (worker_main's listener
+;   completion checks worker.accept_resume).
+;   In: rbx = worker (its now_ms current). Clobbers rax, rcx, rdx, rsi, rdi, r8-r11.
+; -----------------------------------------------------------------------------
+align 16
+pause_accept:
+    mov     rax, [rbx + worker.now_ms]
+    add     rax, HA_ACCEPT_PAUSE_MS
+    mov     [rbx + worker.accept_resume], rax
+    cmp     dword [rbx + worker.uring], 0
+    jne     .out
+    sub     rsp, 24                         ; an epoll_event (no call is made: alignment moot)
+    mov     dword [rsp], 0
+    mov     qword [rsp + 4], HA_TAG_LISTENER
+    mov     edi, [rbx + worker.epfd]
+    mov     esi, EPOLL_CTL_MOD
+    mov     edx, [rbx + worker.listen_fd]
+    mov     r10, rsp
+    mov     eax, SYS_epoll_ctl
+    syscall
+    add     rsp, 24
+.out:
+    ret
+
+; -----------------------------------------------------------------------------
+; resume_accept: a resting listener (pause_accept) is watched again: epoll's interest is EPOLLIN
+; again, or io_uring's poll is armed. The backlog that waited is reported at once (a level
+; check), and accept_all takes it; if descriptors are still short, it rests again. A listener
+; closed meanwhile (a stop) is not watched: only the pause ends.
+;   In: rbx = worker. Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
+; -----------------------------------------------------------------------------
+align 16
+resume_accept:
+    sub     rsp, 24                         ; an epoll_event; rsp aligned for the call below
+    mov     qword [rbx + worker.accept_resume], 0
+    cmp     dword [rbx + worker.listen_fd], 0
+    jl      .out
+    cmp     dword [rbx + worker.uring], 0
+    jne     .ring
+    mov     dword [rsp], EPOLLIN
+    mov     qword [rsp + 4], HA_TAG_LISTENER
+    mov     edi, [rbx + worker.epfd]
+    mov     esi, EPOLL_CTL_MOD
+    mov     edx, [rbx + worker.listen_fd]
+    mov     r10, rsp
+    mov     eax, SYS_epoll_ctl
+    syscall
+    jmp     .out
+.ring:
+    mov     rdi, rbx
+    mov     esi, [rbx + worker.listen_fd]
+    mov     edx, HA_TAG_LISTENER
+    call    ha_uring_poll
+.out:
+    add     rsp, 24
+    ret
+
+; -----------------------------------------------------------------------------
 ; accept_all: accepts every pending connection (a new connection per accept4 until EAGAIN).
+; When accept4 runs out of descriptors or memory, the listener rests (pause_accept).
 ;   In: rbx = worker, r12 = server. Keeps rbx, rbp, r12-r15 (r13, r14 saved here). Clobbers
 ;   the caller-saved registers.
 ; -----------------------------------------------------------------------------
@@ -731,7 +799,7 @@ accept_all:
     cmp     rax, -EINTR
     je      .next
     test    eax, eax
-    js      .done                           ; EAGAIN: no more; EMFILE and the like: try on the next wake
+    js      .failed
     mov     r13d, eax                       ; the descriptor
     cmp     dword [rbx + worker.stopping], 0
     jne     .refuse
@@ -808,6 +876,21 @@ accept_all:
     mov     eax, SYS_close
     syscall
     jmp     .next
+.failed:
+    ; EAGAIN: no more. A failure of one connection's own (ECONNABORTED, and the network errors
+    ; accept4 passes on) used that connection up: if more wait, the listener is still readable
+    ; and the next wait reports it. Out of descriptors or memory, the connection stays queued
+    ; and nothing changes until a descriptor frees: the listener rests (pause_accept).
+    cmp     eax, -EMFILE
+    je      .pause
+    cmp     eax, -ENFILE
+    je      .pause
+    cmp     eax, -ENOBUFS
+    je      .pause
+    cmp     eax, -ENOMEM
+    jne     .done
+.pause:
+    call    pause_accept
 .done:
     add     rsp, 24
     pop     r14
@@ -1128,7 +1211,8 @@ worker_main:
     call    ha_uring_poll
 
 .wait:
-    ; The timeout: the earliest deadline, or none at all; while stopping, the grace's end too.
+    ; The timeout: the earliest deadline, or none at all; a resting listener's return
+    ; (pause_accept); while stopping, the grace's end too.
     mov     rdx, -1
     mov     rax, [rbx + worker.lru_head]
     test    rax, rax
@@ -1138,6 +1222,20 @@ worker_main:
     jns     .no_deadline
     xor     edx, edx
 .no_deadline:
+    mov     rax, [rbx + worker.accept_resume]
+    test    rax, rax
+    jz      .accepting
+    sub     rax, [rbx + worker.now_ms]
+    jns     .pause_left
+    xor     eax, eax
+.pause_left:
+    cmp     rdx, -1
+    je      .take_pause
+    cmp     rax, rdx
+    jae     .accepting
+.take_pause:
+    mov     rdx, rax
+.accepting:
     cmp     dword [rbx + worker.stopping], 0
     je      .timeout_set
     mov     rax, [rbx + worker.stop_deadline]
@@ -1262,6 +1360,8 @@ worker_main:
     call    accept_all
     cmp     dword [rbx + worker.listen_fd], 0
     jl      .completion                     ; closed meanwhile: nothing to arm
+    cmp     qword [rbx + worker.accept_resume], 0
+    jne     .completion                     ; resting (pause_accept): resume_accept arms it
     mov     rdi, rbx
     mov     esi, [rbx + worker.listen_fd]
     mov     edx, HA_TAG_LISTENER
@@ -1290,6 +1390,14 @@ worker_main:
     call    begin_stop
 
 .events_done:
+    ; A resting listener (pause_accept) whose pause is over is watched again; its backlog is
+    ; reported by the next wait.
+    mov     rax, [rbx + worker.accept_resume]
+    test    rax, rax
+    jz      .expire
+    cmp     rax, [rbx + worker.now_ms]
+    ja      .expire
+    call    resume_accept
     ; Deadlines: close what timed out. A deferred exchange is the handler's to finish; its
     ; connection waits another timeout.
 .expire:

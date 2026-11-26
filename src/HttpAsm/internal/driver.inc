@@ -60,6 +60,9 @@ EAGAIN              equ 11
 EINTR               equ 4
 EINVAL              equ 22
 ENOMEM              equ 12
+ENFILE              equ 23      ; the system's descriptor table is full
+EMFILE              equ 24      ; this process's descriptor limit (RLIMIT_NOFILE) is reached
+ENOBUFS             equ 105
 CLOCK_REALTIME_COARSE  equ 5
 CLOCK_MONOTONIC_COARSE equ 6
 
@@ -72,6 +75,9 @@ HA_DEFAULT_IDLE_MS  equ 60000       ; idle and request-head timeout
 HA_LINGER_MS        equ 2000        ; after a closing response: read and discard this long, then close
 HA_STOP_GRACE_MS    equ 5000        ; httpasm_server_stop waits this long for in-flight exchanges
 HA_LISTEN_BACKLOG   equ 4096
+HA_ACCEPT_PAUSE_MS  equ 100         ; accept4 out of descriptors or memory: the listener rests this
+                                    ; long (the connection waits in the backlog), instead of a
+                                    ; worker spinning on a listener that stays readable
 
 ; epoll_event is packed on x86-64: a u32 of events and a u64 of data, 12 octets.
 EPOLL_EVENT_SIZE    equ 12
@@ -260,6 +266,8 @@ struc worker
     .ring_map_size:     resq 1
     .sqes_size:         resq 1
     .pending:           resq 1  ; connections with work for the next submission (conn.u_next)
+    .accept_resume:     resq 1  ; monotonic ms when a resting listener is watched again (accept4
+                                ; ran out of descriptors or memory: pause_accept); 0: watched
     .date:              resb 32 ; IMF-fixdate, 29 octets
     .events:            resb HA_EVENTS * EPOLL_EVENT_SIZE
     .pad:               resd 1

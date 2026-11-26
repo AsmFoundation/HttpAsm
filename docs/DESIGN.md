@@ -485,8 +485,26 @@ HTTP/2, the drivers, the client):
      On the first run, 49 children ended by themselves. 23 of them saw the failure reported by
      an API (create, start, the client's connect or send), and 26 finished whole. None crashed
      or hung.
+   - **Descriptor exhaustion:** when `accept4` failed with EMFILE (or ENFILE, ENOBUFS, ENOMEM),
+     the worker returned to its wait. The connection it could not take stayed in the backlog,
+     so the listener stayed readable, and both backends woke the worker again at once: a core
+     at full CPU for as long as descriptors stayed short. The listener now rests 100 ms
+     (`pause_accept`; nginx rests 500 ms), then takes the backlog. `tests/native/faults` checks
+     it two ways. Every child must stay under 1.5 s of CPU: the one whose `accept4` always
+     fails used 9.95 s before the fix and 0.01 s after. A server whose process may open only 4
+     more descriptors gets 12 connections from another process, on each backend: it used
+     1,088 ms of CPU in the second that followed before the fix and about 1 ms after. Once
+     descriptors free, it answers the request that waited in the backlog.
+   - **The attack corpora,** under way:
+     - **HPACK bomb** (RFC 7541 7.3): past its output's limits, the decoder still copied every
+       field it could fit, so each 1-octet reference to a 600-octet dynamic entry copied the
+       entry again. Once the output is full it now writes nothing and only measures, at a
+       constant cost per octet (`HpackTests.WritesNothingOnceTheOutputIsFull`: a canary
+       after the records survives every kind of field; the old decoder overwrote it).
    - **Still to do:**
-     - the published attack corpora;
+     - the rest of the published attack corpora: the HTTP/2 floods (CVE-2019-9511 to 9518,
+       and CVE-2025-8671's server-provoked resets), slowloris and slow reads on both versions,
+       and request-smuggling mutations;
      - then `unreachable.tsv` and the gate in CI.
 4. *Acceleration:* SSE4.2, AVX2 and AVX-512 versions of the hot paths. These are line and
    field scanning, token and value validation, header-name lookup and case folding,
