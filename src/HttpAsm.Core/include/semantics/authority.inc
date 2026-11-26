@@ -15,15 +15,16 @@
 
 ; -----------------------------------------------------------------------------
 ; HA_URI_HOST cursor, end, class, hex, t64, t32, t8, u64, u32, fail
-;   Checks [cursor, end) as uri-host [ ":" port ]: an IP-literal ("[", an IPv6address's octets
-;   - HEXDIG, ":" and "." - with two colons at least, or an IPvFuture: "v" 1*HEXDIG "." then
-;   unreserved, sub-delims and ":"; then "]"), or a reg-name / IPv4address (request-target
-;   octets but ":", "/", "?", "@", "[" and "]", each "%" followed by two HEXDIG); then nothing,
-;   or ":" and *DIGIT. The IPv6 address's own structure (eight groups, one "::") is not checked
-;   yet: docs/DESIGN.md, phase H step 3. An empty range passes: whether an empty authority
-;   is allowed is the caller's rule (HTTP/1.1's Host may be empty, :authority may not). userinfo
-;   ("@") never passes: it hides the real authority behind a lookalike (RFC9110-4.2.4-4).
-;   Falls through when the range is valid; jumps to fail otherwise.
+;   Checks [cursor, end) as uri-host [ ":" port ]: an IP-literal ("[", then an IPv6address
+;   checked whole by ha_ipv6_literal - eight pieces, or seven at most with one "::", an IPv4
+;   tail last whose dec-octets are 255 at most without a leading zero, no zone identifier - or
+;   an IPvFuture: "v" 1*HEXDIG "." then unreserved, sub-delims and ":"; then "]"), or a
+;   reg-name / IPv4address (request-target octets but ":", "/", "?", "@", "[" and "]", each "%"
+;   followed by two HEXDIG); then nothing, or ":" and *DIGIT. An empty range passes: whether
+;   an empty authority is allowed is the caller's rule (HTTP/1.1's Host may be empty,
+;   :authority may not). userinfo ("@") never passes: it hides the real authority behind a
+;   lookalike (RFC9110-4.2.4-4). Falls through when the range is valid; jumps to fail
+;   otherwise.
 ;
 ;   cursor     a 64-bit register: the first octet; advanced (clobbered).
 ;   end        a 64-bit register: one past the last octet; unchanged.
@@ -31,7 +32,9 @@
 ;   hex        a 64-bit register holding ha_hex_value's address; unchanged.
 ;   t64, t32, t8   one scratch register, as its 64-, 32- and 8-bit names (rax, eax, al).
 ;   u64, u32   another scratch register, as its 64- and 32-bit names (rcx, ecx).
-;   Flags are clobbered. Reads [cursor, end) only.
+;   Flags are clobbered. Reads [cursor, end) only. The IPv6 branch pushes 24 bytes (the range
+;   and a return address) below rsp, so an expansion site must own the stack under rsp: every
+;   site does, since the core keeps nothing in a red zone. Neither register may be rsp.
 ; -----------------------------------------------------------------------------
 %macro HA_URI_HOST 10
     cmp     %1, %2

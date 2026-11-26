@@ -44,8 +44,14 @@ internal static class Coverage
     /// <param name="Text">The labels or the jump it stands for.</param>
     private sealed record Marker(int Id, string Kind, string File, int Line, string Scope, string Text)
     {
-        /// <summary>The identity unreachable.tsv lists a marker by: everything but its id.</summary>
-        public string Key => $"{File}\t{Line}\t{Kind}\t{Scope}\t{Text}";
+        /// <summary>
+        /// The identity unreachable.tsv lists a marker by: its file, kind, scope and text, but
+        /// neither its id nor its line. With the line in it, every edit that moved code down a
+        /// file staled every entry below it, and a gate in CI would have failed on edits that
+        /// changed nothing it guards. Markers alike in all four (two "jz .out" of one function,
+        /// one macro expanded twice there) are a multiset: listed once per marker.
+        /// </summary>
+        public string Key => $"{File}\t{Kind}\t{Scope}\t{Text}";
     }
 
     /// <summary>One object's map, and which of its markers ran.</summary>
@@ -292,7 +298,7 @@ internal static class Coverage
     /// <param name="markers">The markers.</param>
     private static void WriteList(string path, List<Marker> markers)
     {
-        var text = new StringBuilder("# file\tline\tkind\tscope\ttext\treason\n");
+        var text = new StringBuilder("# file\tkind\tscope\ttext\treason\n");
         foreach (var m in markers.OrderBy(m => m.File, StringComparer.Ordinal).ThenBy(m => m.Line))
         {
             text.Append(m.Key).Append("\tTODO\n");
@@ -304,7 +310,7 @@ internal static class Coverage
     /// <summary>Reads unreachable.tsv as a multiset of marker keys (a missing file is empty).</summary>
     /// <param name="path">The file.</param>
     /// <returns>Each key and how many markers it covers.</returns>
-    /// <exception cref="InvalidDataException">A line without its six fields, or a reason left "TODO".</exception>
+    /// <exception cref="InvalidDataException">A line without its five fields, or a reason left "TODO".</exception>
     private static Dictionary<string, int> ReadList(string path)
     {
         var listed = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -321,12 +327,12 @@ internal static class Coverage
             }
 
             string[] f = line.Split('\t');
-            if (f.Length != 6 || f[5].Length == 0 || f[5] == "TODO")
+            if (f.Length != 5 || f[4].Length == 0 || f[4] == "TODO")
             {
-                throw new InvalidDataException($"{path}: every entry needs file, line, kind, scope, text and a real reason: {line}");
+                throw new InvalidDataException($"{path}: every entry needs file, kind, scope, text and a real reason: {line}");
             }
 
-            string key = string.Join('\t', f[..5]);
+            string key = string.Join('\t', f[..4]);
             listed[key] = listed.GetValueOrDefault(key) + 1;
         }
 

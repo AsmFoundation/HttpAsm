@@ -199,14 +199,19 @@ static double child_cpu_most;
 
 /* in_child: runs the scenario in a child process, after setup(arg) there, with a 20 s alarm.
  * Returns 0 when the child ended by itself (any exit status, counted in outcomes) within the
- * CPU limit, else -1 with *how describing it. */
+ * CPU limit, else -1 with *how describing it.
+ * The child ends with exit(), not _exit(): the coverage build's library writes the markers it
+ * ran from its .fini_array (tests/coverage/coverage_rt.asm), which _exit skips, and with _exit
+ * every error path this program exists to reach was missing from the coverage report. The
+ * parent's stdio is flushed before the fork, so a child's exit cannot print it a second time. */
 static int in_child(void (*setup)(long), long arg, char *how, size_t how_size)
 {
+    fflush(NULL);
     pid_t pid = fork();
     if (pid == 0) {
         alarm(20);
         setup(arg);
-        _exit(scenario());
+        exit(scenario());
     }
     int status = 0;
     struct rusage usage;
@@ -253,7 +258,7 @@ static void exhaustion_server(int in, int out, uint16_t flags)
     int error = 0;
     httpasm_server *s = httpasm_server_create(&o, &error);
     if (s == NULL || httpasm_server_start(s) != 0)
-        _exit(2);
+        exit(2);
     uint16_t port = httpasm_server_port(s);
     /* The highest open descriptor, the server's own included. The holes below it (the pipe
      * ends this process closed) would add to the room, so they are filled first: the kernel
@@ -268,7 +273,7 @@ static void exhaustion_server(int in, int out, uint16_t flags)
     for (;;) {
         int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (fd < 0)
-            _exit(3);
+            exit(3);
         if (fd > top) {
             close(fd);
             break;
@@ -276,12 +281,12 @@ static void exhaustion_server(int in, int out, uint16_t flags)
     }
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit) != 0)
-        _exit(3);
+        exit(3);
     limit.rlim_cur = (rlim_t)top + 1 + EXHAUST_ROOM;
     if (setrlimit(RLIMIT_NOFILE, &limit) != 0)
-        _exit(3);
+        exit(3);
     if (write(out, &port, sizeof port) != sizeof port)
-        _exit(3);
+        exit(3);
     char command;
     while (read(in, &command, 1) == 1 && command == 'c') {
         struct rusage u;
@@ -292,7 +297,7 @@ static void exhaustion_server(int in, int out, uint16_t flags)
     }
     httpasm_server_stop(s);
     httpasm_server_destroy(s);
-    _exit(0);
+    exit(0);
 }
 
 /* server_cpu: the server process's CPU time so far, in microseconds (or UINT64_MAX when it
@@ -312,6 +317,7 @@ static int exhaustion(uint16_t flags, const char *backend)
     int down[2], up[2];
     if (pipe(down) != 0 || pipe(up) != 0)
         return fprintf(stderr, "faults: exhaustion (%s): no pipe\n", backend), 1;
+    fflush(NULL);                               /* the child ends with exit(): see in_child */
     pid_t pid = fork();
     if (pid == 0) {
         alarm(30);
@@ -400,7 +406,7 @@ static void set_fail_at(long n)
 static void set_syscall(long packed)
 {
     if (fail_syscall((int)(packed >> 16), (int)(packed & 0xFFFF)) != 0)
-        _exit(100);
+        exit(100);
 }
 
 /* main: counts the scenario's allocations, fails each, then each system call. */
