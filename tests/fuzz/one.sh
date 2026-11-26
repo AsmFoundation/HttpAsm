@@ -84,8 +84,9 @@ case "$name" in
     includes=(-I "$repo/tests/.tools/llhttp-9.4.4" -I "$repo/tests/.tools/picohttpparser-dd573d8")
     twin=h1_request
     ;;
-  server)
-    # The whole library, not only cpu_abi.o: the drivers are what this fuzzer is for. The SDK's
+  server|client)
+    # The whole library, not only cpu_abi.o: the drivers (server.c) and the client (client.c)
+    # are what these fuzzers are for. The SDK's
     # libc stubs (asm/stubs/) stay out: the real libc is linked.
     mapfile -t refs < <(find src/HttpAsm/obj/Fuzz -name '*.o' -not -path '*/stubs/*' -not -name 'cpu_abi.o' | sort)
     ;;

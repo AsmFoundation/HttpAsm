@@ -71,7 +71,6 @@ RFC9113-7-5#2			option	error codes a peer sends are not acted on, known or not (
 RFC9113-10.5.1-2			option	the server does not hold its answers' field blocks to the client's advisory SETTINGS_MAX_HEADER_LIST_SIZE
 RFC9112-1.2-*			spec	rule names imported from RFC 9110 and RFC 3986: the rules that use them are what is proven
 RFC9112-3-4#1			app	the library implements no method of its own: every method reaches the handler, which answers 501 for those it does not implement
-RFC9112-3.2.3-3			M6	CONNECT through proxies: tunnels come with the proxy role
 RFC9112-3.3-13			option	the server takes the authority from the request (the target's, or Host), never from its context
 RFC9112-6.1-8			option	no transfer coding but chunked is decoded or applied (others are 501)
 RFC9112-6.3-5			option	not taken: chunked request bodies are accepted (ServerTests.DecodesChunkedBodiesAndKeepsTrailersApart)

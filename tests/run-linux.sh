@@ -149,8 +149,8 @@ run_native() {
   [ "$runner" = native ] && sde="$tools/sde"
   replay='$HOME/.cache/httpasm/replay-'"$config"
   [ "$runner" = native ] && replay="$here/tests/fuzz/.work/replay-$config"
-  echo "run-linux.sh: tests/native/fallback and tests/native/tiers, natively" >&2
-  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/tiers" || code=$?
+  echo "run-linux.sh: tests/native/fallback, signals and tiers, natively" >&2
+  on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/tiers" || code=$?
   if [ "$avx512" = 0 ]; then
     echo "run-linux.sh: tests/native/tiers under Intel SDE (Sapphire Rapids: AVX-512)" >&2
     # The output is captured whole, so the program's own exit status is kept (a pipe into grep

@@ -57,7 +57,7 @@ for name in "${names[@]}"; do
   twin="$name"
   # The library: cpu_abi.o (the tiers) for the codec fuzzers, every object but the SDK's libc
   # stubs for the server's; and coverage_rt.o whenever the build has it (Coverage).
-  if [ "$name" = server ]; then
+  if [ "$name" = server ] || [ "$name" = client ]; then
     mapfile -t lib < <(find "src/HttpAsm/obj/$config" -name '*.o' -not -path '*/stubs/*' | sort)
   else
     mapfile -t lib < <(find "src/HttpAsm/obj/$config" \( -name 'cpu_abi.o' -o -name 'coverage_rt.o' \) | sort)

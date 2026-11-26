@@ -29,6 +29,12 @@ extern ha_method_lookup
 
 SYS_connect         equ 42
 SYS_sendmsg         equ 46
+SYS_poll            equ 7       ; an interrupted connect is waited for with these
+SYS_getsockopt      equ 55
+SYS_clock_gettime   equ 228
+CLOCK_MONOTONIC     equ 1
+POLLOUT             equ 4
+SO_ERROR            equ 4
 SO_RCVTIMEO         equ 20
 SO_SNDTIMEO         equ 21
 MSG_PEEK            equ 0x02        ; look without taking (MSG_DONTWAIT: driver.inc)
@@ -63,10 +69,25 @@ section .text
 ;   and each later read and write (0: no limit). NULL on failure with *error = -errno (error may
 ;   be NULL): ECONNREFUSED, ETIMEDOUT (EINPROGRESS when the connect timed out), ENOMEM, ...
 ; -----------------------------------------------------------------------------
-CC_ADDRESS  equ 0       ; sockaddr_in (16)
-CC_TIME     equ 16      ; struct timeval (16)
+CC_ADDRESS  equ 0       ; sockaddr_in (16); after the connect, a struct pollfd and a socklen_t
+CC_TIME     equ 16      ; struct timeval (16); after the connect, a struct timespec
 CC_OPTION   equ 32      ; an int option
 CC_FRAME    equ 40      ; five pushes + 40: aligned for the calls
+
+; CC_NOW_MS: rax = CLOCK_MONOTONIC in milliseconds, through the frame's CC_TIME slot (free once
+; the timeouts are set). Clobbers rcx, rdx, rsi, rdi, r11 and the flags.
+%macro CC_NOW_MS 0
+    mov     edi, CLOCK_MONOTONIC
+    lea     rsi, [rsp + CC_TIME]
+    mov     eax, SYS_clock_gettime
+    syscall
+    imul    rcx, [rsp + CC_TIME], 1000      ; seconds as milliseconds
+    mov     rax, [rsp + CC_TIME + 8]        ; nanoseconds
+    xor     edx, edx
+    mov     esi, 1000000
+    div     rsi
+    add     rax, rcx
+%endmacro
 
 global httpasm_client_connect:function (httpasm_client_connect.end - httpasm_client_connect)
 align 16
@@ -135,7 +156,62 @@ httpasm_client_connect:
     mov     eax, SYS_connect
     syscall
     test    eax, eax
+    jns     .connected
+    cmp     eax, -EINTR
+    jne     .fail
+    ; A signal interrupted the connect. Nothing restarts it (SA_RESTART never does for
+    ; connect), and the attempt goes on in the kernel: connecting again would only answer
+    ; EALREADY. So it is waited for with poll(POLLOUT), poll itself retried on EINTR against a
+    ; deadline of the timeout from here (so at most about twice the timeout in all), and its
+    ; outcome read from SO_ERROR. tests/fuzz/client found this (2026-11-26): libFuzzer's timer
+    ; signal failed connects with -EINTR, as any host's signals would (SIGCHLD, SIGPROF,
+    ; alarms). r13 and r14 (the address and port) are free now: r13 holds the deadline.
+    mov     r13, -1                         ; no deadline without a timeout
+    test    r15d, r15d
+    jz      .connect_wait
+    CC_NOW_MS
+    mov     r13d, r15d                      ; the timeout, zero-extended
+    add     r13, rax
+.connect_wait:
+    mov     edx, -1                         ; poll's timeout: none
+    cmp     r13, -1
+    je      .connect_poll
+    CC_NOW_MS
+    mov     rdx, r13
+    sub     rdx, rax                        ; the milliseconds left
+    jg      .connect_poll
+    mov     eax, -ETIMEDOUT
+    jmp     .fail
+.connect_poll:
+    mov     [rsp + CC_ADDRESS], r12d        ; struct pollfd: fd, events POLLOUT, revents 0
+    mov     dword [rsp + CC_ADDRESS + 4], POLLOUT
+    lea     rdi, [rsp + CC_ADDRESS]
+    mov     esi, 1
+    mov     eax, SYS_poll
+    syscall
+    cmp     rax, -EINTR
+    je      .connect_wait
+    test    rax, rax
     js      .fail
+    jnz     .connect_done
+    mov     eax, -ETIMEDOUT
+    jmp     .fail
+.connect_done:
+    mov     dword [rsp + CC_OPTION], 0
+    mov     dword [rsp + CC_ADDRESS + 8], 4 ; the option's length, in and out
+    mov     edi, r12d
+    mov     esi, SOL_SOCKET
+    mov     edx, SO_ERROR
+    lea     r10, [rsp + CC_OPTION]
+    lea     r8, [rsp + CC_ADDRESS + 8]
+    mov     eax, SYS_getsockopt
+    syscall
+    test    eax, eax
+    js      .fail
+    mov     eax, [rsp + CC_OPTION]
+    neg     eax                             ; the connect's own outcome: 0, or -errno
+    jnz     .fail
+.connected:
     ; The client and its buffers.
     mov     edi, 1
     mov     esi, client_size

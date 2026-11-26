@@ -386,7 +386,15 @@ HTTP/2, the drivers, the client):
        - a Content-Length past 2^63 - 1, now refused by both writers;
        - a request target whose form did not suit the method (`PO S HTTP/1.1`). The request
          writer now applies the parser's form rules (CONNECT's authority-form through the
-         shared authority macros), and checks Host with `HA_URI_HOST`.
+         shared authority macros), and checks Host with `HA_URI_HOST`;
+
+       and `client`, the HTTP/1.1 client against an in-process server that answers with the
+       input. Every response the client returns must be what the parsers read in those
+       octets: status, fields, the body by its framing, and trailers. It found
+       `httpasm_client_connect` failing with -EINTR when a signal interrupted the connect;
+       connect is never restarted. The client now waits for the attempt with `poll` against
+       the timeout and reads `SO_ERROR`. `tests/native/signals` connects 2,000 times under a
+       100 µs timer signal; it fails without the fix and passes with it.
      - **The first campaigns:** `h1_request`, 10.7 million inputs in 60 s; `chunked` 3.6
        million; `h1_response` 7.8 million; `hpack` 19.5 million in 300 s. Planted failures
        (in a check, and in the chunked oracle) were found within seconds and printed in base64.
