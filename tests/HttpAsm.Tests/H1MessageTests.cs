@@ -690,6 +690,28 @@ public sealed class H1MessageTests
     }
 
     /// <summary>
+    /// A response field's short value followed by a long run of whitespace before its CR: the
+    /// value is read without the whitespace (RFC 9110 5.5: OWS around a value is not part of
+    /// it), and the octets the classifier reads past a short value - here only the value and
+    /// spaces, no CR within them - are all valid, a case of their own in the scan.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    /// <param name="spaces">The whitespace after it.</param>
+    [Theory]
+    [InlineData("v", 20)]
+    [InlineData("fifteen-octets!", 1)]
+    [InlineData("ok", 14)]
+    [Requirement("RFC9110-5.5-2")]
+    public void ReadsShortResponseValuesBeforeLongWhitespace(string value, int spaces)
+    {
+        Platform.RequireLinuxX64();
+        ParsedResponse response = H1Messages.ParseResponse($"HTTP/1.1 200 OK\r\nX-Pad: {value}{new string(' ', spaces)}\r\nContent-Length: 0\r\n\r\n");
+
+        Assert.True(response.Result > 0, $"result {response.Result}");
+        Assert.Equal(value, response.Field("X-Pad"));
+    }
+
+    /// <summary>
     /// After the last chunk the decoder takes nothing more: the trailer section that follows is
     /// httpasm_h1_parse_trailers', so a call in the TRAILERS state consumes and produces nothing,
     /// leaves the octets as they are, and keeps its state and its total.
