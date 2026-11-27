@@ -11,6 +11,8 @@
 #             octet and heap measured
 #   dates     tests/native/dates.c: the Date field on every day the realtime clock can hold,
 #             against gmtime_r (the clock faked through clock_gettime)
+#   random    tests/native/random.c: httpasm_random's fills, under timer signals (short reads and
+#             EINTR), and behind seccomp's refusals (EPERM, ENOSYS, no octets and no error)
 # (The benchmarks build apart, with their rivals: benchmarks/bench.sh.)
 #
 # Usage: tests/native/build.sh [Debug|Release] [output dir]   (default Release, tests/native/bin)
@@ -28,7 +30,7 @@ lib="$here/src/HttpAsm/bin/$config/libc/linux-x64"
 [ -f "$lib/libhttpasm.so" ] || { echo "build.sh: $lib/libhttpasm.so is missing: build $config first" >&2; exit 2; }
 mkdir -p "$out"
 
-for source in tests/native/tiers.c tests/native/fallback.c tests/native/signals.c tests/native/cpu.c tests/native/faults.c tests/native/floods.c tests/native/dates.c; do
+for source in tests/native/tiers.c tests/native/fallback.c tests/native/signals.c tests/native/cpu.c tests/native/faults.c tests/native/floods.c tests/native/dates.c tests/native/random.c; do
   program="$(basename "$source" .c)"
   cc -O2 -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
     -I "$here/src/HttpAsm/include" \

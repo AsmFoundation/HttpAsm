@@ -158,9 +158,10 @@ run_native() {
   [ "$config" = Coverage ] && floods_env='HTTPASM_FLOODS_CPU=report'
   # tests/native/dates checks the Date on every day the realtime clock can hold, on both backends
   # (each refreshes the worker's clock in its own loop).
-  echo "run-linux.sh: tests/native/fallback, signals, faults, floods and dates (epoll, io_uring), cpu and tiers, natively" >&2
+  # tests/native/random: httpasm_random under timer signals and behind seccomp's refusals.
+  echo "run-linux.sh: tests/native/fallback, signals, faults, floods and dates (epoll, io_uring), random, cpu and tiers, natively" >&2
   on_linux "$linux_env set -e; b=$bin; bash '$repo/tests/native/build.sh' $config \$b >/dev/null; \$b/fallback; \$b/signals; \$b/faults; \
-    $floods_env \$b/floods; $floods_env HTTPASM_TEST_IO=uring \$b/floods; \$b/dates; HTTPASM_TEST_IO=uring \$b/dates; \$b/cpu; \$b/tiers" || code=$?
+    $floods_env \$b/floods; $floods_env HTTPASM_TEST_IO=uring \$b/floods; \$b/dates; HTTPASM_TEST_IO=uring \$b/dates; \$b/random; \$b/cpu; \$b/tiers" || code=$?
   # The CPU detection on CPUs this machine is not: tests/native/cpu under SDE's models, each
   # with the x86-64 level it must reach exactly, from SSE3-only (p4p) to AVX-512 with SHA512
   # (future), the AVX-512-less hybrids (adl, arl) included; then under the synthetic CPUs of

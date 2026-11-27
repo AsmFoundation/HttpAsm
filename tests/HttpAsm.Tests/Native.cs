@@ -258,6 +258,13 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_x25519_public_key")]
     internal static partial void X25519PublicKey(byte* output, byte* scalar);
 
+    /// <summary>int httpasm_random(void *buffer, size_t length).</summary>
+    /// <param name="buffer">Receives the random octets (anything when length is 0).</param>
+    /// <param name="length">How many.</param>
+    /// <returns>0, or -errno when the kernel refused (the buffer then unusable).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_random")]
+    internal static partial int Random(byte* buffer, nuint length);
+
     /// <summary>void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The context to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

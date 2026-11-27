@@ -490,6 +490,17 @@ int httpasm_x25519(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM
 void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY]);
 
 /* ------------------------------------------------------------------------------------------
+ * Randomness: the kernel's generator (getrandom(2), the urandom source), for TLS randoms,
+ * ephemeral keys and ticket keys.
+ * ------------------------------------------------------------------------------------------ */
+
+/* Fills buffer[0..length) with random octets, continuing through short reads and signals.
+ * Returns 0, or -errno when the kernel refuses (-ENOSYS, -EPERM from a sandbox's seccomp filter,
+ * -EFAULT, or -EIO when a filter answers with neither octets nor an error): nothing weaker is
+ * substituted, and the buffer must then not be used. */
+int httpasm_random(void *buffer, size_t length);
+
+/* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and
  * SHA-384, TLS 1.3's two hashes. Every buffer that held key octets is wiped before a function
  * returns, and finals wipe their context.

@@ -85,6 +85,7 @@ extern httpasm_chacha20_poly1305_seal ; int (key[32], nonce[12], aad, aad_length
 extern httpasm_chacha20_poly1305_open ; int (key[32], nonce[12], aad, aad_length, in, length, tag[16], out): 0, -1 (out zeroed)
 extern httpasm_x25519               ; int (out[32], scalar[32], point[32]): 0, -1 when out is all zeros (small-order point)
 extern httpasm_x25519_public_key    ; void (out[32], scalar[32]): X25519(scalar, 9)
+extern httpasm_random               ; int (void *buffer, size_t length): 0, or -errno (getrandom refused)
 extern httpasm_hmac_sha384_init     ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha384_update   ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_hmac_sha384_final    ; void (httpasm_hmac_sha384_ctx *h, uint8_t mac[48]): wipes h

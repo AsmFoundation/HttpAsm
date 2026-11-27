@@ -1004,6 +1004,17 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      secret) 68.3 us, 1.28x OpenSSL's per-handshake EVP sequence (87.3 us). Next lever: the
      public key from a precomputed table of base-point multiples (edwards25519's fixed-base
      method, with Ed25519).
+   - **Randomness** (2026-11-27), `src/HttpAsm/random.asm` (the OS-side library: the core makes
+     no system call): `httpasm_random(buffer, length)`, getrandom(2) with no flags (the urandom
+     source: it blocks only until the kernel's pool is first initialized, at boot). Short reads
+     (past 32 MiB - 1, or a signal after some octets) and -EINTR (a signal before any) are
+     continued until the buffer is full; a refusal (-ENOSYS, a seccomp filter's -EPERM,
+     -EFAULT) is returned, with nothing weaker substituted; a filter that answers "error 0"
+     (no octets, no error) is -EIO, not a spin. Proven by `tests/native/random` (every length
+     to 4 KiB and 64 MiB, a 1 MiB histogram's chi-square, ten 64 MiB fills under a 50 us
+     interval timer without SA_RESTART, about 37,000 signals, and the three refusals each in a
+     forked child behind its own seccomp filter) and RandomTests (lengths 0-300 and to 1 MiB,
+     nothing written past the end; 1,000 32-octet values all different; the histogram).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
