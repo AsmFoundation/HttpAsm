@@ -172,6 +172,29 @@ static void add_gcm_seal(void)
     }
 }
 
+/* add_chacha_seal: the tiers cases of httpasm_chacha20_poly1305_seal on 64 octets, 1 KiB and 16
+ * KiB: v1 (SSE2, four blocks a step, Poly1305 by mul), v2 (pshufb's rotations) and v3 (AVX2,
+ * eight blocks a step, Poly1305 by mulx), each stitching Poly1305 into its ChaCha20 steps. The
+ * 64-octet record takes the horizontal two-block path at every tier. */
+static void add_chacha_seal(void)
+{
+    static const size_t lengths[] = { 64, 1024, 16384 };
+    static const char *const labels[] = { "64 octets", "1 KiB", "16 KiB" };
+    for (size_t i = 0; i < 3; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = "chacha20_poly1305_seal";
+        c.input = labels[i];
+        c.data = bench_sha_input();
+        c.length = lengths[i];
+        c.octets = lengths[i];
+        c.ours = bench_chacha_seal;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
  * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
  * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
@@ -229,6 +252,7 @@ void bench_suite_tiers(void)
     add_hkdf384_expand();
     add_aes_block();
     add_gcm_seal();
+    add_chacha_seal();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

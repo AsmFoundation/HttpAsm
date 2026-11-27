@@ -429,6 +429,49 @@ int httpasm_aes_gcm_open(const httpasm_aes_gcm_key *k, const uint8_t nonce[HTTPA
                          const uint8_t tag[HTTPASM_AES_GCM_TAG], uint8_t *out);
 
 /* ------------------------------------------------------------------------------------------
+ * ChaCha20, Poly1305 and ChaCha20-Poly1305 (RFC 8439), TLS 1.3's TLS_CHACHA20_POLY1305_SHA256
+ * and QUIC's. Keys are raw octets: ChaCha20 keeps no schedule, and Poly1305's key is new for
+ * every message. Versions: AVX2 (eight blocks at once), SSSE3 and SSE2 (four), each with
+ * Poly1305 interleaved in the AEAD; every one constant time.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_CHACHA20_KEY   32       /* octets of a ChaCha20 (and AEAD) key */
+#define HTTPASM_CHACHA20_NONCE 12       /* octets of its nonce */
+#define HTTPASM_POLY1305_KEY   32       /* octets of a one-time Poly1305 key (r, then s) */
+#define HTTPASM_POLY1305_TAG   16       /* octets of a Poly1305 tag, and of the AEAD's */
+
+/* Xors in[0..length) with ChaCha20's keystream from block `counter` on into out (out may be in,
+ * or must not overlap it). The block counter is 32 bits and wraps with the nonce unchanged, so
+ * past (2^32 - counter) * 64 octets the keystream repeats: the caller stays below that. QUIC's
+ * header protection is one call over five zero octets (RFC 9001 5.4.4). */
+void httpasm_chacha20(const uint8_t key[HTTPASM_CHACHA20_KEY], uint32_t counter,
+                      const uint8_t nonce[HTTPASM_CHACHA20_NONCE], const uint8_t *in, size_t length,
+                      uint8_t *out);
+
+/* The one-time authenticator: tag = Poly1305 over message[0..length) under key (r is clamped
+ * here). A key must never authenticate two messages: two tags under one key give it away. */
+void httpasm_poly1305(const uint8_t key[HTTPASM_POLY1305_KEY], const uint8_t *message, size_t length,
+                      uint8_t tag[HTTPASM_POLY1305_TAG]);
+
+/* Encrypts in[0..length) into out (out may be in, or must not overlap it) and writes the tag
+ * over aad[0..aad_length) and the ciphertext. Returns 0, or -1 when length exceeds 2^38 - 64
+ * octets (the 32-bit block counter's reach from 1; nothing is written then). Never reuse a nonce
+ * under a key: the keystream and the Poly1305 key both repeat, and forgeries follow. */
+int httpasm_chacha20_poly1305_seal(const uint8_t key[HTTPASM_CHACHA20_KEY],
+                                   const uint8_t nonce[HTTPASM_CHACHA20_NONCE], const uint8_t *aad,
+                                   size_t aad_length, const uint8_t *in, size_t length, uint8_t *out,
+                                   uint8_t tag[HTTPASM_POLY1305_TAG]);
+
+/* Verifies the full 16-octet tag over aad and in[0..length) and decrypts into out (out may be in,
+ * or must not overlap it). Returns 0; or -1 when the tag does not match (out[0..length) is then
+ * all zeros) or length exceeds seal's limit (nothing is written). The comparison takes the same
+ * time whichever octet differs. */
+int httpasm_chacha20_poly1305_open(const uint8_t key[HTTPASM_CHACHA20_KEY],
+                                   const uint8_t nonce[HTTPASM_CHACHA20_NONCE], const uint8_t *aad,
+                                   size_t aad_length, const uint8_t *in, size_t length,
+                                   const uint8_t tag[HTTPASM_POLY1305_TAG], uint8_t *out);
+
+/* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and
  * SHA-384, TLS 1.3's two hashes. Every buffer that held key octets is wiped before a function
  * returns, and finals wipe their context.

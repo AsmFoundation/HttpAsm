@@ -262,6 +262,13 @@ endstruc
 HTTPASM_AES_GCM_NONCE           equ 12
 HTTPASM_AES_GCM_TAG             equ 16
 
+; ChaCha20 and Poly1305 (RFC 8439; crypto/chacha20_poly1305.asm) take their keys as raw octets:
+; ChaCha20 has no schedule to keep, and Poly1305's key is new for every message.
+HTTPASM_CHACHA20_KEY            equ 32      ; octets of a ChaCha20 (and AEAD) key
+HTTPASM_CHACHA20_NONCE          equ 12      ; octets of its nonce (RFC 8439's 96-bit form)
+HTTPASM_POLY1305_KEY            equ 32      ; octets of a one-time Poly1305 key (r, then s)
+HTTPASM_POLY1305_TAG            equ 16      ; octets of a Poly1305 tag (the AEAD's tag too)
+
 ; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's

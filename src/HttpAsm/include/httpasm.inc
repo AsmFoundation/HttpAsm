@@ -79,6 +79,10 @@ extern httpasm_aes_gcm_init         ; int (httpasm_aes_gcm_key *k, const uint8_t
 extern httpasm_aes_gcm_seal         ; int (k, nonce[12], aad, aad_length, in, length, out, tag[16]): 0, -1 past the limits
 extern httpasm_aes_gcm_open         ; int (k, nonce[12], aad, aad_length, in, length, tag[16], out): 0, -1 (out zeroed)
 extern httpasm_aes_encrypt_block    ; void (const httpasm_aes_key *k, const uint8_t in[16], uint8_t out[16])
+extern httpasm_chacha20             ; void (key[32], uint32_t counter, nonce[12], in, length, out): counter wraps at 2^32
+extern httpasm_poly1305             ; void (key[32], message, length, tag[16]): a one-time key per message
+extern httpasm_chacha20_poly1305_seal ; int (key[32], nonce[12], aad, aad_length, in, length, out, tag[16]): 0, -1 past 2^38 - 64
+extern httpasm_chacha20_poly1305_open ; int (key[32], nonce[12], aad, aad_length, in, length, tag[16], out): 0, -1 (out zeroed)
 extern httpasm_hmac_sha384_init     ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha384_update   ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_hmac_sha384_final    ; void (httpasm_hmac_sha384_ctx *h, uint8_t mac[48]): wipes h

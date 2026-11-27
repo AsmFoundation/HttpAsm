@@ -200,6 +200,50 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_aes_gcm_open")]
     internal static partial int AesGcmOpen(AesGcmKey* k, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* tag, byte* output);
 
+    /// <summary>void httpasm_chacha20(key[32], uint32_t counter, nonce[12], in, length, out).</summary>
+    /// <param name="key">32 octets.</param>
+    /// <param name="counter">The first block's counter; it wraps at 2^32 with the nonce unchanged.</param>
+    /// <param name="nonce">12 octets.</param>
+    /// <param name="input">The octets to xor with the keystream (anything when length is 0).</param>
+    /// <param name="length">Their count.</param>
+    /// <param name="output">Receives the result (may be input).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_chacha20")]
+    internal static partial void ChaCha20(byte* key, uint counter, byte* nonce, byte* input, nuint length, byte* output);
+
+    /// <summary>void httpasm_poly1305(key[32], message, length, tag[16]).</summary>
+    /// <param name="key">The one-time key: r (clamped by the function), then s.</param>
+    /// <param name="message">The message (anything when length is 0).</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="tag">Receives the 16-octet tag.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_poly1305")]
+    internal static partial void Poly1305(byte* key, byte* message, nuint length, byte* tag);
+
+    /// <summary>int httpasm_chacha20_poly1305_seal(key[32], nonce[12], aad, aad_length, in, length, out, tag[16]).</summary>
+    /// <param name="key">32 octets.</param>
+    /// <param name="nonce">12 octets.</param>
+    /// <param name="aad">The additional data (anything when its length is 0).</param>
+    /// <param name="aadLength">Its length.</param>
+    /// <param name="input">The plaintext (anything when length is 0).</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="output">Receives the ciphertext (may be input).</param>
+    /// <param name="tag">Receives the 16-octet tag.</param>
+    /// <returns>0, or -1 past 2^38 - 64 octets (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_chacha20_poly1305_seal")]
+    internal static partial int ChaCha20Poly1305Seal(byte* key, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* output, byte* tag);
+
+    /// <summary>int httpasm_chacha20_poly1305_open(key[32], nonce[12], aad, aad_length, in, length, tag[16], out).</summary>
+    /// <param name="key">32 octets.</param>
+    /// <param name="nonce">12 octets.</param>
+    /// <param name="aad">The additional data.</param>
+    /// <param name="aadLength">Its length.</param>
+    /// <param name="input">The ciphertext.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="tag">The 16-octet tag to verify.</param>
+    /// <param name="output">Receives the plaintext (may be input); all zeros when the tag fails.</param>
+    /// <returns>0, or -1 for a wrong tag (output zeroed) or past the limit (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_chacha20_poly1305_open")]
+    internal static partial int ChaCha20Poly1305Open(byte* key, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* tag, byte* output);
+
     /// <summary>void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The context to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

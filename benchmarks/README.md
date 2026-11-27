@@ -191,6 +191,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: ChaCha20-Poly1305.** `httpasm_chacha20_poly1305_seal` in the TLS 1.3 shape (a
+new nonce and a 5-octet AAD per record; the key is raw octets) beside OpenSSL 3.0.13's EVP
+driven the same way (the key set once, per record the nonce, the AAD, the text, the final, the
+tag), 11 rounds:
+
+| Case | v3 (AVX2) | v2 (SSSE3) | v1 (SSE2) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---:|---|
+| 64 octets | 208.6 ns | 208.0 ns | 231.7 ns | 443.3 ns | 2.12x OpenSSL |
+| 1 KiB | 836.8 ns | 1,088 ns | 1,253 ns | 946.8 ns | 1.14x OpenSSL |
+| 16 KiB | 8,675 ns (1.89 octets/ns) | 13,692 ns (1.20) | 16,001 ns (1.02) | 9,896 ns (1.66) | 1.14x OpenSSL |
+
+64 octets take the same two horizontal blocks at v2 and v3 (blocks 0 and 1: the key and the
+record). The stitching (Poly1305 between the quarter rounds) against a build without it, the
+scratchpad's cctime.c on one core: 16 KiB 8,307 against 12,463 ns at v3 (1.50x), 13,149 against
+18,457 at v2 (1.40x), 15,409 against 20,662 at v1 (1.34x). The parts alone at v3: ChaCha20 1.11
+cycles an octet, Poly1305 1.01 (a chain of about 15 cycles a block), the AEAD 1.44. Two changes
+measured in paired runs and dropped: the products reordered (Poly1305 2.5% slower) and the
+fold's times 5 as one lea (3% slower); one kept: the short paths wipe only what they wrote
+(64 octets at v3 from 246 to 220 ns).
+
 **2026-11-27: AES-GCM, the AES-NI version interleaved.** `tiers/aes_128_gcm_seal` at v2 (the
 path of CPUs without VAES) after its GHASH moved into the AES rounds (one block after each of
 rounds 1-8) and its tail became one batched step, 11 rounds: 1 KiB 261.9 ns (was 316.9; OpenSSL

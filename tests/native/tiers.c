@@ -36,7 +36,8 @@ static const char *const cap_names[] = { "v1", "v2", "v3", "v4" };
 
 enum { PAGE = 4096 };
 
-/* One readable page, then an inaccessible one: page_end - n is where an n-octet input starts. */
+/* Readable pages (main maps five), then an inaccessible one: page_end - n is where an n-octet
+ * input starts, its last octet just before the guard. */
 static uint8_t *page_end;
 
 /* The state of a small deterministic generator (xorshift64*), seeded fixed, so a failure
@@ -1605,6 +1606,125 @@ static int gcm_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_chacha20, httpasm_poly1305, httpasm_chacha20_poly1305_*: by versions ------------
+ * (crypto/chacha20_poly1305.asm) v1 (SSE2, four blocks a step, Poly1305 by mul), v2 (the same
+ * with pshufb's rotations) and v3 (AVX2, eight blocks a step, Poly1305 by mulx), each stitching
+ * Poly1305 into its AEAD steps, and each sending short work through two horizontal blocks. Every
+ * tier must give v1's keystream, tags, ciphertexts and plaintexts, and refuse a flipped tag bit
+ * with zeros. Inputs end against the guard page (an over-read faults), outputs are followed by
+ * canary octets (an over-write shows). */
+
+/* chacha_check_canary: 0 when out[n..size) still holds the canary 0xC3 everywhere; otherwise a
+ * report naming the function and tier, and 1. */
+static int chacha_check_canary(const uint8_t *out, size_t n, size_t size, const char *what, size_t t)
+{
+    for (size_t k = n; k < size; k++) {
+        if (out[k] != 0xC3) {
+            fprintf(stderr, "%s at %s wrote past %zu octets\n", what, cap_names[t], n);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* chacha_tiers: `randoms` random keys, nonces, counters (a fifth just below the 32-bit wrap),
+ * AAD (0-300 octets) and texts (0-3000 octets, a third of them multiples of 64, and every tenth a
+ * 16 KiB + 13 record), through the raw cipher, Poly1305 and the AEAD. Returns 0 when every tier
+ * agrees with v1, 1 at the first difference. */
+static int chacha_tiers(long randoms)
+{
+    long checked = 0;
+    enum { MAX = 16384 + 13 };
+    /* expected_stream holds v1's raw keystream output, expected v1's AEAD ciphertext: two
+     * buffers, since each tier runs both before the next tier compares. */
+    static uint8_t out[MAX + 64], aad[300], plain[MAX], expected[MAX], expected_stream[MAX];
+    for (long i = 0; i < randoms; i++) {
+        uint8_t key[32], nonce[12], tag[16], expected_tag[16], mac[16], expected_mac[16];
+        size_t n = i % 10 == 9 ? (size_t)MAX : (size_t)(rng() % 3001);
+        if (rng() % 3 == 0)
+            n &= ~(size_t)63;
+        uint32_t counter = (uint32_t)rng();
+        if (i % 5 == 0)
+            counter = 0xFFFFFFFFu - (uint32_t)(rng() % 40);
+        size_t aad_length = (size_t)(rng() % 301);
+        for (size_t k = 0; k < 32; k++)
+            key[k] = (uint8_t)rng();
+        for (size_t k = 0; k < 12; k++)
+            nonce[k] = (uint8_t)rng();
+        for (size_t k = 0; k < aad_length; k++)
+            aad[k] = (uint8_t)rng();
+        uint8_t *text = page_end - n;       /* the plaintext against the guard page */
+        for (size_t k = 0; k < n; k++)
+            plain[k] = text[k] = (uint8_t)rng();
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            /* The raw cipher from the counter. */
+            memset(out, 0xC3, sizeof out);
+            httpasm_chacha20(key, counter, nonce, text, n, out);
+            if (chacha_check_canary(out, n, sizeof out, "httpasm_chacha20", t))
+                return 1;
+            if (t == 0) {
+                memcpy(expected_stream, out, n);
+            } else if (memcmp(out, expected_stream, n) != 0) {
+                fprintf(stderr, "httpasm_chacha20 at %s (features %#llx) differs from v1 on %zu octets from counter %u\n",
+                        cap_names[t], (unsigned long long)features, n, counter);
+                return 1;
+            }
+            /* Poly1305 over the text, the key from the cipher's state words. */
+            httpasm_poly1305(key, text, n, mac);
+            if (t == 0) {
+                memcpy(expected_mac, mac, 16);
+            } else if (memcmp(mac, expected_mac, 16) != 0) {
+                fprintf(stderr, "httpasm_poly1305 at %s differs from v1 on %zu octets\n", cap_names[t], n);
+                return 1;
+            }
+            /* The AEAD: seal, then open the v1 seal moved against the guard page. */
+            memset(out, 0xC3, sizeof out);
+            if (httpasm_chacha20_poly1305_seal(key, nonce, aad, aad_length, text, n, out, tag) != 0) {
+                fprintf(stderr, "httpasm_chacha20_poly1305_seal at %s refused %zu octets\n", cap_names[t], n);
+                return 1;
+            }
+            if (chacha_check_canary(out, n, sizeof out, "httpasm_chacha20_poly1305_seal", t))
+                return 1;
+            if (t == 0) {
+                memcpy(expected, out, n);
+                memcpy(expected_tag, tag, 16);
+            } else if (memcmp(out, expected, n) != 0 || memcmp(tag, expected_tag, 16) != 0) {
+                fprintf(stderr, "httpasm_chacha20_poly1305_seal at %s (features %#llx) differs from v1 on %zu octets, %zu of AAD\n",
+                        cap_names[t], (unsigned long long)features, n, aad_length);
+                return 1;
+            }
+            uint8_t *sealed = page_end - n;
+            memcpy(sealed, expected, n);
+            memset(out, 0xC3, sizeof out);
+            if (httpasm_chacha20_poly1305_open(key, nonce, aad, aad_length, sealed, n, expected_tag, out) != 0 ||
+                memcmp(out, plain, n) != 0) {
+                fprintf(stderr, "httpasm_chacha20_poly1305_open at %s refused or misread v1's seal (%zu octets)\n", cap_names[t], n);
+                return 1;
+            }
+            if (chacha_check_canary(out, n, sizeof out, "httpasm_chacha20_poly1305_open", t))
+                return 1;
+            uint8_t bad[16];
+            memcpy(bad, expected_tag, 16);
+            bad[rng() % 16] ^= (uint8_t)(1u << (rng() % 8));
+            if (httpasm_chacha20_poly1305_open(key, nonce, aad, aad_length, sealed, n, bad, out) != -1) {
+                fprintf(stderr, "httpasm_chacha20_poly1305_open at %s accepted a flipped tag bit\n", cap_names[t]);
+                return 1;
+            }
+            for (size_t k = 0; k < n; k++) {
+                if (out[k] != 0) {
+                    fprintf(stderr, "httpasm_chacha20_poly1305_open at %s left plaintext after a refusal\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            memcpy(text, plain, n);         /* the plaintext back against the guard page */
+            checked++;
+        }
+    }
+    printf("httpasm_chacha20, _poly1305, _chacha20_poly1305: %ld rounds of cipher, MAC, seal and open at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1829,12 +1949,15 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    uint8_t *map = mmap(NULL, 2 * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (map == MAP_FAILED || mprotect(map + PAGE, PAGE, PROT_NONE) != 0) {
+    /* GUARDED readable pages, then the guard: most checks use the last page only, the AEADs'
+     * 16 KiB records reach further back. */
+    enum { GUARDED = 5 };
+    uint8_t *map = mmap(NULL, (GUARDED + 1) * PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (map == MAP_FAILED || mprotect(map + GUARDED * PAGE, PAGE, PROT_NONE) != 0) {
         perror("tiers: guard page");
         return 2;
     }
-    page_end = map + PAGE;
+    page_end = map + GUARDED * PAGE;
 
     uint64_t start_features = httpasm_cpu_features();
     printf("found %#llx; tiers:", (unsigned long long)httpasm_cpu_found());
@@ -1863,6 +1986,8 @@ int main(int argc, char **argv)
         failed = aes_tiers(randoms / 40);
     if (!failed)
         failed = gcm_tiers(randoms / 100);
+    if (!failed)
+        failed = chacha_tiers(randoms / 100);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

@@ -940,6 +940,44 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      whose AVX code is of the same kind), 1 KiB 1.21x (262 ns, 1.56x OpenSSL), 255 octets 173 to
      127 ns. Its legacy SSE forms need copies a VEX form would not: a VEX xmm version for CPUs
      with AVX but no VAES is the next lever there.
+   - **ChaCha20-Poly1305** (2026-11-27), `crypto/chacha20_poly1305.asm`, RFC 8439 as TLS 1.3
+     (TLS_CHACHA20_POLY1305_SHA256) and QUIC use it: `httpasm_chacha20` (the raw cipher, with
+     its 32-bit block counter wrapping as RFC 8439 defines it; QUIC's header protection takes
+     one block of it), `httpasm_poly1305` (the one-time authenticator alone),
+     `httpasm_chacha20_poly1305_seal` and `_open` (12-octet nonces, 16-octet tags, keys as raw
+     octets: ChaCha20 keeps no schedule and Poly1305's key is new for every message). ChaCha20
+     in three versions: v1 (SSE2) and v2 (SSSE3's pshufb for the byte rotations) four blocks at
+     once, each XMM register one state word of the four (OpenSSL's ChaCha20_4x arrangement:
+     two words of the third row wait on the stack, swapped in pairs twice a double round); v3
+     (AVX2) eight blocks in YMM registers the same way; and in every version, work of 128
+     octets or less through two blocks side by side in the horizontal layout (a block's rows in
+     four registers, its diagonals lined up by pshufd), whose time is one block's chain of
+     dependent instructions. Poly1305 on 64-bit limbs (h0, h1 and a small h2; s1 = r1 + r1/4
+     folds the products past 2^128 back as 2^130 = 5), mul at v1 and v2, mulx at v3; partial
+     reduction after each block, one conditional subtraction (cmov) at the end. The AEAD
+     interleaves the two, as BoringSSL's AVX2 code does: Poly1305 hashes one block after each
+     pair of quarter rounds of every four- or eight-block step (20 or 40 slots for 16 or 32
+     blocks made), on the integer units while the vector units run ChaCha20; seal hashes the
+     ciphertext written in earlier steps, open its input ahead of the output (in place works).
+     The one-time key is block 0, made with block 1 in the horizontal layout before anything
+     else. Proven by every test vector of RFC 8439 itself, read from the pinned text (the block
+     function, encryption, Poly1305 with the reduction's edge cases, key generation, the AEAD
+     both ways), Wycheproof's 316 tests with 96-bit nonces (65ca494), .NET's ChaCha20Poly1305
+     on 3,000 cases (every driver path's edge lengths, in place, forgeries refused with zeros),
+     a BigInteger Poly1305 on 4,000 random and extreme keys and messages, a plain C# ChaCha20
+     across the counter's wrap, every bit of the tag (RFC 8439 4: no truncation), and
+     `tests/native/tiers` (4,000 rounds of cipher, MAC, seal and open equal at every tier, 16 KiB
+     records against the guard page). Measured (benchmarks/bench.sh, 11 rounds, the TLS 1.3
+     shape: a new nonce and a 5-octet AAD per record) against OpenSSL 3.0.13's EVP: 2.12x on
+     64 octets (208.6 against 443.3 ns), 1.14x on 1 KiB, 1.14x on 16 KiB (1.89 against 1.66
+     octets/ns); v3 is 1.84x v1 on 16 KiB, v2 1.17x. The stitching was proven by a build
+     without it (Poly1305 after the cipher): 16 KiB took 1.50x as long at v3, 1.40x at v2,
+     1.34x at v1. Alone, ChaCha20 runs at 1.11 cycles an octet and Poly1305 at 1.01 (its chain
+     of about 15 cycles a block); together 1.44: the scalar Poly1305 uops the scheduler sends
+     to ports 0, 1 and 5 take slots from ChaCha20's vector work. Measured and not kept: products
+     reordered (2.5% slower: h1 s1 last delays the carry the chain waits for) and the fold's
+     times 5 as one lea (3% slower Poly1305). Kept: a short record's driver wipes only the frame
+     octets its path wrote (11% faster on 64 octets at v3).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
