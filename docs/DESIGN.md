@@ -1417,6 +1417,26 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      1.12x); v3 is 3.3-4.2x v1. With the arithmetic in AVX2 but one Keccak state at a time it
      was 14.25 / 15.59 / 18.85 (mlkem-native 1.19-1.44x ahead): the four-way permutation is what
      passed it.
+     *The pool* (2026-11-27, third step): what one state at a time still ran was hashing, H(ek)
+     in an encapsulation (9 to 12 blocks) and H(ek) and J(z || c) in a decapsulation, long
+     absorptions beside the matrix's short squeezes. `mk_pool_v3` runs different sponges in the
+     four lanes of the same permutations: a hash lane absorbs a block per permutation (its input
+     XORed in qword by qword at its lane's place; then the suffix and 0x80, and after the next
+     permutation its 32 octets out), a matrix lane squeezes 168 octets a permutation into its
+     buffer and rejection-samples after the third (a fourth block on its own when needed), and
+     a lane that finishes takes the queue's next entry. An encapsulation runs H(ek) in lane 0
+     and the k^2 entries of A transposed in the others (at ML-KEM-768 9 permutations for H and
+     all 9 entries); a decapsulation H(dk's ek) in lane 0 and J(z || c) in lane 1 (z absorbed as
+     the first 4 qwords) beside the entries, then the hash check (refused as before: the work
+     before it touched only public data and z, all wiped). So the matrix is now sampled whole
+     before the products, at k = 4 too (8 KiB more stack: 27,232 octets deep at most, still
+     proven by `tests/native/stack`: 278 runs). *Proven faster* by `bench.sh ab 81a1e79`, three
+     processes unanimous: ML-KEM-768 encapsulation 1.19x, decapsulation 1.21-1.24x; ML-KEM-1024
+     1.13x and 1.20x; key generation (no hash to pool) and every v1 row (the layout control)
+     unchanged. Now: ML-KEM-768 key pair 9.92 us against mlkem-native's 10.91 (1.10x),
+     encapsulation 8.60 against 11.99 (1.40x), decapsulation 11.12 against 15.40 (1.39x);
+     ML-KEM-1024 14.19 / 13.39 / 16.63 against 15.70 / 17.16 / 22.06 (1.10x, 1.29x, 1.34x); v3
+     3.5-5.2x v1.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

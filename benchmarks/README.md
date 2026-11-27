@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: ML-KEM, v3 with the pool.** The hashes that ran one state at a time, H(ek) beside
+an encapsulation's matrix and H(ek) and J(z || c) beside a decapsulation's, now share the four
+lanes of the matrix's permutations (`mk_pool_v3`: each lane runs a hash or an entry, and takes
+the next entry when it finishes). `bench.sh ab 81a1e79` (the commit before), 41 rounds a process,
+three processes:
+
+| Case | v3 | v3 at 81a1e79 | mlkem-native 2.1.0 | A/B, three processes |
+|---|---:|---:|---:|---|
+| ML-KEM-768 key pair | 9.92 us | 9.96 us | 10.91 us | no difference (nothing to pool) |
+| ML-KEM-768 encapsulation | 8.60 us | 10.27 us | 11.99 us | 1.19x faster (proven) |
+| ML-KEM-768 decapsulation | 11.12 us | 13.70 us | 15.40 us | 1.21-1.24x faster (proven) |
+| ML-KEM-1024 key pair | 14.19 us | 14.25 us | 15.70 us | no difference |
+| ML-KEM-1024 encapsulation | 13.39 us | 14.99 us | 17.16 us | 1.13x faster (proven) |
+| ML-KEM-1024 decapsulation | 16.63 us | 20.00 us | 22.06 us | 1.20x faster (proven) |
+
+Against mlkem-native: 1.10x, 1.40x and 1.39x at ML-KEM-768, 1.10x, 1.29x and 1.34x at
+ML-KEM-1024; against v1 3.5x to 5.2x. Every v1 row was "no difference" (the layout control).
+
 **2026-11-27: ML-KEM, v3 (AVX2, four Keccak states at once).** The same cases as v1's below, now
 at the v3 tier: the arithmetic 16 coefficients a register (NTT, inverse, base-case products by
 vpmaddwd on cached factors, the compressions, encodings, CBD and rejection) and the matrix and
@@ -208,8 +226,9 @@ noise sampled four SHAKE runs at a time (`ha_keccak_f1600_x4_v3`). 41 rounds, pa
 v3 is 3.3x to 4.2x v1. The steps, measured each: the arithmetic in AVX2 with one Keccak state at
 a time gave 14.25 / 15.59 / 18.85 us at ML-KEM-768 (mlkem-native still 1.19x to 1.44x ahead: 44
 permutations at about 870 cycles were 86% of an encapsulation); four states a permutation (1,720
-cycles against 812 for one) passed it. What is left is mostly hashing: H(ek) (9 permutations),
-G, J (decapsulation: 9) and the matrix's lone ninth entry at ML-KEM-768 run one state at a time.
+cycles against 812 for one) passed it. What was left was mostly hashing: H(ek) (9 permutations),
+G, J (decapsulation: 9) and the matrix's lone ninth entry at ML-KEM-768 ran one state at a time
+(the pool, above, took H, J and that entry into the four lanes).
 
 **2026-11-27: ML-KEM, v1 (scalar).** A key pair from a fixed seed, an encapsulation to it with a
 fixed m, and the decapsulation of that ciphertext, at ML-KEM-768 and ML-KEM-1024. OpenSSL 3.0.13

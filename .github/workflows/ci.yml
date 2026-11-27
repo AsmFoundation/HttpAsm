@@ -22,7 +22,7 @@
 #        when it has AVX-512), each on epoll and then with every server asking for io_uring;
 #      - tests/native/tiers: every multi-version routine at every tier against oracles and
 #        guard pages, natively, and under Intel SDE (AVX-512) when the CPU has no AVX-512;
-#      - tests/native/stack: the large frames (ML-KEM's, up to about 21 KiB) on stacks too
+#      - tests/native/stack: the large frames (ML-KEM's, up to about 27 KiB) on stacks too
 #        small fault in their guard page and write nothing below it (no stack clash);
 #      - tests/fuzz/replay.sh: every input the fuzzers kept (seeds, minimized corpora),
 #        replayed with every check of theirs against the Release objects.

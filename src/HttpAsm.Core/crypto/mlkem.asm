@@ -35,9 +35,10 @@
 ; was given by OR-ing their XORs, and picks K' or J(z || c) by mask (implicit rejection). Only
 ; public data steers branches: rejection sampling (rho), the input checks (the keys).
 ; Stack: a call goes up to 11,048 octets deep at v1 (ML-KEM-1024's decapsulation: 14 polynomials
-; and the ciphertext) and 20,800 at v3 (the caches, four Keccak states and their octets, the
-; matrix), callees included (tests/native/stack measures each), touched every 4032 octets on the
-; way down (MK_ENTER); everything but v3's matrix (public) is wiped before a function returns.
+; and the ciphertext) and 27,232 at v3 (the caches, four Keccak states and their octets, the pool's
+; records, the whole matrix: 8 KiB at k = 4), callees included (tests/native/stack measures each),
+; touched every 4032 octets on the way down (MK_ENTER); everything but v3's matrix (public) is
+; wiped before a function returns.
 ; =============================================================================
 default rel
 %include "httpasm_core.inc"
@@ -1939,7 +1940,24 @@ mk_rej_v3:
 %define MF_POLYS    1408                    ; v1: the polynomials from here (512 each; 64-aligned)
 %define MF_X4       1408                    ; v3: four Keccak states, interleaved (800, 64-aligned)
 %define MF_X4BUF    2208                    ; v3: their squeezed octets, 504 a state
-%define MF3_POLYS   4224                    ; v3: the polynomials from here (64-aligned)
+%define MF_LANE     4224                    ; v3: the pool's four lane records (64 each)
+%define MF_POOL     4480                    ; v3: the pool's matrix queue (64)
+%define MF3_POLYS   4544                    ; v3: the polynomials from here (64-aligned)
+
+; The pool's lane record (mk_pool_v3: MF_LANE + 64 lane) and queue (MF_POOL).
+%define LN_KIND     0                       ; dword: 0 idle, 1 a hash, 2 a matrix entry
+%define LN_POS      4                       ; dword: a hash's next qword in its block; an entry's blocks
+%define LN_RATE     8                       ; dword: a hash's rate in qwords
+%define LN_PAD      12                      ; dword: a hash's padding octet (0x06 SHA-3, 0x1F SHAKE)
+%define LN_IN       16                      ; qword: a hash's next input qword
+%define LN_LEFT     24                      ; qword: a hash's input qwords left; an entry's coefficients
+%define LN_OUT      32                      ; qword: a hash's 32-octet output; an entry's polynomial
+%define LN_FINAL    40                      ; dword: 1 once a hash's padded block is in
+%define PL_NEXT     0                       ; dword: the next matrix entry
+%define PL_END      4                       ; dword: past the last
+%define PL_FLAGS    8                       ; dword: transposed << 8 | k
+%define PL_RHO      16                      ; qword: rho
+%define PL_DST      24                      ; qword: entry e's polynomial at PL_DST + 512 e
 
 ; MK_ENTER frame / MK_FINISH frame, end: as ed25519.asm's: six registers kept, the 64-aligned
 ; frame at rbp (rsp 16-aligned for the C calls), the entry rsp in the frame's last qword;
@@ -2343,9 +2361,10 @@ mk_sample4_v3:
 ; second when eta1 is 3 (192 octets: ML-KEM-512); a lone last nonce by mk_prf_v3.
 ; mk_matrix_v3: rdi = the first destination polynomial (512 octets apart) <- entries edx ..
 ; edx + ecx - 1 of a k x k matrix (r8d = k; entry e = i k + j): A[i][j] = SampleNTT(rho || j || i)
-; when r9d = 0 (key generation's rows), A[j][i] = SampleNTT(rho || i || j) when r9d = 1
-; (encryption's columns: A transposed); rsi = rho. Four entries at a time (mk_sample4_v3; the idle
-; lanes of a batch of 2 or 3 sample entries past it, dropped), a lone last entry by mk_sample_v3.
+; when r9d = 0 (key generation's rows: its one caller now), A[j][i] = SampleNTT(rho || i || j)
+; when r9d = 1 (A transposed: encryption's entries come from the pool, mk_pool_v3, beside
+; H(ek)); rsi = rho. Four entries at a time (mk_sample4_v3; the idle lanes of a batch of 2 or 3
+; sample entries past it, dropped), a lone last entry by mk_sample_v3.
 ; Both work in the caller's frame; keep rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 align 16
@@ -2521,20 +2540,295 @@ mk_matrix_v3:
     call        mk_sample4_v3
     jmp         .batch
 .single:
-    test        r15d, 0x100
-    jnz         .transposed
-    mov         ecx, eax                    ; A[i][j]: rho || j || i
-    jmp         .sample
-.transposed:
-    mov         ecx, edx                    ; A[j][i]: rho || i || j
-    mov         edx, eax
-.sample:
+    mov         ecx, eax                    ; A[i][j]: rho || j || i (x = j in edx, y = i)
+    test        r15d, 0x100                 ; A[j][i]: rho || i || j, chosen branch-free (the
+    cmovnz      ecx, edx                    ; pool samples encryption's entries now, so only
+    cmovnz      edx, eax                    ; key generation's rows come here)
     mov         rdi, rbx
     mov         rsi, r12
     call        mk_sample_v3
     add         rbx, 512
     inc         r13d
     jmp         .batch
+.done:
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; The pool (v3): different sponges in the four lanes of the same permutations. Encapsulation's
+; H(ek) and decapsulation's H(ek) and J(z || c) are long absorptions (9 to 12 blocks) that one
+; state at a time would run alone, while the matrix's entries are short squeezes (3 blocks, a
+; fourth now and then); so each lane runs whatever it was given and, when that is done, takes
+; the queue's next matrix entry: the hashes cost nothing beside the matrix.
+;   - mk_lane_hash: edi = the lane, rsi = the input (rdx qwords: every input here is a multiple of
+;     8 octets), ecx = the rate in qwords, r8d = the padding octet (0x06 SHA-3, 0x1F SHAKE), r9 =
+;     where its 32 octets go (SHA3-256's digest, or J's 32 octets of SHAKE256), r10 = 4 qwords
+;     absorbed first (J's z) or 0: the lane zeroed and its first block absorbed.
+;   - mk_lane_absorb: edi = a hash lane: its next block XORed in, or the last octets and the
+;     padding (the suffix after the input, 0x80 in the block's last octet), LN_FINAL then set.
+;   - mk_lane_seed: edi = a lane <- the queue's next matrix entry: SHAKE128(rho || x || y)'s
+;     state (one block, absorbed and padded), its polynomial PL_DST + 512 e.
+;   - mk_lane_squeeze: edi = a matrix lane, just permuted: its 168 octets to its buffer
+;     (MF_X4BUF + 504 lane: the first three blocks in turn, any later one at its start), the
+;     rejection after the third and each later -> eax = 1 when its 256 coefficients are in.
+;   - mk_pool_v3: every idle lane takes an entry, then permutation after permutation each lane's
+;     work goes on (a hash absorbs or, its padded block permuted, gives its 32 octets) and a lane
+;     that finished takes the next entry, until no lane works.
+; The caller sets MF_POOL (the queue: entries PL_NEXT .. PL_END - 1 of a k x k matrix, rho, the
+; destination) and every lane's LN_KIND (0, or a hash by mk_lane_hash). All of it in the caller's
+; frame; the state and records lie in the wiped part (J's lane holds z).
+;   mk_lane_*: keep rbx, rbp, r12-r15; mk_pool_v3 the same, clobbering the rest.
+; -----------------------------------------------------------------------------
+align 16
+mk_lane_hash:
+    mov         eax, edi
+    shl         eax, 6
+    lea         r11, [rbp + MF_LANE + rax]
+    mov         dword [r11 + LN_KIND], 1
+    mov         dword [r11 + LN_POS], 0
+    mov         [r11 + LN_RATE], ecx
+    mov         [r11 + LN_PAD], r8d
+    mov         [r11 + LN_IN], rsi
+    mov         [r11 + LN_LEFT], rdx
+    mov         [r11 + LN_OUT], r9
+    mov         dword [r11 + LN_FINAL], 0
+    lea         rax, [rbp + MF_X4 + rdi * 8]
+    xor         ecx, ecx
+  %assign xl 0
+  %rep 25
+    mov         [rax + 32 * xl], rcx
+    %assign xl xl + 1
+  %endrep
+    test        r10, r10
+    jz          mk_lane_absorb              ; (edi is still the lane)
+  %assign xl 0
+  %rep 4
+    mov         rcx, [r10 + 8 * xl]
+    mov         [rax + 32 * xl], rcx
+    %assign xl xl + 1
+  %endrep
+    mov         dword [r11 + LN_POS], 4
+    jmp         mk_lane_absorb
+
+align 16
+mk_lane_absorb:
+    mov         eax, edi
+    shl         eax, 6
+    lea         r11, [rbp + MF_LANE + rax]
+    lea         r10, [rbp + MF_X4 + rdi * 8]    ; the lane's qword 0 (the next 32 octets on)
+    mov         ecx, [r11 + LN_POS]
+    mov         r8d, [r11 + LN_RATE]
+    mov         rsi, [r11 + LN_IN]
+    mov         rdx, [r11 + LN_LEFT]
+.qword:
+    test        rdx, rdx
+    jz          .pad
+    mov         rax, [rsi]
+    mov         r9d, ecx
+    shl         r9d, 5
+    xor         [r10 + r9], rax
+    add         rsi, 8
+    dec         rdx
+    inc         ecx
+    cmp         ecx, r8d
+    jb          .qword
+    xor         ecx, ecx                    ; a full block: the next starts at qword 0
+    jmp         .save
+.pad:
+    movzx       eax, byte [r11 + LN_PAD]
+    mov         r9d, ecx
+    shl         r9d, 5
+    xor         [r10 + r9], rax             ; the suffix and pad10*1's first 1, right after the input
+    lea         r9d, [r8 - 1]
+    shl         r9d, 5
+    mov         rax, 0x8000000000000000
+    xor         [r10 + r9], rax             ; pad10*1's last 1, in the block's last octet
+    mov         dword [r11 + LN_FINAL], 1
+.save:
+    mov         [r11 + LN_POS], ecx
+    mov         [r11 + LN_IN], rsi
+    mov         [r11 + LN_LEFT], rdx
+    ret
+
+align 16
+mk_lane_seed:
+    mov         eax, [rbp + MF_POOL + PL_NEXT]
+    inc         dword [rbp + MF_POOL + PL_NEXT]
+    mov         r8d, eax                    ; the entry
+    xor         edx, edx
+    movzx       ecx, byte [rbp + MF_POOL + PL_FLAGS]
+    div         ecx                         ; eax = i, edx = j
+    mov         r9, rax
+    shl         r9, 8
+    or          r9, rdx                     ; j || i: A[i][j]
+    mov         r10, rdx
+    shl         r10, 8
+    or          r10, rax                    ; i || j: A[j][i], A transposed
+    test        dword [rbp + MF_POOL + PL_FLAGS], 0x100
+    cmovnz      r9, r10
+    or          r9, 0x1F0000                ; SHAKE's suffix after the two octets
+    mov         eax, edi
+    shl         eax, 6
+    lea         r11, [rbp + MF_LANE + rax]
+    mov         dword [r11 + LN_KIND], 2
+    mov         dword [r11 + LN_POS], 0
+    mov         qword [r11 + LN_LEFT], 0
+    mov         rax, r8
+    shl         rax, 9
+    add         rax, [rbp + MF_POOL + PL_DST]
+    mov         [r11 + LN_OUT], rax
+    lea         r10, [rbp + MF_X4 + rdi * 8]
+    mov         rsi, [rbp + MF_POOL + PL_RHO]
+  %assign xl 0
+  %rep 4
+    mov         rax, [rsi + 8 * xl]
+    mov         [r10 + 32 * xl], rax
+    %assign xl xl + 1
+  %endrep
+    mov         [r10 + 128], r9
+    xor         eax, eax
+  %assign xl 5
+  %rep 20
+    mov         [r10 + 32 * xl], rax
+    %assign xl xl + 1
+  %endrep
+    mov         rax, 0x8000000000000000
+    mov         [r10 + 32 * 20], rax        ; pad10*1's last 1: SHAKE128's block ends at lane 20
+    ret
+
+align 16
+mk_lane_squeeze:
+    push        rbx
+    push        r12
+    push        r13
+    mov         ebx, edi
+    mov         eax, edi
+    shl         eax, 6
+    lea         r12, [rbp + MF_LANE + rax]
+    imul        eax, ebx, 504
+    lea         r13, [rbp + MF_X4BUF + rax]  ; the lane's buffer
+    mov         ecx, [r12 + LN_POS]
+    imul        eax, ecx, 168
+    cmp         ecx, 3
+    jb          .place
+    xor         eax, eax                    ; a fourth block on: at the buffer's start
+.place:
+    lea         rdi, [r13 + rax]
+    lea         rsi, [rbp + MF_X4 + rbx * 8]
+  %assign xl 0
+  %rep 21
+    mov         rax, [rsi + 32 * xl]
+    mov         [rdi + 8 * xl], rax
+    %assign xl xl + 1
+  %endrep
+    inc         dword [r12 + LN_POS]
+    mov         ecx, [r12 + LN_POS]
+    cmp         ecx, 3
+    jb          .more
+    ja          .extra
+    mov         rdi, [r12 + LN_OUT]         ; three blocks: the first rejection
+    mov         esi, 256
+    mov         rdx, r13
+    mov         ecx, 504
+    call        mk_rej_v3
+    mov         [r12 + LN_LEFT], rax
+    jmp         .check
+.extra:
+    mov         rax, [r12 + LN_LEFT]
+    mov         rdi, [r12 + LN_OUT]
+    lea         rdi, [rdi + rax * 2]
+    mov         esi, 256
+    sub         esi, eax
+    mov         rdx, r13
+    mov         ecx, 168
+    call        mk_rej_v3
+    add         [r12 + LN_LEFT], rax
+.check:
+    xor         eax, eax
+    cmp         qword [r12 + LN_LEFT], 256
+    sete        al
+    jmp         .out
+.more:
+    xor         eax, eax
+.out:
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+align 16
+mk_pool_v3:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    jmp         .seed                       ; every idle lane takes an entry first
+.round:
+    mov         eax, [rbp + MF_LANE + LN_KIND]
+    or          eax, [rbp + MF_LANE + 64 + LN_KIND]
+    or          eax, [rbp + MF_LANE + 128 + LN_KIND]
+    or          eax, [rbp + MF_LANE + 192 + LN_KIND]
+    jz          .done
+    lea         rdi, [rbp + MF_X4]
+    call        ha_keccak_f1600_x4_v3
+    xor         ebx, ebx
+.lane:
+    mov         eax, ebx
+    shl         eax, 6
+    lea         r12, [rbp + MF_LANE + rax]
+    mov         eax, [r12 + LN_KIND]
+    cmp         eax, 1
+    je          .hash
+    cmp         eax, 2
+    jne         .next                       ; idle
+    mov         edi, ebx
+    call        mk_lane_squeeze
+    test        eax, eax
+    jz          .next
+    mov         dword [r12 + LN_KIND], 0    ; the entry is complete
+    jmp         .next
+.hash:
+    cmp         dword [r12 + LN_FINAL], 0
+    jne         .output
+    mov         edi, ebx
+    call        mk_lane_absorb
+    jmp         .next
+.output:
+    mov         rdi, [r12 + LN_OUT]         ; the padded block was permuted: the first 32 octets
+    lea         rsi, [rbp + MF_X4 + rbx * 8]
+  %assign xl 0
+  %rep 4
+    mov         rax, [rsi + 32 * xl]
+    mov         [rdi + 8 * xl], rax
+    %assign xl xl + 1
+  %endrep
+    mov         dword [r12 + LN_KIND], 0
+.next:
+    inc         ebx
+    cmp         ebx, 4
+    jb          .lane
+.seed:
+    xor         ebx, ebx
+.idle:
+    mov         eax, ebx
+    shl         eax, 6
+    cmp         dword [rbp + MF_LANE + rax + LN_KIND], 0
+    jne         .busy
+    mov         eax, [rbp + MF_POOL + PL_NEXT]
+    cmp         eax, [rbp + MF_POOL + PL_END]
+    jae         .busy
+    mov         edi, ebx
+    call        mk_lane_seed
+.busy:
+    inc         ebx
+    cmp         ebx, 4
+    jb          .idle
+    jmp         .round
 .done:
     pop         r15
     pop         r14
@@ -2994,15 +3288,32 @@ mk_copy_long:
     rep         movsb
     ret
 
+; MK3_POOL_QUEUE rho: the pool's queue (inside MK_SCHEME3's functions: it reads M3_K and M3_A): every
+; entry of A transposed (encryption's), from rho (a register), into M3_A; every lane idle.
+; Clobbers rax.
+%macro MK3_POOL_QUEUE 1
+    mov         dword [rbp + MF_LANE + LN_KIND], 0
+    mov         dword [rbp + MF_LANE + 64 + LN_KIND], 0
+    mov         dword [rbp + MF_LANE + 128 + LN_KIND], 0
+    mov         dword [rbp + MF_LANE + 192 + LN_KIND], 0
+    mov         dword [rbp + MF_POOL + PL_NEXT], 0
+    mov         dword [rbp + MF_POOL + PL_END], M3_K * M3_K
+    mov         dword [rbp + MF_POOL + PL_FLAGS], 0x100 | M3_K
+    mov         [rbp + MF_POOL + PL_RHO], %1
+    lea         rax, [rbp + M3_A]
+    mov         [rbp + MF_POOL + PL_DST], rax
+%endmacro
+
 ; =============================================================================
 ; MK_SCHEME3 name, k, eta1, du, dv: the parameter set's v3 (AVX2) routines <name>_keypair_v3,
 ; _encaps_v3, _decaps_v3: MK_SCHEME's algorithms with v3's routines, in a frame of their own.
 ; Differences from v1's flow:
 ;   - each polynomial a product takes as its second factor gets a cache (mk_mulcache_v3) once:
 ;     key generation's s-hat, encryption's y-hat (used k + 1 times), decryption's u-hat;
-;   - the matrix is sampled a group of rows (key generation) or columns (encryption) at a time:
-;     all k for k = 2 and 3 (k^2 entries), one for k = 4 (4 entries); the entries are public, so
-;     they sit above the wiped part of the frame;
+;   - the matrix is sampled whole before the products (four entries a permutation), and stored
+;     whole (k^2 polynomials, public: above the wiped part of the frame); encapsulation samples
+;     it in the pool beside H(ek), decapsulation beside H(ek) and J(z || c) (mk_pool_v3), key
+;     generation by mk_matrix_v3; K-PKE.Encrypt (%1_pke_enc_v3) takes it from its caller;
 ;   - the noise vectors are sampled as one run of nonces (mk_noise_v3);
 ;   - no reduction before the compressions and encodings: they take the sums as they come.
 ; =============================================================================
@@ -3014,11 +3325,6 @@ mk_copy_long:
   %xdefine M3_EK (384 * M3_K + 32)
   %xdefine M3_DK (768 * M3_K + 96)
   %xdefine M3_CT (32 * (M3_DU * M3_K + M3_DV))
-  %if M3_K == 4
-    %xdefine M3_ROWS 1                              ; rows (or columns) sampled together
-  %else
-    %xdefine M3_ROWS M3_K
-  %endif
   %xdefine M3_COMPU mk_compress %+ M3_DU %+ _v3
   %xdefine M3_COMPV mk_compress %+ M3_DV %+ _v3
   %xdefine M3_DECU mk_decompress %+ M3_DU %+ _v3
@@ -3031,14 +3337,15 @@ mk_copy_long:
   %xdefine M3_U (M3_T + 512)
   %xdefine M3_CBUF (M3_U + 512)                     ; c', re-encrypted (decapsulation)
   %xdefine M3_WIPE ((M3_CBUF + M3_CT + 63) & -64)   ; the frame below this is wiped
-  %xdefine M3_A (M3_WIPE)                           ; the matrix's entries
-  %xdefine M3_FRAME (M3_A + 512 * M3_ROWS * M3_K + 64)
+  %xdefine M3_A (M3_WIPE)                           ; the matrix (k^2 entries, row-major)
+  %xdefine M3_FRAME (M3_A + 512 * M3_K * M3_K + 64)
 
 ; ----------------------------------------------------------------------------
 ; %1_pke_enc_v3: K-PKE.Encrypt in v3's frame (arguments as %1_pke_enc's: rdi = c's destination,
-; rsi = ek, rdx = m, rcx = r). t-hat into vector 1; y, e1, e2 sampled as one run (vector 2 and
-; the e area); y-hat cached; u_i from column i of A (the group's entries at M3_A), compressed
-; straight into c; then v. Keeps rbx, rbp, r12-r15.
+; rsi = ek, rdx = m, rcx = r), with A transposed already at M3_A (entry i k + j = A[j][i]: the
+; caller's pool sampled it). t-hat into vector 1; y, e1, e2 sampled as one run (vector 2 and the
+; e area); y-hat cached; u_i from row i of A transposed, compressed straight into c; then v.
+; Keeps rbx, rbp, r12-r15.
 ; ----------------------------------------------------------------------------
 align 16
 %1_pke_enc_v3:
@@ -3073,30 +3380,10 @@ align 16
     call        mk_mulcache_v3
     %assign mi mi + 1
   %endrep
-  %if M3_ROWS > 1
-    lea         rdi, [rbp + M3_A]           ; every column of A at once
-    lea         rsi, [r12 + 384 * M3_K]
-    xor         edx, edx
-    mov         ecx, M3_K * M3_K
-    mov         r8d, M3_K
-    mov         r9d, 1
-    call        mk_matrix_v3
-  %endif
     xor         r15d, r15d                  ; i
 .column:
-  %if M3_ROWS == 1
-    lea         rdi, [rbp + M3_A]           ; column i of A
-    lea         rsi, [r12 + 384 * M3_K]
-    imul        edx, r15d, M3_K
-    mov         ecx, M3_K
-    mov         r8d, M3_K
-    mov         r9d, 1
-    call        mk_matrix_v3
-    lea         rsi, [rbp + M3_A]
-  %else
-    imul        esi, r15d, 512 * M3_K
+    imul        esi, r15d, 512 * M3_K       ; column i of A: row i of A transposed
     lea         rsi, [rbp + M3_A + rsi]
-  %endif
     lea         rdi, [rbp + M3_T]
     lea         rdx, [rbp + M3_C]
     mov         ecx, M3_K
@@ -3183,30 +3470,17 @@ align 16
     call        mk_mulcache_v3
     %assign mi mi + 1
   %endrep
-  %if M3_ROWS > 1
-    lea         rdi, [rbp + M3_A]           ; every row of A at once
+    lea         rdi, [rbp + M3_A]           ; A, every entry
     lea         rsi, [rbp + MF_G]
     xor         edx, edx
     mov         ecx, M3_K * M3_K
     mov         r8d, M3_K
     xor         r9d, r9d
     call        mk_matrix_v3
-  %endif
     xor         r12d, r12d                  ; i
 .row:
-  %if M3_ROWS == 1
-    lea         rdi, [rbp + M3_A]           ; row i of A
-    lea         rsi, [rbp + MF_G]
-    imul        edx, r12d, M3_K
-    mov         ecx, M3_K
-    mov         r8d, M3_K
-    xor         r9d, r9d
-    call        mk_matrix_v3
-    lea         rsi, [rbp + M3_A]
-  %else
-    imul        esi, r12d, 512 * M3_K
+    imul        esi, r12d, 512 * M3_K       ; row i of A
     lea         rsi, [rbp + M3_A + rsi]
-  %endif
     lea         rdi, [rbp + M3_T]
     lea         rdx, [rbp + M3_C]
     mov         ecx, M3_K
@@ -3259,7 +3533,8 @@ align 16
     MK_FINISH   M3_FRAME, M3_WIPE
 
 ; ----------------------------------------------------------------------------
-; <name>_encaps_v3: as <name>_encaps_v1 (the modulus check by mk_check12_v3).
+; <name>_encaps_v3: as <name>_encaps_v1 (the modulus check by mk_check12_v3), with H(ek) in the
+; pool's lane 0 beside A transposed's entries in the others.
 ; ----------------------------------------------------------------------------
 align 16
 %1_encaps_v3:
@@ -3273,11 +3548,19 @@ align 16
     call        mk_check12_v3
     test        eax, eax
     jnz         .refused
-    mov         rdi, [rbp + MF_ARG2]        ; (K, r) = G(m || H(ek))
-    mov         esi, M3_EK
-    lea         rdx, [rbp + MF_IN + 32]
-    call        httpasm_sha3_256
-    lea         rdi, [rbp + MF_IN]
+    mov         rsi, [rbp + MF_ARG2]
+    add         rsi, 384 * M3_K             ; rho
+    MK3_POOL_QUEUE rsi
+    xor         edi, edi                    ; lane 0: H(ek), SHA3-256 (rate 17 qwords)
+    mov         rsi, [rbp + MF_ARG2]
+    mov         edx, M3_EK / 8
+    mov         ecx, 17
+    mov         r8d, 0x06
+    lea         r9, [rbp + MF_IN + 32]
+    xor         r10d, r10d
+    call        mk_lane_hash
+    call        mk_pool_v3
+    lea         rdi, [rbp + MF_IN]          ; (K, r) = G(m || H(ek))
     mov         rsi, [rbp + MF_ARG3]
     mov         ecx, 32
     call        ha_copy_short
@@ -3309,9 +3592,12 @@ align 16
     MK_FINISH   M3_FRAME, M3_WIPE
 
 ; ----------------------------------------------------------------------------
-; <name>_decaps_v3: as <name>_decaps_v1. u' decompressed, transformed and cached (vector 2 and
-; the caches), s-hat decoded (vector 1: raw 12-bit values, below 4096; the products' sums stay
-; below 2^27 and their results below q all the same), v' into U.
+; <name>_decaps_v3: as <name>_decaps_v1. H(dk's ek) (the hash check's), J(z || c) and A transposed
+; (the re-encryption's) first, together in the pool: H in lane 0, J in lane 1, entries in the
+; others and in each lane as it frees. Then the check (refused as v1: the work before it was on
+; public data and z, all of it wiped), u' decompressed, transformed and cached (vector 2 and the
+; caches), s-hat decoded (vector 1: raw 12-bit values, below 4096; the products' sums stay below
+; 2^27 and their results below q all the same), v' into U.
 ; ----------------------------------------------------------------------------
 align 16
 %1_decaps_v3:
@@ -3319,11 +3605,28 @@ align 16
     mov         [rbp + MF_OUT], rdi         ; key
     mov         [rbp + MF_ARG1], rsi        ; dk
     mov         [rbp + MF_ARG2], rdx        ; c
-    lea         rdi, [rsi + 384 * M3_K]     ; the hash check (public data)
-    mov         esi, M3_EK
-    lea         rdx, [rbp + MF_HEK]
-    call        httpasm_sha3_256
+    add         rsi, 768 * M3_K             ; rho, in dk's ek
+    MK3_POOL_QUEUE rsi
+    xor         edi, edi                    ; lane 0: H(dk's ek), SHA3-256
     mov         rsi, [rbp + MF_ARG1]
+    add         rsi, 384 * M3_K
+    mov         edx, M3_EK / 8
+    mov         ecx, 17
+    mov         r8d, 0x06
+    lea         r9, [rbp + MF_HEK]
+    xor         r10d, r10d
+    call        mk_lane_hash
+    mov         edi, 1                      ; lane 1: J(z || c), SHAKE256 to 32 octets (z first)
+    mov         rsi, [rbp + MF_ARG2]
+    mov         edx, M3_CT / 8
+    mov         ecx, 17
+    mov         r8d, 0x1F
+    lea         r9, [rbp + MF_KBAR]
+    mov         r10, [rbp + MF_ARG1]
+    add         r10, M3_DK - 32
+    call        mk_lane_hash
+    call        mk_pool_v3
+    mov         rsi, [rbp + MF_ARG1]        ; the hash check (public data)
     add         rsi, 384 * M3_K + M3_EK
     mov         rax, [rbp + MF_HEK]
     xor         rax, [rsi]
@@ -3372,8 +3675,8 @@ align 16
     lea         rdi, [rbp + MF_M]
     lea         rsi, [rbp + M3_T]
     call        mk_tomsg_v3
-    lea         rdi, [rbp + MF_IN]          ; (K', r') = G(m' || h); K-bar = J(z || c)
-    lea         rsi, [rbp + MF_M]
+    lea         rdi, [rbp + MF_IN]          ; (K', r') = G(m' || h) (K-bar, J(z || c), came
+    lea         rsi, [rbp + MF_M]           ; from the pool)
     mov         ecx, 32
     call        ha_copy_short
     lea         rdi, [rbp + MF_IN + 32]
@@ -3384,21 +3687,6 @@ align 16
     mov         esi, 64
     lea         rdx, [rbp + MF_G]
     call        httpasm_sha3_512
-    lea         rdi, [rbp + MF_XOF]
-    call        httpasm_shake256_init
-    lea         rdi, [rbp + MF_XOF]
-    mov         rsi, [rbp + MF_ARG1]
-    add         rsi, M3_DK - 32
-    mov         edx, 32
-    call        httpasm_sha3_update
-    lea         rdi, [rbp + MF_XOF]
-    mov         rsi, [rbp + MF_ARG2]
-    mov         edx, M3_CT
-    call        httpasm_sha3_update
-    lea         rdi, [rbp + MF_XOF]
-    lea         rsi, [rbp + MF_KBAR]
-    mov         edx, 32
-    call        httpasm_shake_squeeze
     lea         rdi, [rbp + M3_CBUF]        ; c' = K-PKE.Encrypt(ek_PKE, m', r'), compared with c
     mov         rsi, [rbp + MF_ARG1]
     add         rsi, 384 * M3_K
