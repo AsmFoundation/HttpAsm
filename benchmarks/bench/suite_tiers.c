@@ -69,6 +69,28 @@ static void add_h1_response(void)
     bench_add(&c);
 }
 
+/* add_sha256: the tiers cases of httpasm_sha256 on 64 octets (two compressions: the block and
+ * the padding's), 1 KiB and 16 KiB of bench_sha_input: the scalar compression (v1) against the
+ * SHA extensions' (v2 and up, where the CPU has them). */
+static void add_sha256(void)
+{
+    static const size_t lengths[] = { 64, 1024, 16384 };
+    static const char *const labels[] = { "64 octets", "1 KiB", "16 KiB" };
+    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = "sha256";
+        c.input = labels[i];
+        c.data = bench_sha_input();
+        c.length = lengths[i];
+        c.octets = lengths[i];
+        c.ours = bench_sha256;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_hpack_decode: the tiers case of httpasm_hpack_decode on the rivals suite's block (bench.h):
  * the Huffman decoder's versions (v1's automaton, v2's table decoder) each against the tier below.
  * Left out, with a word on stderr, when the block cannot be made. */
@@ -101,6 +123,7 @@ void bench_suite_tiers(void)
     add_h1_request("API POST", bench_api_request);
     add_h1_response();
     add_hpack_decode();
+    add_sha256();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

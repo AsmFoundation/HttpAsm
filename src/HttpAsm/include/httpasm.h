@@ -249,8 +249,8 @@ uint32_t httpasm_abi_version(void);
 
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
- * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response;
- * 0 for any other value. */
+ * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
+ * 10 httpasm_sha256_ctx; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -297,6 +297,37 @@ uint64_t httpasm_cpu_features(void);
  * and measurements that compare tiers in one process. Safe while other threads run HttpAsm
  * code: every tier computes the same results. */
 uint64_t httpasm_cpu_limit(uint64_t cap);
+
+/* ------------------------------------------------------------------------------------------
+ * Hashes (FIPS 180-4). No function allocates or fails; none branches or picks an address by
+ * the data, so hashing a secret shows nothing but its length.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_SHA256_DIGEST 32    /* octets of a SHA-256 digest */
+#define HTTPASM_SHA256_BLOCK  64    /* octets of a SHA-256 block (HMAC pads its key to one) */
+
+/* A running SHA-256 hash (112 octets). Its octets are its whole state: a copy forks the hash
+ * (a TLS transcript hashed up to one message and then on). */
+typedef struct httpasm_sha256_ctx {
+    uint32_t state[8];              /* H0-H7 */
+    uint64_t length;                /* octets fed so far */
+    uint8_t buffer[64];             /* the next block's first octets */
+    uint32_t buffered;              /* how many of them */
+    uint32_t reserved;
+} httpasm_sha256_ctx;
+
+/* Starts a hash (or starts it over). */
+void httpasm_sha256_init(httpasm_sha256_ctx *h);
+
+/* Feeds n octets (n may be 0). The whole message must stay below 2^61 octets. */
+void httpasm_sha256_update(httpasm_sha256_ctx *h, const uint8_t *data, size_t n);
+
+/* Writes the digest of everything fed, then wipes h to zeros (it held the message's last
+ * octets): call httpasm_sha256_init before feeding it again. */
+void httpasm_sha256_final(httpasm_sha256_ctx *h, uint8_t digest[HTTPASM_SHA256_DIGEST]);
+
+/* The digest of n octets at once. */
+void httpasm_sha256(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA256_DIGEST]);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)

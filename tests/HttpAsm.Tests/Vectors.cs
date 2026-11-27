@@ -1,0 +1,77 @@
+namespace HttpAsm.Tests;
+
+/// <summary>
+/// The official test vectors tests/tools.sh fetches (pinned by SHA-256) into tests/.tools/:
+/// NIST's CAVP response files and, as M2 goes on, Project Wycheproof's. tests/run-linux.sh names
+/// that directory in HTTPASM_VECTORS and sets HTTPASM_REQUIRE_VECTORS=1, so there a missing file
+/// fails the test; elsewhere (an IDE run without the tools) the test is skipped and says why.
+/// </summary>
+internal static class Vectors
+{
+    /// <summary>
+    /// The path of a vector file. A missing file ends the calling test: with Assert.Fail when
+    /// HTTPASM_REQUIRE_VECTORS is 1, else with Assert.Skip (xunit's exceptions for both).
+    /// </summary>
+    /// <param name="relative">The file under the tools directory, as tools.sh lays it out
+    /// (e.g. "cavp/shabytetestvectors/SHA256ShortMsg.rsp").</param>
+    /// <returns>The file's full path; it exists.</returns>
+    public static string Path(string relative)
+    {
+        string? root = Environment.GetEnvironmentVariable("HTTPASM_VECTORS");
+        string? path = string.IsNullOrEmpty(root) ? null : System.IO.Path.Combine(root, relative);
+        if (path is not null && File.Exists(path))
+        {
+            return path;
+        }
+
+        string reason = $"{relative} is not there (HTTPASM_VECTORS = '{root}'); tests/tools.sh fetches it, tests/run-linux.sh names it.";
+        if (Environment.GetEnvironmentVariable("HTTPASM_REQUIRE_VECTORS") == "1")
+        {
+            Assert.Fail(reason);
+        }
+
+        Assert.Skip(reason);
+        return null!;                       // Assert.Skip throws: never reached
+    }
+
+    /// <summary>
+    /// The records of a CAVP response file: each a group of "Name = value" lines separated by a
+    /// blank line, its comments (#) and bracketed parameter lines ([L = 32]) left out.
+    /// </summary>
+    /// <param name="path">The .rsp file.</param>
+    /// <returns>Each record's fields by name, in file order.</returns>
+    public static IEnumerable<Dictionary<string, string>> CavpRecords(string path)
+    {
+        var record = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string raw in File.ReadLines(path))
+        {
+            string line = raw.Trim();
+            if (line.Length == 0)
+            {
+                if (record.Count > 0)
+                {
+                    yield return record;
+                    record = new Dictionary<string, string>(StringComparer.Ordinal);
+                }
+
+                continue;
+            }
+
+            if (line.StartsWith('#') || line.StartsWith('['))
+            {
+                continue;
+            }
+
+            int equals = line.IndexOf('=');
+            if (equals > 0)
+            {
+                record[line[..equals].Trim()] = line[(equals + 1)..].Trim();
+            }
+        }
+
+        if (record.Count > 0)
+        {
+            yield return record;
+        }
+    }
+}

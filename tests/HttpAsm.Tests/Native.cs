@@ -34,6 +34,31 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_abi_version")]
     internal static partial uint AbiVersion();
 
+    /// <summary>void httpasm_sha256_init(httpasm_sha256_ctx *h).</summary>
+    /// <param name="h">The running hash to start (or start over).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha256_init")]
+    internal static partial void Sha256Init(Sha256Context* h);
+
+    /// <summary>void httpasm_sha256_update(httpasm_sha256_ctx *h, const uint8_t *data, size_t n).</summary>
+    /// <param name="h">The running hash.</param>
+    /// <param name="data">The octets to feed (anything when n is 0).</param>
+    /// <param name="n">How many.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha256_update")]
+    internal static partial void Sha256Update(Sha256Context* h, byte* data, nuint n);
+
+    /// <summary>void httpasm_sha256_final(httpasm_sha256_ctx *h, uint8_t digest[32]): wipes h.</summary>
+    /// <param name="h">The running hash; all zeros afterwards.</param>
+    /// <param name="digest">Receives the 32-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha256_final")]
+    internal static partial void Sha256Final(Sha256Context* h, byte* digest);
+
+    /// <summary>void httpasm_sha256(const uint8_t *data, size_t n, uint8_t digest[32]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the 32-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha256")]
+    internal static partial void Sha256(byte* data, nuint n, byte* digest);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>

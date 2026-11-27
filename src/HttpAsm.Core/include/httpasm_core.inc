@@ -73,6 +73,8 @@ extern ha_token_length      ; rax = the leading tchars of rdi[0..rsi) (rsi when 
 extern ha_span_v2           ; v2 and up: rax = the leading octets of rdi[0..rsi) in the class of
                             ; the low-nibble table in xmm3 (paired with ha_tchar_hi); keeps rdi,
                             ; rsi, xmm3; clobbers rcx, rdx, the other xmm0-xmm6 (fields.asm)
+extern ha_sha256_blocks     ; SHA-256's compression: state rdi (8 dwords), rdx 64-octet blocks at
+                            ; rsi; keeps rdi, rbx, rbp, r12-r15 (crypto/sha256.asm)
 extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
                             ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 

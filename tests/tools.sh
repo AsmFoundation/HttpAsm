@@ -83,4 +83,18 @@ pico=https://raw.githubusercontent.com/h2o/picohttpparser/dd573d8fa9264c646a400e
 fetch picohttpparser-dd573d8/picohttpparser.c "$pico/picohttpparser.c" 8aacb701e60a3a5c600f51845d9554463773eafed88f9c4f47472ed5dac6a942
 fetch picohttpparser-dd573d8/picohttpparser.h "$pico/picohttpparser.h" 1fc9074dd12418b2b91e55ef3a8279bccf8d3577b790dea6f2f908ab2a157f1c
 
+# The official test vectors of M2's crypto (docs/DESIGN.md M2 step 1), pinned like the rest.
+#   NIST CAVP (the Cryptographic Algorithm Validation Program's response files), each archive
+#   unpacked into cavp/: shabytetestvectors.zip has SHA-1 and SHA-2's ShortMsg, LongMsg and
+#   Monte files (byte-oriented messages, the ones a TLS library meets). Sha256Tests reads
+#   SHA256*.rsp.
+mkdir -p "$tools/cavp"
+fetch cavp/shabytetestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip \
+  929ef80b7b3418aca026643f6f248815913b60e01741a44bba9e118067f4c9b8
+if [ ! -f "$tools/cavp/shabytetestvectors/SHA256Monte.rsp" ] || [ "$tools/cavp/shabytetestvectors.zip" -nt "$tools/cavp/shabytetestvectors/SHA256Monte.rsp" ]; then
+  unzip -q -o "$tools/cavp/shabytetestvectors.zip" -d "$tools/cavp"
+  touch "$tools/cavp/shabytetestvectors/SHA256Monte.rsp"
+fi
+
 echo "$tools"

@@ -54,7 +54,8 @@
     X(httpasm_hpack_decode)         \
     X(httpasm_hpack_encode_bound)   \
     X(httpasm_hpack_encode)         \
-    X(httpasm_h2_request)
+    X(httpasm_h2_request)           \
+    X(httpasm_sha256)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -178,6 +179,14 @@ uint8_t *bench_response(size_t *length);
  * response's first call (scan_from 0) to a GET, into a 64-record field array (suite_rivals.c).
  * A batch for any suite: bench_case.ours. */
 void bench_h1_response(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_sha_input: 16 KiB of fixed pseudo-random octets (made on the first call) that the hash
+ * cases take their messages from: 64 octets (one block and its padding block), 1 KiB, 16 KiB. */
+const uint8_t *bench_sha_input(void);
+
+/* bench_sha256: httpasm_sha256 of the case's message, `calls` times (suite_rivals.c). A batch for
+ * any suite: the tiers suite times it at every tier, the rivals suite beside OpenSSL. */
+void bench_sha256(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
  * nothing, built by the first build's encoder on the first call and shared by every suite

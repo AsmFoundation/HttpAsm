@@ -1328,6 +1328,62 @@ static int h2_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_sha256: SHA-256's compression by versions (crypto/sha256.asm) -------------------
+ * v1 is the scalar compression, v2 and up the SHA extensions' (when the CPU has them). Each
+ * message ends against the guard page and is hashed at once and in random pieces at every tier;
+ * the digests must equal v1's, so a version that reads past the message or computes another
+ * state fails here. */
+
+/* sha256_pieces: the digest of p[0..n) fed in random pieces (empty ones too) to a running hash.
+ *   p, n  the message; digest  out, 32 octets. */
+static void sha256_pieces(const uint8_t *p, size_t n, uint8_t digest[32])
+{
+    httpasm_sha256_ctx h;
+    httpasm_sha256_init(&h);
+    size_t at = 0;
+    while (at < n) {
+        size_t piece = (size_t)(rng() % (rng() % 4 == 0 ? 300 : 70));
+        if (piece > n - at)
+            piece = n - at;
+        httpasm_sha256_update(&h, p + at, piece);
+        at += piece;
+    }
+    httpasm_sha256_final(&h, digest);
+}
+
+/* sha256_tiers: every length 0-300 and `randoms` random ones to 20,000 octets, each message's
+ * last octet the page's last, at every tier, at once and in pieces. Returns 0 when every digest
+ * equals v1's, 1 at the first that does not. */
+static int sha256_tiers(long randoms)
+{
+    long checked = 0;
+    for (long i = -301; i < randoms; i++) {
+        size_t n = i < 0 ? (size_t)(i + 301) : (size_t)(rng() % (rng() % 8 == 0 ? 20000 : 600));
+        if (n > PAGE)
+            n = PAGE;                       /* the message stays in the readable page */
+        uint8_t *message = page_end - n;
+        for (size_t k = 0; k < n; k++)
+            message[k] = (uint8_t)rng();
+        uint8_t expected[32], once[32], pieces[32];
+        httpasm_cpu_limit(caps[0]);
+        httpasm_sha256(message, n, expected);
+        for (size_t t = 1; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            httpasm_sha256(message, n, once);
+            sha256_pieces(message, n, pieces);
+            if (memcmp(once, expected, 32) != 0 || memcmp(pieces, expected, 32) != 0) {
+                fprintf(stderr, "httpasm_sha256 at %s (features %#llx) differs from v1 on %zu octets (%s)\n", cap_names[t],
+                        (unsigned long long)features, n, memcmp(once, expected, 32) != 0 ? "at once" : "in pieces");
+                dump("message", message, n < 128 ? n : 128);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_sha256: %ld digests at tiers above v1, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1578,6 +1634,8 @@ int main(int argc, char **argv)
         failed = response_variety(randoms / 20);
     if (!failed)
         failed = h2_tiers(randoms / 4);
+    if (!failed)
+        failed = sha256_tiers(randoms / 40);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

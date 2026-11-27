@@ -219,6 +219,23 @@ HA_H1_DEFAULT_MAX_FIELDS        equ 128
 HTTPASM_CLIENT_FIELDS           equ 256
 
 ; -----------------------------------------------------------------------------
+; httpasm_sha256_ctx: a running SHA-256 hash (FIPS 180-4), 112 octets. httpasm_sha256_init sets it,
+; httpasm_sha256_update feeds it any number of octets at a time, httpasm_sha256_final writes the
+; digest and wipes it. Its octets are the hash's whole state: copying it forks the hash (a TLS
+; transcript hashed up to a message, then onwards).
+; -----------------------------------------------------------------------------
+struc httpasm_sha256_ctx
+    .state:             resd 8      ; H0-H7 of FIPS 180-4 6.2, as native dwords
+    .length:            resq 1      ; octets fed so far, the buffered ones included
+    .buffer:            resb 64     ; the next block's first .buffered octets
+    .buffered:          resd 1      ; 0-63
+    .reserved:          resd 1
+endstruc
+
+HTTPASM_SHA256_DIGEST           equ 32      ; octets of a digest
+HTTPASM_SHA256_BLOCK            equ 64      ; octets of a block (HMAC's key padding)
+
+; -----------------------------------------------------------------------------
 ; httpasm_hpack_output: where httpasm_hpack_decode puts one header block's fields (48 octets).
 ; Strings from the static table point at the library's constant text; every other name and
 ; value is copied into space, so the fields stay valid however the dynamic table changes

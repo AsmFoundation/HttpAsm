@@ -811,6 +811,25 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
    Proof: every official vector and Wycheproof's, differential fuzzing against OpenSSL,
    constant-time checks, every tier. Measured single-threaded against OpenSSL, BoringSSL and
    AWS-LC.
+   - **The vectors** are pinned in `tests/tools.sh` like the test tools: NIST's CAVP archives
+     (from 2026-11-27, SHA-1/SHA-2's byte-oriented ShortMsg, LongMsg and Monte files), and
+     Project Wycheproof's files at commit 65ca494 (2026-11-11) as each primitive needs them.
+     `tests/run-linux.sh` names the directory in `HTTPASM_VECTORS` with
+     `HTTPASM_REQUIRE_VECTORS=1`, so a vector test cannot skip there.
+   - **SHA-256** (2026-11-27), `crypto/sha256.asm`: the running hash and the one-shot form of
+     the C ABI (`httpasm_sha256_ctx`), over `ha_sha256_blocks` in two versions: v1 the 64
+     rounds unrolled with the working variables renamed by the assembler (no moves between
+     rounds), and the SHA extensions' (`sha256rnds2`, `sha256msg1/2`; with SSSE3 and SSE4.1).
+     Constant time by construction: no branch or address depends on the data. `final` wipes
+     the context and its stack pad. Proven by NIST's 65 short, 64 long and 100 Monte Carlo
+     checkpoints at every tier, by .NET's SHA256 on every length to 1,000 octets fed in random
+     pieces, and by `tests/native/tiers` against the guard page (15,903 digests). Against
+     OpenSSL 3.0.13's `SHA256` on the i9-13900K: 4.38x faster on 64 octets (103.5 against
+     453.5 ns: OpenSSL 3's one-shot fetches its provider per call), 1.44x on 1 KiB, level on
+     16 KiB (1.41 against 1.37 octets/ns: both at the SHA extensions' own speed). v1 runs at
+     0.22x of them. Next for CPUs without the SHA extensions (Intel's client cores before 2021):
+     a v3 version with BMI2's `rorx` and an AVX2 message schedule, measured against v1 with the
+     SHA bit capped off.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

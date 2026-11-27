@@ -191,6 +191,21 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: M2's first primitive, SHA-256.** `httpasm_sha256` (one shot) on fixed
+pseudo-random octets, beside OpenSSL 3.0.13's `SHA256` (the machine's libcrypto.so.3, loaded at
+run time; it picks its SHA-extensions code as any application gets it), 41 rounds:
+
+| Message | HttpAsm best (SHA extensions) | v1 (scalar) | OpenSSL 3.0.13 | HttpAsm / OpenSSL |
+|---|---:|---:|---:|---:|
+| 64 octets | 103.5 ns | 433.5 ns | 453.5 ns | 4.38x faster |
+| 1 KiB | 793 ns | 3,553 ns | 1,143 ns | 1.44x faster |
+| 16 KiB | 11.78 us (1.41 octets/ns) | 53.1 us | 12.16 us (1.37) | 1.03x faster |
+
+Instructions (`icount`): 2.44 an octet with the SHA extensions, 46.5 at v1 (the 64 rounds at
+about 30 instructions each, the schedule at 18 a word). On long messages both libraries run at
+the SHA extensions' own speed; on short ones OpenSSL 3's one-shot pays for fetching its
+provider on every call. The tiers suite (`tiers/sha256/*`) times all four tiers.
+
 **2026-11-27: the whole servers at phase H's end** ([results/2026-11-27-0349.md](results/2026-11-27-0349.md),
 7271315, 5 rounds of 10 s, the host quiet). Against M1's last run ([results/2026-11-23-1932.md](results/2026-11-23-1932.md),
 f75c380, the same machine and load generators):

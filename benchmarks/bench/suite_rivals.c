@@ -17,6 +17,7 @@
  * grammar; HttpAsm also applies RFC 9112's semantics (target and Host grammar, field names and
  * values, every framing rule, known-field ids).
  */
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -249,6 +250,95 @@ static const bench_rival h1_response_rivals[] = {
     { "llhttp 9.4.4", llhttp_h1_response },
 };
 
+/* ---- Hashes: SHA-256 against OpenSSL's, the reference M2 measures every primitive by. */
+
+/* bench_sha_input: the hash cases' octets (bench.h): 16 KiB from a fixed xorshift, made once. */
+const uint8_t *bench_sha_input(void)
+{
+    static uint8_t input[16384];
+    static int made;
+    if (!made) {
+        uint64_t x = 0x243F6A8885A308D3u;
+        for (size_t i = 0; i < sizeof input; i++) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            input[i] = (uint8_t)x;
+        }
+        made = 1;
+    }
+    return input;
+}
+
+/* bench_sha256: httpasm_sha256 of the case's message, `calls` times (bench.h). */
+void bench_sha256(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t digest[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_sha256(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* OpenSSL's libcrypto, loaded at run time (the machine's own: the benchmark needs no headers
+ * and builds no OpenSSL), and its one-shot SHA256, which picks the SHA extensions or its
+ * AVX2/SSSE3 code by OPENSSL_ia32cap as it does for any application. */
+typedef unsigned char *(*openssl_sha256_fn)(const unsigned char *data, size_t length, unsigned char *digest);
+static openssl_sha256_fn openssl_sha256_call;
+static char openssl_name[64];
+
+/* openssl_load: loads libcrypto.so.3 and finds SHA256 and the version text, once. Returns 0, or
+ * -1 (with the reason on stderr) when the machine has no OpenSSL 3: the cases then run without
+ * this rival. */
+static int openssl_load(void)
+{
+    static int state;                       /* 0 not tried, 1 loaded, -1 absent */
+    if (state != 0)
+        return state > 0 ? 0 : -1;
+    state = -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL) {
+        fprintf(stderr, "bench: rivals: no libcrypto.so.3 (%s): the hash cases run without OpenSSL\n", dlerror());
+        return -1;
+    }
+    openssl_sha256_call = (openssl_sha256_fn)dlsym(crypto, "SHA256");
+    const char *(*version)(int) = (const char *(*)(int))dlsym(crypto, "OpenSSL_version");
+    if (openssl_sha256_call == NULL || version == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks SHA256 or OpenSSL_version\n");
+        return -1;
+    }
+    /* "OpenSSL 3.0.13 30 Jan 2024": the name and version, the date left out. */
+    snprintf(openssl_name, sizeof openssl_name, "%s", version(0));
+    char *space = strchr(openssl_name, ' ');
+    if (space != NULL && (space = strchr(space + 1, ' ')) != NULL)
+        *space = '\0';
+    state = 1;
+    return 0;
+}
+
+/* openssl_sha256: OpenSSL's SHA256 of the case's message, `calls` times. */
+static void openssl_sha256(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char digest[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_sha256_call(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+static bench_rival sha256_rivals[] = {
+    { openssl_name, openssl_sha256 },
+};
+
+/* The hash cases' message lengths and their labels. */
+static const size_t sha_lengths[] = { 64, 1024, 16384 };
+static const char *const sha_labels[] = { "64 octets", "1 KiB", "16 KiB" };
+
 /* ---- HPACK header blocks: each contender decodes the block `calls` times; the block indexes
  * nothing, so no table ever changes and every call does the same work. */
 
@@ -399,6 +489,11 @@ void bench_suite_rivals(void)
     const uint8_t *response = bench_response(&response_length);
     add("h1_response", "typical response head", response, response_length, bench_h1_response, h1_response_rivals,
         sizeof h1_response_rivals / sizeof h1_response_rivals[0]);
+    const uint8_t *sha = bench_sha_input();
+    int openssl = openssl_load() == 0;      /* without libcrypto the cases run with no rival */
+    for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
+        add("sha256", sha_labels[i], sha, sha_lengths[i], bench_sha256, openssl ? sha256_rivals : NULL,
+            openssl ? sizeof sha256_rivals / sizeof sha256_rivals[0] : 0);
     const uint8_t *hpack_block;
     size_t hpack_length;
     if (bench_hpack_block(&hpack_block, &hpack_length) != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {

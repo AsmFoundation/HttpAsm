@@ -40,7 +40,9 @@
 #
 # External tools: tests/tools.sh fetches them (pinned by SHA-256) into tests/.tools/: h2spec
 # (HTTPASM_H2SPEC, with HTTPASM_REQUIRE_H2SPEC=1: Http2Tests.PassesH2spec must run its 146
-# cases) and Intel SDE (unpacked into ~/.cache/httpasm/sde inside WSL).
+# cases), Intel SDE (unpacked into ~/.cache/httpasm/sde inside WSL), and the crypto's official
+# test vectors (HTTPASM_VECTORS = the tools directory, with HTTPASM_REQUIRE_VECTORS=1: a vector
+# test that finds no vectors fails instead of skipping).
 #
 # Exit status: 0 when every run passes, else the first failing run's (3: a docker run, which
 # cannot run step 2).
@@ -114,7 +116,7 @@ run_suite() {
     native|wsl)
       local dotnet=dotnet
       if [ "$runner" = wsl ]; then dotnet='$HOME/.dotnet/dotnet'; fi
-      on_linux "$linux_env cd '$(lpath "$out")' && HTTPASM_CPU=$cpu HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC='$(lpath "$tools")/h2spec' HTTPASM_REQUIRE_H2SPEC=1 HTTPASM_REQUIRE_URING=$require_uring HTTPASM_TEST_IO=$test_io DOTNET_NOLOGO=1 $dotnet HttpAsm.Tests.dll $*"
+      on_linux "$linux_env cd '$(lpath "$out")' && HTTPASM_CPU=$cpu HTTPASM_REQUIRE_LINUX=1 HTTPASM_H2SPEC='$(lpath "$tools")/h2spec' HTTPASM_REQUIRE_H2SPEC=1 HTTPASM_VECTORS='$(lpath "$tools")' HTTPASM_REQUIRE_VECTORS=1 HTTPASM_REQUIRE_URING=$require_uring HTTPASM_TEST_IO=$test_io DOTNET_NOLOGO=1 $dotnet HttpAsm.Tests.dll $*"
       ;;
     docker)
       # Docker Desktop on Windows needs a Windows path; Git Bash's /k/... form means nothing to it.
@@ -125,6 +127,7 @@ run_suite() {
         -v "$dout:/t:ro" -w /t -v "$dtools:/tools:ro" \
         -e HTTPASM_CPU="$cpu" -e HTTPASM_REQUIRE_LINUX=1 -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
         -e HTTPASM_H2SPEC=/tools/h2spec -e HTTPASM_REQUIRE_H2SPEC=1 \
+        -e HTTPASM_VECTORS=/tools -e HTTPASM_REQUIRE_VECTORS=1 \
         -e HTTPASM_REQUIRE_URING="$require_uring" -e HTTPASM_TEST_IO="$test_io" \
         mcr.microsoft.com/dotnet/aspnet:10.0 \
         dotnet HttpAsm.Tests.dll "$@"

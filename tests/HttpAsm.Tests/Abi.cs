@@ -215,6 +215,29 @@ internal struct ChunkedState
     public uint Reserved;
 }
 
+/// <summary>
+/// httpasm_sha256_ctx (httpasm.h): a running SHA-256 hash, 112 octets. Its octets are the whole
+/// state, so copying the struct forks the hash.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Sha256Context
+{
+    /// <summary>H0-H7 of FIPS 180-4 6.2.</summary>
+    public fixed uint State[8];
+
+    /// <summary>Octets fed so far.</summary>
+    public ulong Length;
+
+    /// <summary>The next block's first <see cref="Buffered"/> octets.</summary>
+    public fixed byte Buffer[64];
+
+    /// <summary>How many octets wait in <see cref="Buffer"/> (0-63).</summary>
+    public uint Buffered;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
 /// <summary>httpasm_client_response (httpasm.h): 96 octets.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct ClientResponse
