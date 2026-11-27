@@ -1075,6 +1075,205 @@ static bench_rival p256_share_rivals[] = { { openssl_name, openssl_p256_share } 
 static bench_rival p256_sign_rivals[] = { { openssl_name, openssl_p256_sign } };
 static bench_rival p256_verify_rivals[] = { { openssl_name, openssl_p256_verify } };
 
+/* ---- P-384: ECDH, the public key, a key share, ECDSA's signature and verification. */
+
+/* The P-384 cases' input: a private key, RFC 6979 A.2.6's public key as the peer's, a SHA-384
+ * digest (of "sample"), entropy (see bench.h). */
+static const uint8_t p384_input[48 + 97 + 48 + 48] = {
+    0x3A, 0x8C, 0x51, 0xF9, 0xD2, 0x7E, 0x60, 0x4B, 0x19, 0xC5, 0xEE, 0x73, 0x2A, 0xB4, 0x8D, 0x01,
+    0xF7, 0x65, 0x3C, 0x9A, 0xE2, 0x14, 0x8B, 0xD6, 0x0F, 0x7A, 0x2C, 0x95, 0xE4, 0x31, 0x8B, 0x6D,
+    0x72, 0xC0, 0x54, 0x9E, 0xA3, 0xB6, 0x1F, 0x78, 0xD2, 0x05, 0x4C, 0x93, 0xE1, 0xA8, 0x7B, 0x26,
+    0x04, 0xEC, 0x3A, 0x4E, 0x41, 0x5B, 0x4E, 0x19, 0xA4, 0x56, 0x86, 0x18, 0x02, 0x9F, 0x42, 0x7F,
+    0xA5, 0xDA, 0x9A, 0x8B, 0xC4, 0xAE, 0x92, 0xE0, 0x2E, 0x06, 0xAA, 0xE5, 0x28, 0x6B, 0x30, 0x0C,
+    0x64, 0xDE, 0xF8, 0xF0, 0xEA, 0x90, 0x55, 0x86, 0x60, 0x64, 0xA2, 0x54, 0x51, 0x54, 0x80, 0xBC,
+    0x13, 0x80, 0x15, 0xD9, 0xB7, 0x2D, 0x7D, 0x57, 0x24, 0x4E, 0xA8, 0xEF, 0x9A, 0xC0, 0xC6, 0x21,
+    0x89, 0x67, 0x08, 0xA5, 0x93, 0x67, 0xF9, 0xDF, 0xB9, 0xF5, 0x4C, 0xA8, 0x4B, 0x3F, 0x1C, 0x9D,
+    0xB1, 0x28, 0x8B, 0x23, 0x1C, 0x3A, 0xE0, 0xD4, 0xFE, 0x73, 0x44, 0xFD, 0x25, 0x33, 0x26, 0x47,
+    0x20, 0x9A, 0x90, 0x83, 0x50, 0x5B, 0xC9, 0x22, 0x76, 0xAE, 0xC4, 0xBE, 0x31, 0x26, 0x96, 0xEF,
+    0x7B, 0xF3, 0xBF, 0x60, 0x3F, 0x4B, 0xBD, 0x38, 0x11, 0x96, 0xA0, 0x29, 0xF3, 0x40, 0x58, 0x53,
+    0x12, 0x31, 0x3B, 0xCA, 0x4A, 0x9B, 0x5B, 0x89, 0x0E, 0xFE, 0xE4, 0x2C, 0x77, 0xB1, 0xEE, 0x25,
+    0xFE, 0x13, 0x37, 0x5B, 0x7F, 0xA3, 0xC7, 0xEB, 0x0F, 0x33, 0x57, 0x7B, 0x9F, 0xC3, 0xE7, 0x0B,
+    0x2F, 0x53, 0x77, 0x9B, 0xBF, 0xE3, 0x07, 0x2B, 0x4F, 0x73, 0x97, 0xBB, 0xDF, 0x03, 0x27, 0x4B,
+    0x6F, 0x93, 0xB7, 0xDB, 0xFF, 0x23, 0x47, 0x6B, 0x8F, 0xB3, 0xD7, 0xFB, 0x1F, 0x43, 0x67, 0x8B,
+    0xAF,
+};
+
+/* bench_p384_input: see bench.h. */
+const uint8_t *bench_p384_input(void)
+{
+    return p384_input;
+}
+
+/* bench_p384_ecdh: see bench.h. */
+void bench_p384_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[48];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p384_ecdh(out, c->data, c->data + 48);
+    bench_sink = out[0];
+}
+
+/* bench_p384_public_key: see bench.h. */
+void bench_p384_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[97];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p384_public_key(out, c->data);
+    bench_sink = out[1];
+}
+
+/* bench_p384_share: see bench.h. */
+void bench_p384_share(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t key[48], public_key[97], out[48];
+    for (long i = 0; i < calls; i++) {
+        do
+            b->api.httpasm_random(key, sizeof key);
+        while (b->api.httpasm_p384_public_key(public_key, key) != 0);
+        b->api.httpasm_p384_ecdh(out, key, c->data + 48);
+    }
+    bench_sink = out[0] + public_key[1];
+}
+
+/* bench_p384_sign: see bench.h. */
+void bench_p384_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t signature[96];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p384_sign(signature, c->data, c->data + 145, 48, c->data + 193);
+    bench_sink = signature[0];
+}
+
+/* bench_p384_verify: see bench.h. */
+void bench_p384_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[97], signature[96];
+    b->api.httpasm_p384_public_key(public_key, c->data);
+    b->api.httpasm_p384_sign(signature, c->data, c->data + 145, 48, NULL);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_p384_verify(public_key, c->data + 145, 48, signature);
+    bench_sink = (uint8_t)sum;
+}
+
+/* OpenSSL at P-384 (3.0.13 runs its generic EC_GFp_mont_method there: no assembly for this curve,
+ * where P-256 has ecp_nistz256): the same calls as the P-256 rivals, the curve "P-384". */
+
+/* openssl_p384_peer: an EVP_PKEY of the input's peer point, through the encoded form, on the
+ * parameters of `like`. */
+static void *openssl_p384_peer(void *like, const uint8_t *point)
+{
+    void *peer = openssl_pkey_new();
+    if (peer != NULL && (openssl_copy_parameters(peer, like) != 1 || openssl_set1_encoded(peer, point, 97) != 1)) {
+        openssl_pkey_free(peer);
+        return NULL;
+    }
+    return peer;
+}
+
+/* openssl_p384_ecdh: the derive alone (key, peer and context made once). */
+static void openssl_p384_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-384");
+    void *peer = key ? openssl_p384_peer(key, c->data + 48) : NULL;
+    void *ctx = peer ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char out[48] = { 0 };
+    if (ctx != NULL && openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = 48;
+            openssl_derive(ctx, out, &length);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(key);
+    bench_sink = out[0];
+}
+
+/* openssl_p384_public_key: a key generated and its encoded public key taken, each call. */
+static void openssl_p384_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    (void)c;
+    unsigned char first = 0;
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-384");
+        unsigned char *encoded = NULL;
+        if (key != NULL && openssl_get1_encoded(key, &encoded) == 97)
+            first = encoded[1];
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = first;
+}
+
+/* openssl_p384_share: a key share as OpenSSL's TLS 1.3 code makes one per handshake. */
+static void openssl_p384_share(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[48] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-384");
+        unsigned char *encoded = NULL;
+        openssl_get1_encoded(key, &encoded);
+        void *peer = openssl_p384_peer(key, c->data + 48);
+        void *ctx = openssl_pkey_ctx_new(key, NULL);
+        size_t length = 48;
+        if (openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1)
+            openssl_derive(ctx, out, &length);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(peer);
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_p384_sign: EVP_PKEY_sign of the input's digest under a key made once (a random nonce
+ * from OpenSSL's generator each call, DER out). */
+static void openssl_p384_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-384");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[112] = { 0 };
+    if (ctx != NULL && openssl_sign_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            openssl_sign(ctx, signature, &length, c->data + 145, 48);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = signature[4];
+}
+
+/* openssl_p384_verify: EVP_PKEY_verify of a valid signature (made before the loop). */
+static void openssl_p384_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-384");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[112] = { 0 };
+    size_t length = sizeof signature;
+    int sum = 0;
+    if (ctx != NULL && openssl_sign_init(ctx) == 1 && openssl_sign(ctx, signature, &length, c->data + 145, 48) == 1 &&
+        openssl_verify_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++)
+            sum += openssl_verify(ctx, signature, length, c->data + 145, 48);
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival p384_ecdh_rivals[] = { { openssl_name, openssl_p384_ecdh } };
+static bench_rival p384_public_key_rivals[] = { { openssl_name, openssl_p384_public_key } };
+static bench_rival p384_share_rivals[] = { { openssl_name, openssl_p384_share } };
+static bench_rival p384_sign_rivals[] = { { openssl_name, openssl_p384_sign } };
+static bench_rival p384_verify_rivals[] = { { openssl_name, openssl_p384_verify } };
+
 /* ---- RSA verification ------------------------------------------------------------------------
  * The vectors: a public key, a SHA-256 digest and its valid PKCS#1 v1.5 signature at each size,
  * Project Wycheproof's rsa_signature_{2048,3072,4096}_sha256_test.json, each one's first valid
@@ -1966,6 +2165,32 @@ void bench_suite_rivals(void)
         c.ours = p256_cases[i].ours;
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = p256 ? p256_cases[i].rivals : NULL;
+        c.rival_count = p256 ? 1 : 0;
+        bench_add(&c);
+    }
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } p384_cases[] = {
+        { "p384_ecdh", "shared secret", bench_p384_ecdh, p384_ecdh_rivals },
+        { "p384_public_key", "public key", bench_p384_public_key, p384_public_key_rivals },
+        { "p384_key_share", "key drawn + public key + shared secret", bench_p384_share, p384_share_rivals },
+        { "p384_sign", "ECDSA signature (SHA-384 digest)", bench_p384_sign, p384_sign_rivals },
+        { "p384_verify", "ECDSA verification", bench_p384_verify, p384_verify_rivals },
+    };
+    for (size_t i = 0; i < sizeof p384_cases / sizeof p384_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = p384_cases[i].name;
+        c.input = p384_cases[i].input;
+        c.data = p384_input;
+        c.length = sizeof p384_input;
+        c.octets = 0;
+        c.ours = p384_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = p256 ? p384_cases[i].rivals : NULL;  /* (P-256's loading brought the functions) */
         c.rival_count = p256 ? 1 : 0;
         bench_add(&c);
     }

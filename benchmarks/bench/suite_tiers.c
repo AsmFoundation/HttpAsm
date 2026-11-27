@@ -239,6 +239,33 @@ static void add_p256(void)
     }
 }
 
+/* add_p384: the tiers cases of P-384, as add_p256's: a shared secret (the variable base) and a
+ * signature (the fixed base, two inversions), each at every tier: v1's mul and SSE2 scans against
+ * v3's mulx, adcx/adox and AVX2 scans (the v2 tier runs v1's code, v4 v3's). */
+static void add_p384(void)
+{
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+    } cases[] = {
+        { "p384_ecdh", "shared secret", bench_p384_ecdh },
+        { "p384_sign", "ECDSA signature", bench_p384_sign },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = cases[i].name;
+        c.input = cases[i].input;
+        c.data = bench_p384_input();
+        c.length = 48 + 97 + 48 + 48;
+        c.octets = 0;
+        c.ours = cases[i].ours;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_rsa: the tiers cases of RSA at 2048 bits, Wycheproof's keys (e = 65537), each prepared before
  * the loop, at every tier: a PKCS#1 v1.5 verification and a PKCS#1 v1.5 signature (the CRT's
  * two 1024-bit exponentiations: v3's own k = 16 square and product and its AVX2 gather against
@@ -324,6 +351,7 @@ void bench_suite_tiers(void)
     add_chacha_seal();
     add_x25519();
     add_p256();
+    add_p384();
     add_rsa();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);

@@ -1891,6 +1891,101 @@ static int p256_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_p384_*: by versions (crypto/p384.asm) ---------------------------------------------
+ * p256_tiers' check at P-384's sizes: v1 (mul, SSE2 table scans) against v3 (mulx with
+ * adcx/adox, AVX2 scans, with ADX); every tier must give v1's public key, shared secret,
+ * signature and verdicts, return values included. Every input ends against the guard page (an
+ * over-read faults); outputs are followed by canaries. */
+
+/* p384_tiers: `randoms` rounds: a private key (random, every so often 1, n - 1, or a refused
+ * one: 0, all ones), a peer's point (v1's public key of another random key, every so often with
+ * a flipped octet: refused), a digest of 0 to 100 random octets, entropy every other round; then
+ * public key, ECDH, signature and its verification (and a tampered one's) at every tier. Returns 0
+ * when every tier agrees with v1, 1 at the first difference. */
+static int p384_tiers(long randoms)
+{
+    static const uint8_t n_minus_1[48] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC7, 0x63, 0x4D, 0x81, 0xF4, 0x37, 0x2D, 0xDF,
+        0x58, 0x1A, 0x0D, 0xB2, 0x48, 0xB0, 0xA7, 0x7A, 0xEC, 0xEC, 0x19, 0x6A, 0xCC, 0xC5, 0x29, 0x72,
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        uint8_t *key = page_end - 48, *peer = page_end - 48 - 97 - 7, *entropy = page_end - 400;
+        size_t length = (size_t)(rng() % 101);
+        uint8_t *digest = page_end - 260 - length;
+        for (size_t k = 0; k < 48; k++) {
+            key[k] = (uint8_t)rng();
+            entropy[k] = (uint8_t)rng();
+        }
+        for (size_t k = 0; k < length; k++)
+            digest[k] = (uint8_t)rng();
+        if (i % 10 == 1)
+            memcpy(key, n_minus_1, 48);
+        if (i % 10 == 2) {
+            memset(key, 0, 48);
+            key[47] = 1;
+        }
+        if (i % 25 == 3)
+            memset(key, 0, 48);                             /* refused: 0 */
+        if (i % 25 == 4)
+            memset(key, 0xFF, 48);                          /* refused: past n */
+        uint8_t other[48];
+        for (size_t k = 0; k < 48; k++)
+            other[k] = (uint8_t)rng();
+        httpasm_cpu_limit(caps[0]);
+        if (httpasm_p384_public_key(peer, other) != 0)
+            memcpy(peer, (uint8_t[97]){ 4 }, 97);           /* (a refused draw: an invalid point) */
+        if (i % 9 == 5)
+            peer[1 + rng() % 96] ^= (uint8_t)(1 + rng() % 255);  /* off the curve, or past p */
+        const uint8_t *extra = i % 2 ? entropy : NULL;
+        uint8_t expected_public[97], expected_shared[48], expected_signature[96];
+        int expected[5] = { 0 };
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            uint8_t public_key[97 + 16], shared[48 + 16], signature[96 + 16];
+            memset(public_key, 0xC3, sizeof public_key);
+            memset(shared, 0xC3, sizeof shared);
+            memset(signature, 0xC3, sizeof signature);
+            int results[5];
+            results[0] = httpasm_p384_public_key(public_key, key);
+            results[1] = httpasm_p384_ecdh(shared, key, peer);
+            results[2] = httpasm_p384_sign(signature, key, digest, length, extra);
+            results[3] = results[0] == 0 ? httpasm_p384_verify(public_key, digest, length, signature) : -1;
+            uint8_t tampered[96];
+            memcpy(tampered, signature, 96);
+            tampered[rng() % 96] ^= (uint8_t)(1 << (rng() % 8));
+            results[4] = results[0] == 0 ? httpasm_p384_verify(public_key, digest, length, tampered) : -1;
+            for (size_t k = 0; k < 16; k++) {
+                if (public_key[97 + k] != 0xC3 || shared[48 + k] != 0xC3 || signature[96 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_p384_* at %s wrote past an output\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (results[3] != results[0] || results[4] != -1) {
+                fprintf(stderr, "httpasm_p384_verify at %s: own signature %d, tampered %d\n", cap_names[t], results[3], results[4]);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_public, public_key, 97);
+                memcpy(expected_shared, shared, 48);
+                memcpy(expected_signature, signature, 96);
+                memcpy(expected, results, sizeof expected);
+            } else if (memcmp(public_key, expected_public, 97) != 0 || memcmp(shared, expected_shared, 48) != 0
+                       || memcmp(signature, expected_signature, 96) != 0 || memcmp(results, expected, 3 * sizeof(int)) != 0) {
+                fprintf(stderr, "httpasm_p384_* at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("key", key, 48);
+                dump("peer", peer, 97);
+                dump("digest", digest, length);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_p384_*: %ld rounds of public key, ECDH, signature and verification at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_rsa_*: RSA verification by versions (rsa.asm) ---------------------------------
  * v3 runs the Montgomery product, square and reduction with mulx and adcx/adox, eight limbs a
  * step; v1 and v2 run them with mul. A verification only says valid or not, so each round checks
@@ -2484,6 +2579,8 @@ int main(int argc, char **argv)
         failed = x25519_tiers(randoms / 1000);
     if (!failed)
         failed = p256_tiers(randoms / 1000);
+    if (!failed)
+        failed = p384_tiers(randoms / 1000);
     if (!failed)
         failed = rsa_tiers(randoms / 1000);
     if (!failed)

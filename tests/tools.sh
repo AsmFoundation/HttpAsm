@@ -166,6 +166,9 @@ fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc
 fetch wycheproof/ecdh_secp256r1_ecpoint_test.json "$wycheproof/ecdh_secp256r1_ecpoint_test.json" 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
 fetch wycheproof/ecdsa_secp256r1_sha256_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha256_p1363_test.json" c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
 fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha512_p1363_test.json" 95c41daca2101540641cc13ccab128d67ad665eaf8349896434e1e6a0c5c68fc
+fetch wycheproof/ecdh_secp384r1_ecpoint_test.json "$wycheproof/ecdh_secp384r1_ecpoint_test.json" ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3
+fetch wycheproof/ecdsa_secp384r1_sha384_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha384_p1363_test.json" e27344bf6daae75fa19663620883809f91c79fc4b4420eff9eae8036b34476be
+fetch wycheproof/ecdsa_secp384r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha512_p1363_test.json" d994c43b997760ce51c4bbae4a974bf9f9c61db2c4b0e454c3999179de7aae46
 #   RSA signatures (RsaTests): RSASSA-PKCS1-v1_5 at 2048 to 8192 bits with every SHA-2 hash this
 #   library takes (BER and malformed paddings, wrong hashes, the missing NULL, small and edge-case
 #   signatures), and RSASSA-PSS: MGF1 with the same hash at the salt lengths TLS 1.3 and the

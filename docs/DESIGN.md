@@ -1197,6 +1197,46 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      bits stay there. Weighed and not taken: the fault check per prime at k = 16 instead of
      under n at k = 32 (about 17,500 cycles, 1%, for a second check path in place of the public
      key's, which would also need s < n checked apart).
+   - **P-384** (2026-11-27), `crypto/p384.asm` over `include/crypto/p384.inc`:
+     `httpasm_p384_public_key`, `httpasm_p384_ecdh`, `httpasm_p384_sign`, `httpasm_p384_verify`
+     (48-octet scalars, 97-octet SEC 1 points, 96-octet r || s): TLS 1.3's secp384r1 key share
+     and ecdsa_secp384r1_sha384, and above all the WebPKI's P-384 chains (Let's Encrypt's E5-E9
+     intermediates and ISRG Root X2 sign with P-384: a TLS client verifies those signatures in
+     every such chain). P-256's design at six limbs, routine for routine: the same formulas
+     (OpenSSL's doubling for a = -3, add-2007-bl, madd-2007-bl, infinity by masks), Booth
+     recodings (5 bits for the variable base, 77 windows; 7 bits for the fixed base, 55 windows
+     of 64 affine points: 337,920 octets in `include/generated/p384_table.inc`, written and
+     proven by `specs/p384.cs`, which CI runs with --check), table scans (v3 AVX2, v1 SSE2),
+     Straus verification with wNAF digits (u1 by 7 bits over the table's window 0, u2 by 5 over
+     1Q..15Q), the x(R) check without an inversion, RFC 6979 nonces hedged with the caller's
+     entropy (HMAC-SHA384: RFC 6979's own k for a SHA-384 digest) and the same validation.
+     *The field:* one generic Montgomery product (CIOS over a modulus in memory and its n0, two
+     carry chains at v3, mul at v1, the eight limbs of t turning through r8..r15) serves p and
+     n; 130 cycles chained, 114 at throughput (scratchpad p384/f6.asm). p's own form (n0 =
+     2^32 + 1; m p = m 2^384 - m (2^128 + 2^96 - 2^32 + 1)) was weighed and not taken: m by
+     shl and add instead of imul measured no faster (131), and the special reduction trades six
+     mulx for about fourteen carry instructions a step on ports 0 and 6, the ports the generic
+     step already fills. *The inversion:* safegcd as P-256's but with original divsteps (eta =
+     -delta from -1, the swap's eta -eta - 1): Bernstein and Yang's Theorem 11.2 bounds them at
+     floor((49 384 + 57) / 17) = 1110 for any input below 2^384, so 18 batches of 62 on seven
+     signed 62-bit limbs (the half-delta variant's tighter bound is a computation libsecp256k1
+     made for 256 bits only). *Proven by* RFC 6979 A.2.6 read from the pinned text (the key
+     pair, both SHA-384 signatures exactly, all ten verified, each k's point), NIST's CAVP P-384
+     records (KAS ECC CDH 25; FIPS 186-4 KeyPair 10, PKV 12, SigGen 60 with each k's point, SigVer
+     75), Wycheproof's ECDH tests on raw points (790: 771 valid, 16 invalid-curve points refused)
+     and its ECDSA P1363 tests with SHA-384 (280) and SHA-512 (318), .NET's ECDiffieHellman and
+     ECDsa on 60 random keys both ways, a BigInteger model (Jacobian, with RFC 6979 in C#) on 120
+     scalars from the edges and digests of 0 to 100 octets, the verification's equal and
+     opposite points reached on purpose, refusals of every invalid key, point and signature,
+     and `tests/native/tiers` (800 rounds at every tier, inputs against the guard page). RFC
+     6979's retry after a candidate of n or more has no test: P-384's n is within 2^190 of
+     2^384, so no search finds such a seed (listed as a rare condition). *Measured* against
+     OpenSSL 3.0.13's EVP, whose P-384 is its generic EC_GFp_mont_method (no assembly for this
+     curve), 41 rounds: a shared secret 3.9x (209 us against 812), a public key 20x (37.4 us), a
+     key share 8.1x (253 us), a signature 17.6x (47.5 us), a verification 3.3x (231 us); v3
+     1.22x v1. Next: a square of its own (the 15 products above the diagonal once, then the low
+     half reduced and the high half added: about 15% under the product of a value with itself in
+     the scratchpad), then the rest of the field's latency.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

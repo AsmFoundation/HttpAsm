@@ -74,6 +74,10 @@
     X(httpasm_p256_ecdh)            \
     X(httpasm_p256_sign)            \
     X(httpasm_p256_verify)          \
+    X(httpasm_p384_public_key)      \
+    X(httpasm_p384_ecdh)            \
+    X(httpasm_p384_sign)            \
+    X(httpasm_p384_verify)          \
     X(httpasm_rsa_public_key_init)  \
     X(httpasm_rsa_verify_pkcs1)     \
     X(httpasm_rsa_private_key_init) \
@@ -273,6 +277,29 @@ void bench_p256_sign(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_p256_verify: httpasm_p256_verify of a valid signature (made before the loop). */
 void bench_p256_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* The P-384 cases' input (bench_p384_input, suite_rivals.c): a private key (48 octets), RFC 6979
+ * A.2.6's public key as the peer's (97), a SHA-384 digest (48), entropy (48). */
+const uint8_t *bench_p384_input(void);
+
+/* bench_p384_ecdh: httpasm_p384_ecdh of the input's key and peer point (the variable base, the
+ * peer's point checked every call). */
+void bench_p384_ecdh(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p384_public_key: httpasm_p384_public_key of the input's key (the fixed base). */
+void bench_p384_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p384_share: a TLS 1.3 secp384r1 key share's work per handshake: a private key drawn
+ * (httpasm_random, again when refused), its public key, the shared secret with the peer's. */
+void bench_p384_share(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p384_sign: httpasm_p384_sign of the input's digest with the input's entropy (a hedged
+ * RFC 6979 signature). */
+void bench_p384_sign(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p384_verify: httpasm_p384_verify of a valid signature (made before the loop): a TLS
+ * client's work per P-384 signature in a certificate chain. */
+void bench_p384_verify(const bench_build *b, const bench_case *c, long calls);
 
 /* An RSA verification's input (bench_rsa_input, suite_rivals.c): a public key (n of `octets`
  * octets, e = 65537) with a SHA-256 digest and its valid RSASSA-PKCS1-v1_5 signature, from

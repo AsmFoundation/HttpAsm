@@ -279,6 +279,12 @@ HTTPASM_P256_POINT              equ 65      ; octets of a public key: 04, x, y
 HTTPASM_P256_SIGNATURE          equ 64      ; octets of a signature: r, s (IEEE P1363's form)
 HTTPASM_P256_ENTROPY            equ 32      ; octets of a signature's optional entropy
 
+; P-384 (SP 800-186; crypto/p384.asm): P-256's forms at 48-octet scalars and coordinates.
+HTTPASM_P384_SCALAR             equ 48      ; octets of a private key, a shared secret, r or s
+HTTPASM_P384_POINT              equ 97      ; octets of a public key: 04, x, y
+HTTPASM_P384_SIGNATURE          equ 96      ; octets of a signature: r, s (IEEE P1363's form)
+HTTPASM_P384_ENTROPY            equ 48      ; octets of a signature's optional entropy
+
 ; Hash identifiers (the RSA signatures name their hash with these; SHA-1 and SHA-224 only where
 ; the caller brings the digest: PKCS#1 v1.5 verification of legacy certificates).
 HTTPASM_HASH_SHA1               equ 1

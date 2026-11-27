@@ -534,6 +534,46 @@ int httpasm_p256_verify(const uint8_t public_key[HTTPASM_P256_POINT], const uint
                         size_t digest_length, const uint8_t signature[HTTPASM_P256_SIGNATURE]);
 
 /* ------------------------------------------------------------------------------------------
+ * NIST P-384 (SP 800-186; TLS's secp384r1): ECDH for TLS 1.3's secp384r1 key share and
+ * SecP384r1MLKEM1024, ECDSA (FIPS 186-5) for ecdsa_secp384r1_sha384 and the certificates of
+ * P-384 roots and intermediates (a TLS client verifies their signatures in every such chain).
+ * P-256's functions at 48-octet scalars; the same versions and the same constant-time rules.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_P384_SCALAR    48       /* octets of a private key, a shared secret, r or s */
+#define HTTPASM_P384_POINT     97       /* octets of a public key: 04 || x || y (SEC 1, uncompressed) */
+#define HTTPASM_P384_SIGNATURE 96       /* octets of a signature: r || s (IEEE P1363's form) */
+#define HTTPASM_P384_ENTROPY   48       /* octets of a signature's optional entropy */
+
+/* The public key of a private key d (48 big-endian octets, 1 <= d < n): 04 || x || y of d G.
+ * Returns 0; or -1 when d is 0 or n or more (out is then all zeros): to make a key, draw 48
+ * random octets until this succeeds (a draw fails about once in 2^189). */
+int httpasm_p384_public_key(uint8_t public_key[HTTPASM_P384_POINT],
+                            const uint8_t private_key[HTTPASM_P384_SCALAR]);
+
+/* ECDH: shared = the x-coordinate of d Q (48 big-endian octets), for a private key d and a peer's
+ * public key Q. Returns 0; or -1 when d is out of range or Q is not a point of the curve in
+ * uncompressed form (a first octet other than 04, a coordinate p or more, the curve equation
+ * failing: RFC 9846 4.2.8.2's checks); shared is all zeros then. */
+int httpasm_p384_ecdh(uint8_t shared[HTTPASM_P384_SCALAR], const uint8_t private_key[HTTPASM_P384_SCALAR],
+                      const uint8_t peer_key[HTTPASM_P384_POINT]);
+
+/* ECDSA: signs a message digest (digest_length octets, any hash: its leftmost 384 bits are used,
+ * as FIPS 186-5 6.4.1 says) with a private key. The nonce is RFC 6979's deterministic k
+ * (HMAC-SHA384: exactly RFC 6979's for a SHA-384 digest), with entropy[0..48) mixed in as RFC
+ * 6979 3.6's extra input when entropy is not NULL (pass 48 random octets: a hedged signature).
+ * Returns 0; or -1 when the private key is out of range (signature is then all zeros). */
+int httpasm_p384_sign(uint8_t signature[HTTPASM_P384_SIGNATURE],
+                      const uint8_t private_key[HTTPASM_P384_SCALAR], const uint8_t *digest,
+                      size_t digest_length, const uint8_t *entropy);
+
+/* ECDSA: verifies signature (r || s) over a digest (as httpasm_p384_sign takes it) under a public
+ * key. Returns 0 when valid; -1 otherwise: r or s not in [1, n - 1], the key not an uncompressed
+ * point of the curve, or the equation failing. */
+int httpasm_p384_verify(const uint8_t public_key[HTTPASM_P384_POINT], const uint8_t *digest,
+                        size_t digest_length, const uint8_t signature[HTTPASM_P384_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
  * RSA signatures (RFC 8017): verification of RSASSA-PKCS1-v1_5 (certificates' sha256With-
  * RSAEncryption and its kin) and RSASSA-PSS with MGF1 (TLS 1.3's rsa_pss_rsae_*, rsa_pss_pss_*),
  * for moduli of 1024 to 8192 bits. Every input is public: these run in variable time. Products

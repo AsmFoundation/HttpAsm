@@ -191,6 +191,27 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: P-384 (secp384r1).** P-256's five cases at P-384 (bench_p384_*: a shared secret,
+a public key, a TLS 1.3 key share, a hedged RFC 6979 signature of a SHA-384 digest, a
+verification), beside OpenSSL 3.0.13's EVP_PKEY at P-384, which is its generic
+EC_GFp_mont_method (no assembly for this curve, where P-256 has ecp_nistz256); the same calls as
+the P-256 rivals. 41 rounds:
+
+| Case | v3 (mulx, adcx/adox, AVX2) | v1 (mul, SSE2) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| shared secret | 209 us | 254 us | 812 us | 3.9x OpenSSL |
+| public key | 37.4 us | 45.9 us | 766 us | 20x OpenSSL |
+| key share (key, public key, shared secret) | 253 us | 312 us | 2.05 ms | 8.1x OpenSSL |
+| ECDSA signature (hedged RFC 6979) | 47.5 us | 57.1 us | 838 us | 17.6x OpenSSL |
+| ECDSA verification (Straus, wNAF) | 231 us | 285 us | 774 us | 3.3x OpenSSL |
+
+The tiers suite: v3 1.22x v1 on a shared secret [1.20-1.22] and 1.21x on a signature. The field's
+generic six-limb Montgomery product (scratchpad p384/f6.asm) takes 130 cycles chained and 114
+at throughput; m by shl and add (p's n0 is 2^32 + 1) measured 131, no gain. Most of a shared
+secret is 380 doublings (4 products and 4 squares each) and 76 additions (11 and 5), so the next
+step is a square of its own: about 15% under the product of a value with itself in the
+scratchpad.
+
 **2026-11-27: RSA signing.** RSASSA-PKCS1-v1_5 and RSASSA-PSS with SHA-256 under Project
 Wycheproof's signing keys (rsa_pkcs1_*_sig_gen: e = 65537, balanced primes; the 2048-bit one
 is the verification's key) at 2048, 3072 and 4096 bits, beside OpenSSL 3.0.13's EVP_PKEY_sign

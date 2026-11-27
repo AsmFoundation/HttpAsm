@@ -89,6 +89,10 @@ extern httpasm_p256_public_key      ; int (public_key[65], private_key[32]): 0, 
 extern httpasm_p256_ecdh            ; int (shared[32], private_key[32], peer_key[65]): 0, -1 (key or point refused; zeros)
 extern httpasm_p256_sign            ; int (signature[64], private_key[32], digest, length, entropy[32] or NULL): 0, -1
 extern httpasm_p256_verify          ; int (public_key[65], digest, length, signature[64]): 0 valid, -1 not
+extern httpasm_p384_public_key      ; int (public_key[97], private_key[48]): 0, -1 when the key is not in [1, n)
+extern httpasm_p384_ecdh            ; int (shared[48], private_key[48], peer_key[97]): 0, -1 (key or point refused; zeros)
+extern httpasm_p384_sign            ; int (signature[96], private_key[48], digest, length, entropy[48] or NULL): 0, -1
+extern httpasm_p384_verify          ; int (public_key[97], digest, length, signature[96]): 0 valid, -1 not
 extern httpasm_rsa_public_key_init  ; int (httpasm_rsa_public_key *key, n, n_length, e, e_length): 0, -1 refused
 extern httpasm_rsa_verify_pkcs1     ; int (key, hash, digest, signature, signature_length): 0 valid, -1 not
 extern httpasm_rsa_verify_pss       ; int (key, hash, digest, salt_length, signature, signature_length): 0 valid, -1 not
