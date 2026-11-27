@@ -1443,9 +1443,9 @@ httpasm_hpack_encode:
     lea     rcx, [rel ha_hpack_by_id]
     cmp     word [rcx + rax * 2], 0
     jne     .same_name
+    ; The same id is the same name but for the letters' case (ha_field_lookup folds letters
+    ; only), so the lengths are equal already: the octets decide.
     mov     ecx, [r10]
-    cmp     ecx, [r15 + httpasm_field.name_length]
-    jne     .dynamic_next
     jmp     .compare_octets
 .compare_name:
     mov     ecx, [r10]

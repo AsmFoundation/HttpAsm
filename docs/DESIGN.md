@@ -735,6 +735,27 @@ HTTP/2, the drivers, the client):
      octets each parse leaves in the buffer compared too (the obs-fold rewrite), and a stale
      resume point past the data (now documented in `httpasm.h`: ignored, the search starts
      over), which the coverage gate found untested.
+   - **HTTP/2's request rules** (2026-11-27). On the browser request's 18 fields
+     `httpasm_h2_request` ran 5,133 instructions, 30% of them in `h2_name` (each name octet by
+     octet) and 512 in the `:path`'s octet loop. From v2 both use `ha_span_v2`, one routine for
+     every span of a nibble-table class (`ha_token_length`'s v2, made a routine: the table in
+     `xmm3`): names with `ha_ltchar_lo` (a tchar but A-Z, proven like tchar's), the `:path` by
+     runs of target octets between percent-encodings (`ha_target_lo`). Pseudo-field names are
+     compared by two loads instead of `repe cmpsb`. 3,706 instructions; 1.13-1.16x faster
+     (A/B, 3 processes). v1 measured 0.90-0.92x of itself before: its two loops had moved, and
+     starting them on 32-octet windows brought it to 0.97x, the rest being the per-name tier
+     test. `tests/native/tiers` compares every tier on 70,165 header lists, names and paths
+     against the guard page.
+   - **Frame headers and HPACK integers: measured, nothing to gain** (2026-11-27). The whole
+     server under SDE (one worker, h2load, 20,000 HTTP/2 requests one at a time): 4,960
+     user-space instructions a request, of which reading a frame's 9-octet header is about 20
+     (0.4%) and writing the answer's frames about 105 (2%); a header block's integers are 2.9%
+     of its decoding (6 instructions each on the one-octet path every index and length in a
+     browser's block takes). Nothing there for vectors, and less than the A/A noise for scalar
+     work. The same profile shows where an HTTP/2 request's instructions go instead: the request
+     rules (about 20%, `:authority`'s octet-by-octet grammar the largest part on a short
+     request), HPACK (18%), the allocator (11%: a stream and a head block per request, freed
+     after), the head's copy into its stream (9%).
    - **AVX2 for the one-pass head: measured, not kept** (2026-11-26). 32-octet steps (with a
      VEX-encoded lookup) ran 13.5% fewer instructions and 1-2% more time than v2 in the same
      build (`tiers/h1_parse_request`, every tier): a head's time is the chain from one line's
