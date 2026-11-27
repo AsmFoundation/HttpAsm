@@ -206,7 +206,7 @@ encoded, the peer's key from its encoding, a context, the derive; ours draws its
 | public key | 12.4 us | 13.2 us | 37.5 us | 3.0x OpenSSL |
 | key share (key, public key, shared secret) | 65.1 us | 68.0 us | 175.2 us | 2.7x OpenSSL |
 | ECDSA signature (hedged RFC 6979) | 15.5 us | 20.6 us | 26.7 us | 1.72x OpenSSL |
-| ECDSA verification | 65.1 us | 69.3 us | 86.0 us | 1.32x OpenSSL |
+| ECDSA verification (Straus, wNAF) | 55.6 us | 58.6 us | 85.6 us | 1.54x OpenSSL |
 
 The tiers suite: v3 1.049x v1 on a shared secret [1.032-1.068], 1.31x on a signature (v2 1.24x
 already: the SHA extensions in RFC 6979's HMAC). How the parts measured, and what was tried
@@ -219,7 +219,10 @@ and was dropped. OpenSSL's doubling (4M + 4S, a halving) against dbl-2001-b (3M 
 at v3, 7% faster at v1. The fixed base's window: 7 bits 11.85 us a public key, 6 bits 12.2, 5
 bits 13.3 (tables of 151.5, 88 and 53 KB). The inversion: Bernstein and Yang's divsteps 2.16
 us against Fermat's 4.1 (255 squarings in a chain); selecting the swapped f by cmov instead of
-an addition 2,226 to 2,158 ns.
+an addition 2,226 to 2,158 ns. Verification first ran both constant-time multiplications
+(65.1 us); one variable-time pass with wNAF digits sharing the doublings took it to 57.6 us,
+and its additions without the constant-time selection (they branch on infinity) plus the wNAF
+recoding passing runs of zeros at once (bsf) to 55.6 us.
 
 **2026-11-27: X25519.** `httpasm_x25519` (one shared secret a call) and a TLS 1.3 key share's
 X25519 work (`httpasm_x25519_public_key`, then `httpasm_x25519`), beside OpenSSL 3.0.13's

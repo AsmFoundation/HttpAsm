@@ -40,9 +40,13 @@
 ; whenever the digest is SHA-256's), with the caller's entropy as RFC 6979 3.6's extra input when
 ; given (hedged signatures: a fault or a weak generator alone no longer leaks the key), and
 ; draws again, as RFC 6979 says, in the cases no one will meet (k >= n, r = 0, s = 0).
-; Verification takes u1 G + u2 Q with the two constant-time multiplications, an addition that
-; checks the doubling and cancelling cases (public values), and compares x(R) with r without
-; leaving Jacobian coordinates: X = r Z^2, or X = (r + n) Z^2 when r + n < p.
+; Verification (every input public, so variable time) takes u1 G + u2 Q in one pass from the top
+; (Straus): wNAF digits, u1's by 7 bits over G's odd multiples (the fixed-base table's window 0
+; holds 1G..64G), u2's by 5 bits over 1Q, 3Q, ..15Q (built per call), the doublings shared (about
+; 247 doublings, 42 additions and 28 mixed additions a verification, against 258 + 57 + 37 for
+; the two constant-time multiplications); its additions branch on infinity and on equal and
+; opposite points, which a crafted key or signature can bring about. Then x(R) is compared with
+; r without leaving Jacobian coordinates: X = r Z^2, or X = (r + n) Z^2 when r + n < p.
 ;
 ; Validation: a public key must be 65 octets of SEC 1's uncompressed form (04, x, y), x and y
 ; below p, on the curve (RFC 9846 4.2.8.2 requires the check of a peer's key share; it also
@@ -103,7 +107,7 @@ PF_ARG2     equ 2424
 PF_ARG3     equ 2432
 PF_ARG4     equ 2440
 PF_SEEDN    equ 2448                        ; RFC 6979's seeding length: 97, or 129 with entropy
-PF_INF      equ 2456                        ; verification: an addend was infinity
+PF_LEN1     equ 2456                        ; verification: u1's wNAF digits (how many)
 PF_E        equ 2464                        ; ECDSA's scalars, plain limbs: e = digest mod n
 PF_D        equ 2496                        ; the private key
 PF_R        equ 2528                        ; r
@@ -113,10 +117,12 @@ PF_U1       equ 2624                        ; u1 = e w, u2 = r w
 PF_U2       equ 2656
 PF_KEY      equ 2688                        ; RFC 6979's K
 PF_SEED     equ 2720                        ; V || separator || x || h1 || entropy (129 of 136)
-PF_Q2       equ 2856                        ; a saved point (96)
-PF_END      equ 2952                        ; (wiped up to here)
-PF_OLDSP    equ 2952                        ; the caller's rsp (after the six pushes)
-PF_FRAME    equ 3008                        ; a multiple of 64
+PF_LEN2     equ 2856                        ; verification: u2's wNAF digits (how many)
+PF_DIG1     equ 2864                        ; u1's wNAF digits, signed octets (260)
+PF_DIG2     equ 3124                        ; u2's (260)
+PF_END      equ 3384                        ; (wiped up to here)
+PF_OLDSP    equ 3384                        ; the caller's rsp (after the six pushes)
+PF_FRAME    equ 3392                        ; a multiple of 64
 
 %define S_AX rbp + PF_AX
 %define S_AY rbp + PF_AY
@@ -315,7 +321,7 @@ PF_FRAME    equ 3008                        ; a multiple of 64
 
 ; P256_ADD F: R = ACC + IN, both Jacobian, add-2007-bl (11M + 5S), independent operations side
 ; by side. Leaves H = U2 - U1 in T3 and r = 2 (S2 - S1) in T5: the doubling case is H = r = 0,
-; the cancelling case H = 0 with r not 0 (verification looks). Wrong for either case and for an
+; the cancelling case H = 0 with r not 0 (p256_vadd looks). Wrong for either case and for an
 ; input at infinity: the caller's selection replaces the latter.
 %macro P256_ADD 1
     %1_SQR      S_T0, S_AZ                  ; Z1Z1 = Z1^2
@@ -973,6 +979,79 @@ p256_set_k2:
     ret
 
 ; -----------------------------------------------------------------------------
+; p256_wnaf: rsi = a scalar's four limbs (public), rdi = 260 octets, ecx = w (5 or 7) -> the
+; scalar's width-w NAF, least significant digit first, as signed octets: every digit 0 or odd with
+; |d| < 2^(w - 1), at most one nonzero among any w in a row, zeros past the last; rax = how many
+; (the last one nonzero; 0 for a zero scalar; at most 257, as k - d can pass 2^256). The classic
+; recoding (an odd k gives d = k mods 2^w and k -= d, leaving a multiple of 2^w), with each run of
+; zero digits passed at once (bsf, or a whole zero limb). Variable time: for verification's public
+; scalars only. Clobbers rax, rbx, rcx, rdx, rsi, r8-r15, the flags.
+; -----------------------------------------------------------------------------
+align 16
+p256_wnaf:
+    push        rdi
+    push        rcx
+    xor         eax, eax
+    mov         ecx, 260
+    rep         stosb
+    pop         rcx
+    pop         rdi
+    mov         r8, [rsi]
+    mov         r9, [rsi + 8]
+    mov         r10, [rsi + 16]
+    mov         r11, [rsi + 24]
+    xor         r12d, r12d                  ; a fifth limb: k - d passes 2^256 for d < 0
+    mov         r13d, 1
+    shl         r13, cl                     ; 2^w
+    lea         r14, [r13 - 1]              ; 2^w - 1
+    mov         r15, r13
+    shr         r15, 1                      ; 2^(w - 1)
+    xor         ebx, ebx                    ; the position k's bit 0 stands for
+    xor         esi, esi                    ; the count: the last digit's position + 1
+.next:
+    mov         rax, r8
+    or          rax, r9
+    or          rax, r10
+    or          rax, r11
+    or          rax, r12
+    jz          .done
+    test        r8, r8
+    jnz         .zeros
+    mov         r8, r9                      ; a zero limb: 64 zero digits at once
+    mov         r9, r10
+    mov         r10, r11
+    mov         r11, r12
+    xor         r12d, r12d
+    add         ebx, 64
+    jmp         .next
+.zeros:
+    bsf         rcx, r8                     ; the run of zero digits below the next odd bit
+    shrd        r8, r9, cl                  ; (bsf, not tzcnt: v1 runs this too)
+    shrd        r9, r10, cl
+    shrd        r10, r11, cl
+    shrd        r11, r12, cl
+    shr         r12, cl
+    add         ebx, ecx
+    mov         rax, r8
+    and         rax, r14                    ; k mod 2^w (k is odd now)
+    cmp         rax, r15
+    jb          .digit
+    sub         rax, r13                    ; 2^(w - 1) or more: the negative digit
+.digit:
+    mov         [rdi + rbx], al
+    lea         esi, [rbx + 1]
+    cqo                                     ; d's sign for the higher limbs
+    sub         r8, rax
+    sbb         r9, rdx
+    sbb         r10, rdx
+    sbb         r11, rdx
+    sbb         r12, rdx                    ; k -= d: a multiple of 2^w now
+    jmp         .next
+.done:
+    mov         eax, esi
+    ret
+
+; -----------------------------------------------------------------------------
 ; p256_load_point: rsi = 65 octets, SEC 1's uncompressed form 04 || x || y -> PX, PY (plain
 ; limbs). eax = 0 when the form is uncompressed and x, y are below p, else -1 (the curve
 ; equation is the caller's: P256_ON_CURVE). Clobbers rax, rsi, rdi, r8-r11, the flags.
@@ -1154,11 +1233,24 @@ p256_dbl_%2:
     P256_DBL    %1
     ret
 
+; p256_add_raw_v, p256_madd_raw_v: the formulas alone, R = ACC + IN (P256_ADD, P256_MADD), for
+; callers that settle infinity and the equal points themselves: the constant-time additions below
+; by mask, the verification's variable-time ones by branch.
+align 16
+p256_add_raw_%2:
+    P256_ADD    %1
+    ret
+
+align 16
+p256_madd_raw_%2:
+    P256_MADD   %1
+    ret
+
 ; p256_add_v: ACC = ACC + IN (Jacobian), either input infinity handled by the selection; H and r
 ; left in T3 and T5.
 align 16
 p256_add_%2:
-    P256_ADD    %1
+    call        p256_add_raw_%2
     P256_IS_ZERO r13, S_AZ
     P256_IS_ZERO r14, S_IZ
     P256_SELECT_RESULT r13, r14
@@ -1169,7 +1261,7 @@ p256_add_%2:
 ; leaves zeros, FP_CNEG mapping 0 to 0).
 align 16
 p256_madd_%2:
-    P256_MADD   %1
+    call        p256_madd_raw_%2
     P256_IS_ZERO r13, S_AZ
     mov         r14, [rbp + PF_IX]
     or          r14, [rbp + PF_IX + 8]
@@ -1183,6 +1275,66 @@ p256_madd_%2:
     sbb         r14, r14
     not         r14
     P256_SELECT_RESULT r13, r14
+    ret
+
+; p256_vadd_v: ACC = ACC + IN, IN Jacobian and never infinity, in variable time (verification's
+; public points only): ACC at infinity takes IN; after the addition, H = 0 means the same x: the
+; same point (r = 0 too) doubles IN, the opposite one gives infinity. The constant-time addition
+; above handles neither, as the scalar multiplications never meet them; Straus's pass can.
+align 16
+p256_vadd_%2:
+    P256_IS_ZERO rax, S_AZ
+    test        rax, rax
+    jnz         .take
+    call        p256_add_raw_%2
+    P256_IS_ZERO rax, S_T3                  ; H = 0?
+    test        rax, rax
+    jz          .sum
+    P256_IS_ZERO rax, S_T5                  ; r = 0?
+    test        rax, rax
+    jz          .cancel
+    P256_COPY   S_AX, S_IX, 12
+    jmp         p256_dbl_%2                 ; (a tail call: it returns to our caller)
+.cancel:
+    xor         eax, eax
+    mov         ecx, 12
+    lea         rdi, [rbp + PF_AX]
+    rep         stosq
+    ret
+.sum:
+    P256_COPY   S_AX, S_RX, 12
+    ret
+.take:
+    P256_COPY   S_AX, S_IX, 12
+    ret
+
+; p256_vmadd_v: p256_vadd_v's cases with IN affine (IX, IY; IZ = 1 set by the caller): the mixed
+; addition leaves H in T1 and r in T2.
+align 16
+p256_vmadd_%2:
+    P256_IS_ZERO rax, S_AZ
+    test        rax, rax
+    jnz         .take
+    call        p256_madd_raw_%2
+    P256_IS_ZERO rax, S_T1                  ; H = 0?
+    test        rax, rax
+    jz          .sum
+    P256_IS_ZERO rax, S_T2                  ; r = 0?
+    test        rax, rax
+    jz          .cancel
+    P256_COPY   S_AX, S_IX, 12
+    jmp         p256_dbl_%2
+.cancel:
+    xor         eax, eax
+    mov         ecx, 12
+    lea         rdi, [rbp + PF_AX]
+    rep         stosq
+    ret
+.sum:
+    P256_COPY   S_AX, S_RX, 12
+    ret
+.take:
+    P256_COPY   S_AX, S_IX, 12
     ret
 
 ; p256_affine_v: PX, PY = ACC in affine coordinates, plain (out of Montgomery form), ACC not
@@ -1460,40 +1612,92 @@ p256_verify_%2:
     FN_MUL      rbp + PF_U1, rbp + PF_U1, rel p256_n_r2    ; u1 = e w
     FN_MUL      rbp + PF_U2, rbp + PF_R, rbp + PF_S
     FN_MUL      rbp + PF_U2, rbp + PF_U2, rel p256_n_r2    ; u2 = r w
-    mov         r8, [rbp + PF_U2]
-    mov         r9, [rbp + PF_U2 + 8]
-    mov         r10, [rbp + PF_U2 + 16]
-    mov         r11, [rbp + PF_U2 + 24]
-    call        p256_set_k2
-    call        p256_mul_var_%2             ; u2 Q (u2 in [1, n): r and w are not 0)
-    P256_COPY   rbp + PF_Q2, S_AX, 12
-    mov         r8, [rbp + PF_U1]
-    mov         r9, [rbp + PF_U1 + 8]
-    mov         r10, [rbp + PF_U1 + 16]
-    mov         r11, [rbp + PF_U1 + 24]
-    call        p256_set_k2
-    call        p256_mul_base_%2            ; u1 G (infinity when u1 = 0)
-    P256_COPY   S_IX, rbp + PF_Q2, 12
-    P256_COPY   rbp + PF_Q2, S_AX, 12       ; u1 G, kept for the doubling case
-    P256_IS_ZERO rax, S_AZ
-    P256_IS_ZERO rcx, S_IZ
-    or          rax, rcx
-    mov         [rbp + PF_INF], rax         ; an addend is infinity: the selection handles it
-    call        p256_add_%2                 ; R = u1 G + u2 Q
-    cmp         qword [rbp + PF_INF], 0
-    jne         .summed
-    P256_IS_ZERO rax, S_T3                  ; H = 0: the same x
-    test        rax, rax
-    jz          .summed
-    P256_IS_ZERO rax, S_T5                  ; r = 0 too: the same point, R = 2 u1 G; else the
-    test        rax, rax                    ; opposite one, R at infinity
-    jz          .invalid
-    P256_COPY   S_AX, rbp + PF_Q2, 12
+    ; R = u1 G + u2 Q in one pass from the top (Straus): wNAF digits (u1 by 7 bits: G's odd
+    ; multiples are in the fixed-base table's window 0, 1G..64G; u2 by 5 bits over Q's odd
+    ; multiples 1Q..15Q, built here), the doublings shared; variable time, as every input is
+    ; public, so the additions branch on the doubling and cancelling cases
+    lea         rsi, [rbp + PF_U1]
+    lea         rdi, [rbp + PF_DIG1]
+    mov         ecx, 7
+    call        p256_wnaf
+    mov         [rbp + PF_LEN1], rax
+    lea         rsi, [rbp + PF_U2]
+    lea         rdi, [rbp + PF_DIG2]
+    mov         ecx, 5
+    call        p256_wnaf
+    mov         [rbp + PF_LEN2], rax
+    ; Q's odd multiples into TAB: Q, then 2Q into IN, then Q + 2Q, 3Q + 2Q, ... 13Q + 2Q (none of
+    ; these additions meets equal or opposite points: (2j + 1) Q = +-2Q has no solution mod n)
+    P256_COPY   S_AX, S_PX, 8
+    P256_COPY   S_AZ, rel p256_one, 4
+    P256_COPY   rbp + PF_TAB, S_AX, 12
     call        p256_dbl_%2
-.summed:
-    ; R at infinity cannot come here (the cancelling case left above; 2 u1 G is never infinity;
-    ; with u1 = 0, R = u2 Q), but the check stays: infinity, (0, 0, 0), would pass X = r Z^2
-    ; below and accept a forgery
+    P256_COPY   S_IX, S_AX, 12              ; IN = 2Q
+    P256_COPY   S_AX, rbp + PF_TAB, 12      ; ACC = Q
+    mov         qword [rbp + PF_WIN], 1
+.odd:
+    call        p256_add_%2                 ; (2j + 1) Q
+    imul        rdx, [rbp + PF_WIN], 96
+    P256_COPY   rbp + PF_TAB + rdx, S_AX, 12
+    inc         qword [rbp + PF_WIN]
+    cmp         qword [rbp + PF_WIN], 8
+    jne         .odd
+    ; the pass: from the longer wNAF's top digit (nonzero by its length) down; the accumulator
+    ; starts at infinity, so its first doubling is skipped
+    xor         eax, eax
+    mov         ecx, 12
+    lea         rdi, [rbp + PF_AX]
+    rep         stosq
+    mov         rax, [rbp + PF_LEN1]
+    cmp         rax, [rbp + PF_LEN2]
+    cmovb       rax, [rbp + PF_LEN2]
+    dec         rax
+    mov         [rbp + PF_WIN], rax
+    jmp         .digits                     ; (u2 is not 0: its wNAF has at least one digit)
+.pass:
+    call        p256_dbl_%2
+.digits:
+    mov         rcx, [rbp + PF_WIN]
+    movsx       rax, byte [rbp + PF_DIG1 + rcx]
+    test        eax, eax
+    jz          .u2
+    ; IN = |d| G from window 0 (affine; IZ = 1 for the selection), negated for d < 0
+    mov         [rbp + PF_SIGN], rax
+    mov         edx, eax
+    neg         edx
+    cmovs       edx, eax                    ; |d|
+    dec         edx
+    shl         edx, 6
+    lea         rsi, [rel p256_base_table]
+    add         rsi, rdx
+    P256_COPY   S_IX, rsi, 8
+    P256_COPY   S_IZ, rel p256_one, 4
+    mov         r12, [rbp + PF_SIGN]
+    sar         r12, 63                     ; all ones for a negative digit
+    FP_CNEG     r12, S_IY
+    call        p256_vmadd_%2
+.u2:
+    mov         rcx, [rbp + PF_WIN]
+    movsx       rax, byte [rbp + PF_DIG2 + rcx]
+    test        eax, eax
+    jz          .next
+    ; IN = |d| Q from TAB[(|d| - 1) / 2] (Jacobian), negated for d < 0
+    mov         [rbp + PF_SIGN], rax
+    mov         edx, eax
+    neg         edx
+    cmovs       edx, eax
+    shr         edx, 1                      ; (|d| - 1) / 2 for odd |d|
+    imul        edx, edx, 96
+    P256_COPY   S_IX, rbp + PF_TAB + rdx, 12
+    mov         r12, [rbp + PF_SIGN]
+    sar         r12, 63
+    FP_CNEG     r12, S_IY
+    call        p256_vadd_%2
+.next:
+    dec         qword [rbp + PF_WIN]
+    jns         .pass
+    ; R at infinity (u1 G = -u2 Q, or a cancellation the pass met and never left): no x to
+    ; compare, and (0, 0, 0) would pass X = r Z^2 below and accept a forgery
     P256_IS_ZERO rax, S_AZ
     test        rax, rax
     jnz         .invalid

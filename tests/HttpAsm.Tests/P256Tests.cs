@@ -354,6 +354,43 @@ public sealed unsafe partial class P256Tests
     }
 
     /// <summary>
+    /// The verification's variable-time additions at their edges. Its single pass (wNAF digits of
+    /// u1 by 7 bits and of u2 by 5, from the top, u1's digit before u2's at each position) can meet
+    /// equal or opposite points; with a public key Q = c G and a signature built for chosen u1 and
+    /// u2 (r = x(u1 G + u2 Q) mod n, s = r / u2, e = u1 s, which give back exactly u1 and u2) each
+    /// case is reached on purpose:
+    /// - the mixed addition doubling: c = (n + 1) / 2, u1 = 1, u2 = 2: u2's digit at position 1 puts
+    ///   c G in, the doubling makes it (n + 1) G = G, and u1's digit adds G to G; R = 2G: valid;
+    /// - the mixed addition cancelling: c = -(n + 1) / 2: the accumulator is -G when u1's G comes,
+    ///   so R is at infinity: refused (r, s built for any r);
+    /// - the Jacobian addition doubling: Q = G, u1 = u2 = 1: G, then G again; R = 2G: valid;
+    /// - the Jacobian addition cancelling: Q = -G, u1 = u2 = 1: R at infinity: refused.
+    /// </summary>
+    [Fact]
+    public void HandlesTheVerificationsEqualAndOppositePoints()
+    {
+        Platform.RequireLinuxX64();
+        BigInteger half = (N + 1) / 2;
+        (BigInteger C, BigInteger U1, BigInteger U2, bool Valid)[] cases =
+        [
+            (half, 1, 2, true),
+            (N - half, 1, 2, false),
+            (1, 1, 1, true),
+            (N - 1, 1, 1, false),
+        ];
+        foreach ((BigInteger c, BigInteger u1, BigInteger u2, bool valid) in cases)
+        {
+            (BigInteger X, BigInteger Y) q = Multiply(c, G)!.Value;
+            (BigInteger X, BigInteger Y)? sum = Add(Multiply(u1, G), Multiply(u2, q));
+            Assert.Equal(valid, sum is not null);
+            BigInteger r = sum is null ? 1 : sum.Value.X % N;
+            BigInteger s = r * BigInteger.ModPow(u2, N - 2, N) % N;
+            BigInteger e = u1 * s % N;
+            Assert.True(Verify(Encode(q), Scalar(e), [.. Scalar(r), .. Scalar(s)]) == (valid ? 0 : -1), $"c {c}, u1 {u1}, u2 {u2}");
+        }
+    }
+
+    /// <summary>
     /// What must be refused, with zeros written where there is an output: private keys 0, n, n + 1
     /// and 2^256 - 1 (all four functions that take one); public keys with any first octet but 04,
     /// with x or y equal to p, p + 1 or 2^256 - 1, or one off the curve; r or s 0, n or more; one

@@ -1047,9 +1047,14 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      *ECDSA:* the nonce is RFC 6979's (HMAC-SHA256: RFC 6979's own k for a SHA-256 digest),
      hedged with the caller's 32 octets of entropy as RFC 6979 3.6's extra input when given;
      a digest of any length counts by its leftmost 256 bits (FIPS 186-5 6.4.1). Verification
-     computes u1 G + u2 Q with both multiplications (inputs public), checks the doubling and
-     cancelling cases of the last addition, and compares x(R) with r in Jacobian coordinates
-     (X = r Z^2, or (r + n) Z^2 when r + n < p) without an inversion. *Validation:* a public
+     (inputs public, so variable time) computes u1 G + u2 Q in one pass from the top (Straus):
+     wNAF digits, u1's by 7 bits over G's odd multiples (the fixed-base table's window 0 holds
+     1G..64G: no table of its own), u2's by 5 bits over 1Q..15Q built per call, the doublings
+     shared, the additions branching on infinity and on equal and opposite points (a crafted key
+     or signature can bring them about; the tests build one of each); then it compares x(R)
+     with r in Jacobian coordinates (X = r Z^2, or (r + n) Z^2 when r + n < p) without an
+     inversion. The first version (a90bcdf) ran both constant-time multiplications: 65.1 us
+     against 55.6 now. *Validation:* a public
      key must be 04 || x || y with x, y below p on the curve (RFC 9846 4.2.8.2; it also stops
      the invalid-curve attack); private keys, r and s must be in [1, n - 1]; every refusal
      writes zeros where there is an output. Proven by RFC 6979 A.2.5 read from the pinned text
@@ -1064,13 +1069,14 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      digests of every length to 80 octets, RFC 6979's retry after a candidate k of n or more
      (one signature in about 2^32: a key, digest and entropy that take it were found by a
      search over 702 million draws, and the test checks the refusal against the reference; the
-     retries after r = 0 or s = 0, about 2^-256 each, are listed as rare for the coverage gate,
-     as is verification's check that R is not at infinity, which nothing reaches but which
-     stops a forgery if anything ever did), and `tests/native/tiers` (800 rounds of every
+     retries after r = 0 or s = 0, about 2^-256 each, are listed as rare for the coverage gate;
+     verification's refusal of R at infinity, which would otherwise pass X = r Z^2 as a
+     forgery, is reached by the signatures built for the pass's edges), and
+     `tests/native/tiers` (800 rounds of every
      function equal at every tier, inputs against the guard page, outputs fenced). *Measured*
      (benchmarks/README.md has the table and every experiment): against OpenSSL 3.0.13's EVP,
      a shared secret 1.37x (52.0 us), a public key 3.0x, a TLS 1.3 key share 2.7x, a signature
-     1.72x (15.5 us), a verification 1.32x (65.1 us); v3 1.05x v1 on a shared secret and 1.31x
+     1.72x (15.5 us), a verification 1.54x (55.6 us); v3 1.05x v1 on a shared secret and 1.31x
      on a signature. Why the gains are what they are: every carry instruction, cmov and shift
      runs on ports 0 and 6 only, which llvm-mca's model puts at 94% busy in a product (37 cycles
      a product apart, where the multiplier allows 20), so the products are near their bound
@@ -1079,10 +1085,10 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      window (11.85 against 13.3 us a public key at 5 bits) and the inversion (2.16 against
      Fermat's 4.1 us). Measured and not kept: the final subtraction by masks (14 cycles more
      latency a product), five doublings expanded in one routine (no change). Next levers: a
-     variable-time verification that shares the doublings of u1 G and u2 Q (Straus with wNAF
-     digits and a table of odd multiples of G: about 20% fewer field operations), the
-     divsteps' 6-cycle step chain (both zeta outcomes computed ahead: about 4), and on CPUs
-     with AVX-512 IFMA a 52-bit-limb field (no machine here to measure it on).
+     variable-time inversion for verification's s^-1 (public: divsteps with early exit, about a
+     third of the constant-time one's 2.16 us), the divsteps' 6-cycle step chain (both zeta
+     outcomes computed ahead: about 4), and on CPUs with AVX-512 IFMA a 52-bit-limb field (no
+     machine here to measure it on).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
