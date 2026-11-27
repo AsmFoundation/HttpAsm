@@ -132,6 +132,25 @@ static void add_hkdf_expand(void)
     bench_add(&c);
 }
 
+/* add_aes_block: the tiers cases of httpasm_aes_encrypt_block, one block under an AES-128 and an
+ * AES-256 key: the constant-time bitsliced v1 (eight blocks' work for one) against AES-NI. */
+static void add_aes_block(void)
+{
+    for (size_t key = 16; key <= 32; key += 16) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = "aes_encrypt_block";
+        c.input = key == 16 ? "AES-128 block" : "AES-256 block";
+        c.data = bench_sha_input();
+        c.length = key;
+        c.octets = 16;
+        c.ours = bench_aes_block;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
  * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
  * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
@@ -187,6 +206,7 @@ void bench_suite_tiers(void)
     add_sha512();
     add_hkdf_expand();
     add_hkdf384_expand();
+    add_aes_block();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

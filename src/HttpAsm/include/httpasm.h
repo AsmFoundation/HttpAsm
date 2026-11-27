@@ -251,7 +251,7 @@ uint32_t httpasm_abi_version(void);
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
- * 13 httpasm_hmac_sha384_ctx; 0 for any other value. */
+ * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -362,6 +362,31 @@ void httpasm_sha384_final(httpasm_sha512_ctx *h, uint8_t digest[HTTPASM_SHA384_D
 /* The digests of n octets at once. */
 void httpasm_sha512(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA512_DIGEST]);
 void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA384_DIGEST]);
+
+/* ------------------------------------------------------------------------------------------
+ * The block cipher: AES-128 and AES-256 encryption (FIPS 197), the base of AES-GCM and of
+ * QUIC's header protection. With AES-NI where the CPU has it; otherwise a constant-time
+ * bitsliced version that looks nothing up by key or data.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_AES_BLOCK 16        /* octets of an AES block */
+
+/* An expanded AES key (496 octets): both versions' round keys, so a key made at one CPU tier
+ * works at any other. It holds the key's secret: wipe it when done (explicit_bzero). */
+typedef struct httpasm_aes_key {
+    uint8_t round_keys[240];        /* FIPS 197's schedule, 16 octets a round */
+    uint8_t ct[240];                /* the constant-time version's, compressed */
+    uint32_t rounds;                /* 10 (AES-128) or 14 (AES-256) */
+    uint32_t reserved[3];
+} httpasm_aes_key;
+
+/* Expands a 16-octet (AES-128) or 32-octet (AES-256) key. Returns 0, or -1 for any other
+ * length (k is then untouched). */
+int httpasm_aes_init(httpasm_aes_key *k, const uint8_t *key, size_t length);
+
+/* Encrypts one block (in and out may be the same octets). */
+void httpasm_aes_encrypt_block(const httpasm_aes_key *k, const uint8_t in[HTTPASM_AES_BLOCK],
+                               uint8_t out[HTTPASM_AES_BLOCK]);
 
 /* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and

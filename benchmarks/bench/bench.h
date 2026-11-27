@@ -61,7 +61,9 @@
     X(httpasm_sha512)               \
     X(httpasm_sha384)               \
     X(httpasm_hmac_sha384)          \
-    X(httpasm_hkdf_sha384_expand)
+    X(httpasm_hkdf_sha384_expand)   \
+    X(httpasm_aes_init)             \
+    X(httpasm_aes_encrypt_block)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -208,6 +210,11 @@ void bench_hmac_sha256(const bench_build *b, const bench_case *c, long calls);
  * from a fixed 32-octet PRK, `calls` times: TLS 1.3's key schedule is made of such calls
  * (suite_rivals.c). */
 void bench_hkdf_expand(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_aes_block: httpasm_aes_encrypt_block of the case's first 16 octets, `calls` times, each
+ * call encrypting the last one's output, under a key of c->length octets (16 or 32) made from the
+ * case's data before the loop (the key's expansion is not timed; c->octets is 16) (suite_rivals.c). */
+void bench_aes_block(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */

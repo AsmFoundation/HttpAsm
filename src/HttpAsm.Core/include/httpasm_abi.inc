@@ -236,6 +236,19 @@ HTTPASM_SHA256_DIGEST           equ 32      ; octets of a digest
 HTTPASM_SHA256_BLOCK            equ 64      ; octets of a block (HMAC's key padding)
 
 ; -----------------------------------------------------------------------------
+; httpasm_aes_key: an expanded AES-128 or AES-256 key (FIPS 197 5.2), 496 octets, both
+; versions' schedules (crypto/aes.asm): any tier can use a key any tier made. No alignment is
+; required: the code loads round keys with unaligned moves or copies them to its stack.
+; -----------------------------------------------------------------------------
+struc httpasm_aes_key
+    .round_keys:        resb 240    ; w[0..4(Nr+1)) as FIPS 197 orders them, 16 octets a round
+    .ct:                resb 240    ; v1's round keys, compressed: two qwords a round (ct64)
+    .rounds:            resd 1      ; Nr: 10 (AES-128) or 14 (AES-256)
+    .reserved:          resd 3
+endstruc
+HTTPASM_AES_BLOCK               equ 16      ; octets of an AES block
+
+; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's
 ; whole state, like httpasm_sha256_ctx's.

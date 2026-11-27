@@ -105,6 +105,15 @@ if [ ! -f "$tools/cavp/hmac/HMAC.rsp" ] || [ "$tools/cavp/hmactestvectors.zip" -
   unzip -q -o "$tools/cavp/hmactestvectors.zip" -d "$tools/cavp/hmac"
   touch "$tools/cavp/hmac/HMAC.rsp"
 fi
+#   KAT_AES.zip: AESAVS's known-answer files for every mode; AesTests reads the ECB ones of
+#   AES-128 and AES-256 (GFSbox, KeySbox, VarKey, VarTxt): the block cipher alone.
+fetch cavp/KAT_AES.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/aes/KAT_AES.zip \
+  a203b16c9246b2ebae31dee5de21a606be80cf78ceabaca37150236fa098eb60
+if [ ! -f "$tools/cavp/aes/ECBVarTxt256.rsp" ] || [ "$tools/cavp/KAT_AES.zip" -nt "$tools/cavp/aes/ECBVarTxt256.rsp" ]; then
+  unzip -q -o "$tools/cavp/KAT_AES.zip" -d "$tools/cavp/aes"
+  touch "$tools/cavp/aes/ECBVarTxt256.rsp"
+fi
 #   Project Wycheproof (C2SP/wycheproof) at commit 65ca494 (2026-11-11), its testvectors_v1 files
 #   one by one into wycheproof/: edge cases the official vectors leave out (tags cut short or
 #   flipped, empty and long keys, HKDF's length limit), each test marked valid or invalid.

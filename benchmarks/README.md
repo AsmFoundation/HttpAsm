@@ -191,6 +191,20 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: the AES block cipher.** `httpasm_aes_encrypt_block`, each call encrypting the last
+call's output (one block's latency, as QUIC's header protection sees it), the key expanded
+before the loop, beside OpenSSL 3.0.13's EVP (`EVP_aes_128_ecb`/`EVP_aes_256_ecb`, a context set
+up once, `EVP_EncryptUpdate` of 16 octets a call), 11 rounds:
+
+| Case | AES-NI | v1 (bitsliced, constant time) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| AES-128, one block | 12.8 ns | 544 ns | 13.8 ns | 1.09x OpenSSL |
+| AES-256, one block | 16.9 ns | 728 ns | 17.0 ns | level |
+
+AES-NI's ten or fourteen dependent rounds set both libraries' times. v1 does eight blocks' work
+for one (its bitsliced state holds eight blocks) and expands its compressed round keys on every
+call; counter mode (GCM, next) fills all eight lanes and expands once per message.
+
 **2026-11-27: HMAC-SHA384 and HKDF-SHA384.** `rivals/hmac_sha384/*` (21 rounds, the host at
 9-14% other load, every A/A control within 1%) beside OpenSSL 3.0.13's `HMAC()` with
 `EVP_sha384()`, under a 48-octet key; `tiers/hkdf_sha384_expand/*`, a 48-octet output key from a

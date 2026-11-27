@@ -1457,6 +1457,62 @@ static int sha512_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_aes_*: the block cipher by versions (crypto/aes.asm) -----------------------------
+ * v1 is the constant-time bitsliced cipher with its own key schedule (SubWord by the bitsliced
+ * S-box), AES-NI the other (aeskeygenassist for the schedule). A key holds both versions' round
+ * keys, so a key made at one tier must work at every other: each key here is made at every tier
+ * and each of those used at every tier, on a block that ends against the guard page. */
+
+/* aes_tiers: `randoms` random keys of 16 and 32 octets. Returns 0 when every key made at any
+ * tier is the same octet for octet and encrypts the block as v1's key does at v1; 1 at the
+ * first difference. */
+static int aes_tiers(long randoms)
+{
+    long checked = 0;
+    uint8_t *block = page_end - 16;         /* the block's last octet is the page's last */
+    for (long i = 0; i < randoms; i++) {
+        uint8_t key[32];
+        size_t length = rng() % 2 ? 32 : 16;
+        for (size_t k = 0; k < length; k++)
+            key[k] = (uint8_t)rng();
+        for (size_t k = 0; k < 16; k++)
+            block[k] = (uint8_t)rng();
+        httpasm_aes_key made[TIERS];
+        uint8_t expected[16];
+        for (size_t t = 0; t < TIERS; t++) {
+            httpasm_cpu_limit(caps[t]);
+            if (httpasm_aes_init(&made[t], key, length) != 0) {
+                fprintf(stderr, "httpasm_aes_init refused a %zu-octet key at %s\n", length, cap_names[t]);
+                return 1;
+            }
+            if (memcmp(&made[t], &made[0], sizeof made[0]) != 0) {
+                fprintf(stderr, "httpasm_aes_init at %s made another key than at v1\n", cap_names[t]);
+                dump("key", key, length);
+                return 1;
+            }
+        }
+        httpasm_cpu_limit(caps[0]);
+        httpasm_aes_encrypt_block(&made[0], block, expected);
+        for (size_t t = 0; t < TIERS; t++) {
+            for (size_t u = 0; u < TIERS; u++) {
+                uint8_t out[16];
+                uint64_t features = httpasm_cpu_limit(caps[u]);
+                httpasm_aes_encrypt_block(&made[t], block, out);
+                if (memcmp(out, expected, 16) != 0) {
+                    fprintf(stderr, "httpasm_aes_encrypt_block at %s (features %#llx) with a key made at %s differs from v1\n",
+                            cap_names[u], (unsigned long long)features, cap_names[t]);
+                    dump("key", key, length);
+                    dump("block", block, 16);
+                    return 1;
+                }
+                checked++;
+            }
+        }
+    }
+    printf("httpasm_aes: %ld keys and blocks, made and used at every pair of tiers, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1711,6 +1767,8 @@ int main(int argc, char **argv)
         failed = sha256_tiers(randoms / 40);
     if (!failed)
         failed = sha512_tiers(randoms / 40);
+    if (!failed)
+        failed = aes_tiers(randoms / 40);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

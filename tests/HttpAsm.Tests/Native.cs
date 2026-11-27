@@ -151,6 +151,21 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_hkdf_sha256_expand")]
     internal static partial int HkdfSha256Expand(byte* prk, nuint prkLength, byte* info, nuint infoLength, byte* okm, nuint length);
 
+    /// <summary>int httpasm_aes_init(httpasm_aes_key *k, const uint8_t *key, size_t length).</summary>
+    /// <param name="k">The key to expand into (untouched on a refusal).</param>
+    /// <param name="key">The key octets.</param>
+    /// <param name="length">16 (AES-128) or 32 (AES-256).</param>
+    /// <returns>0, or -1 for any other length.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_aes_init")]
+    internal static partial int AesInit(AesKey* k, byte* key, nuint length);
+
+    /// <summary>void httpasm_aes_encrypt_block(const httpasm_aes_key *k, const uint8_t in[16], uint8_t out[16]).</summary>
+    /// <param name="k">An expanded key.</param>
+    /// <param name="input">The 16-octet block.</param>
+    /// <param name="output">Receives its encryption (may be input).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_aes_encrypt_block")]
+    internal static partial void AesEncryptBlock(AesKey* k, byte* input, byte* output);
+
     /// <summary>void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The context to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

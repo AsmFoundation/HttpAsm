@@ -253,6 +253,26 @@ internal struct HmacSha256Context
 }
 
 /// <summary>
+/// httpasm_aes_key (httpasm.h): an expanded AES-128 or AES-256 key, 496 octets, both versions'
+/// round keys (FIPS 197's and the constant-time version's compressed ones). No alignment needed.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct AesKey
+{
+    /// <summary>FIPS 197's schedule, 16 octets a round (AES-128 uses 11 rows, AES-256 15).</summary>
+    public fixed byte RoundKeys[240];
+
+    /// <summary>The constant-time version's round keys, compressed (two qwords a round).</summary>
+    public fixed byte Ct[240];
+
+    /// <summary>10 (AES-128) or 14 (AES-256).</summary>
+    public uint Rounds;
+
+    /// <summary>Unused.</summary>
+    public fixed uint Reserved[3];
+}
+
+/// <summary>
 /// httpasm_hmac_sha384_ctx (httpasm.h): a running HMAC-SHA384, 416 octets: SHA-384's inner and
 /// outer hashes past their key blocks. Copying it after init MACs again under the same key.
 /// </summary>

@@ -876,6 +876,28 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      Against OpenSSL 3.0.13's `HMAC()` with `EVP_sha384()`: 2.39x on 64 octets (941.7 against
      2,251 ns: four SHA-512 compressions), 1.50x on 1 KiB; HKDF-Expand of 48 octets from a
      48-octet secret 985 ns, 1.17x v1.
+   - **The AES block cipher** (2026-11-27), `crypto/aes.asm`: AES-128 and AES-256 encryption
+     (no AES-192: no TLS 1.3 or QUIC suite uses it; no decryption: GCM, CTR and QUIC's header
+     protection never decrypt with the block cipher). Two versions: AES-NI (`aeskeygenassist`
+     for the schedule), and v1, constant time without a table (a lookup indexed by key or data
+     leaks them through the cache): eight blocks bitsliced over `xmm0-xmm7` with SSE2 only, each
+     64-bit lane four blocks in the arrangement of BearSSL's `aes_ct64` (Thomas Pornin, MIT:
+     interleave, ortho, ShiftRows and MixColumns as shifts inside a lane; MixColumns' rotations
+     here one `pshuflw`/`pshufhw`/`pshufd` each), and the S-box as Boyar and Peralta's circuit
+     (115 gates, `specs/circuits/aes_sbox.txt`). `specs/circuits.cs` (a new generator, checked
+     in CI) proves that circuit on all 256 inputs against the S-box computed from FIPS 197's
+     definition, allocates its values to the 16 XMM registers and 13 spill slots by Belady's
+     farthest-next-use rule, runs the generated 192 instructions on all 256 inputs at once as
+     bit planes, and only then writes `include/generated/aes_sbox.inc`. v1's key schedule
+     computes SubWord with the same circuit. Every key holds both schedules (FIPS 197's round
+     keys and v1's compressed ones), so a key made at one tier works at every other. Designed in
+     a Python model first (scratchpad `ct64_model.py`: every piece against `cryptography`),
+     then translated. Proven by FIPS 197 appendices A and C, NIST's AESAVS ECB known answers
+     (GFSbox, KeySbox, VarKey, VarTxt: 568 AES-128 and 810 AES-256 records), .NET's AES on
+     4,000 random keys and blocks (in place too), and `tests/native/tiers` (80,000 keys made
+     and used at every pair of tiers). One chained block: AES-NI 12.8 ns (AES-128) and 16.9 ns
+     (AES-256), level with OpenSSL 3.0.13's EVP; v1 544 and 728 ns, eight blocks' work for
+     one, which counter mode fills.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

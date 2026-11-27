@@ -487,6 +487,85 @@ static bench_rival hmac_rivals[] = {
     { openssl_name, openssl_hmac_sha256 },
 };
 
+/* ---- The block cipher: one AES block, as QUIC's header protection asks for it. */
+
+/* bench_aes_block: httpasm_aes_encrypt_block, `calls` times, the key made first (bench.h). */
+void bench_aes_block(const bench_build *b, const bench_case *c, long calls)
+{
+    httpasm_aes_key key;
+    uint8_t block[16];
+    if (b->api.httpasm_aes_init(&key, c->data, c->length) != 0)
+        return;
+    memcpy(block, c->data, 16);
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_aes_encrypt_block(&key, block, block);   /* chained: each block the last one's output */
+    bench_sink = block[0];
+}
+
+/* OpenSSL's EVP for one ECB block: a context set up once per batch (AES-NI on this CPU, as any
+ * application gets it), then EVP_EncryptUpdate of 16 octets per call. */
+typedef void *(*openssl_ctx_new_fn)(void);
+typedef void (*openssl_ctx_free_fn)(void *ctx);
+typedef int (*openssl_init_fn)(void *ctx, const void *cipher, void *engine, const unsigned char *key, const unsigned char *iv);
+typedef int (*openssl_padding_fn)(void *ctx, int pad);
+typedef int (*openssl_update_fn)(void *ctx, unsigned char *out, int *out_length, const unsigned char *in, int in_length);
+static openssl_ctx_new_fn openssl_ctx_new;
+static openssl_ctx_free_fn openssl_ctx_free;
+static openssl_init_fn openssl_encrypt_init;
+static openssl_padding_fn openssl_set_padding;
+static openssl_update_fn openssl_encrypt_update;
+static const void *openssl_aes128_ecb;
+static const void *openssl_aes256_ecb;
+
+/* openssl_load_aes: the EVP functions and the two ECB ciphers. Returns 0, or -1 (with the reason
+ * on stderr): the AES cases then run without this rival. */
+static int openssl_load_aes(void)
+{
+    if (openssl_load() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    if (crypto == NULL)
+        return -1;
+    openssl_ctx_new = (openssl_ctx_new_fn)dlsym(crypto, "EVP_CIPHER_CTX_new");
+    openssl_ctx_free = (openssl_ctx_free_fn)dlsym(crypto, "EVP_CIPHER_CTX_free");
+    openssl_encrypt_init = (openssl_init_fn)dlsym(crypto, "EVP_EncryptInit_ex");
+    openssl_set_padding = (openssl_padding_fn)dlsym(crypto, "EVP_CIPHER_CTX_set_padding");
+    openssl_encrypt_update = (openssl_update_fn)dlsym(crypto, "EVP_EncryptUpdate");
+    openssl_md_fn ecb128 = (openssl_md_fn)dlsym(crypto, "EVP_aes_128_ecb");
+    openssl_md_fn ecb256 = (openssl_md_fn)dlsym(crypto, "EVP_aes_256_ecb");
+    if (openssl_ctx_new == NULL || openssl_ctx_free == NULL || openssl_encrypt_init == NULL || openssl_set_padding == NULL ||
+        openssl_encrypt_update == NULL || ecb128 == NULL || ecb256 == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP cipher functions\n");
+        return -1;
+    }
+    openssl_aes128_ecb = ecb128();
+    openssl_aes256_ecb = ecb256();
+    return 0;
+}
+
+/* openssl_aes_block: OpenSSL's one ECB block, `calls` times, chained like bench_aes_block. */
+static void openssl_aes_block(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *ctx = openssl_ctx_new();
+    unsigned char block[16];
+    int length = 0;
+    if (ctx == NULL || openssl_encrypt_init(ctx, c->length == 16 ? openssl_aes128_ecb : openssl_aes256_ecb, NULL, c->data, NULL) != 1) {
+        openssl_ctx_free(ctx);
+        return;
+    }
+    openssl_set_padding(ctx, 0);
+    memcpy(block, c->data, 16);
+    for (long i = 0; i < calls; i++)
+        openssl_encrypt_update(ctx, block, &length, block, 16);
+    openssl_ctx_free(ctx);
+    bench_sink = block[0];
+}
+
+static bench_rival aes_rivals[] = {
+    { openssl_name, openssl_aes_block },
+};
+
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
                                        0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -724,6 +803,22 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < 2; i++)          /* 64 octets and 1 KiB: a record's MAC-sized inputs */
         add("hmac_sha256", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha256, hmac ? hmac_rivals : NULL,
             hmac ? sizeof hmac_rivals / sizeof hmac_rivals[0] : 0);
+    int aes = openssl_load_aes() == 0;
+    for (size_t key = 16; key <= 32; key += 16) {
+        bench_case c;                       /* by hand: the key's length is c.length, a call's octets 16 */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = "aes_encrypt_block";
+        c.input = key == 16 ? "AES-128 block" : "AES-256 block";
+        c.data = sha;
+        c.length = key;
+        c.octets = 16;
+        c.ours = bench_aes_block;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = aes ? aes_rivals : NULL;
+        c.rival_count = aes ? sizeof aes_rivals / sizeof aes_rivals[0] : 0;
+        bench_add(&c);
+    }
     int hmac384 = openssl_load_hmac384() == 0;
     for (size_t i = 0; i < 2; i++)
         add("hmac_sha384", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha384, hmac384 ? hmac384_rivals : NULL,
