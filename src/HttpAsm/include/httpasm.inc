@@ -121,6 +121,9 @@ extern httpasm_mlkem768_decaps      ; int (shared[32], dk[2400], c[1088])
 extern httpasm_mlkem1024_keypair    ; void (ek[1568], dk[3168], seed[64])
 extern httpasm_mlkem1024_encaps     ; int (c[1568], shared[32], ek[1568], m[32])
 extern httpasm_mlkem1024_decaps     ; int (shared[32], dk[3168], c[1568])
+extern httpasm_ffdhe_size           ; size_t (group): p's octets (256 .. 1024), 0 for another code
+extern httpasm_ffdhe_public_key     ; int (group, public_key[size], x, x_length): 0, -1 (group, length)
+extern httpasm_ffdhe_shared         ; int (group, shared[size], x, x_length, peer[size]): 0, -1 (and 1 < Y < p - 1)
 extern httpasm_rsa_public_key_init  ; int (httpasm_rsa_public_key *key, n, n_length, e, e_length): 0, -1 refused
 extern httpasm_rsa_verify_pkcs1     ; int (key, hash, digest, signature, signature_length): 0 valid, -1 not
 extern httpasm_rsa_verify_pss       ; int (key, hash, digest, salt_length, signature, signature_length): 0 valid, -1 not

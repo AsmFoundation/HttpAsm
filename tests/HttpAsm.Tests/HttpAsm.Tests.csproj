@@ -56,6 +56,8 @@
     <None Include="../../specs/rfc/rfc8017.txt" Link="specs/rfc/rfc8017.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- RFC 8032 itself: the Ed25519 tests read 7.1's five test vectors from it. -->
     <None Include="../../specs/rfc/rfc8032.txt" Link="specs/rfc/rfc8032.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- RFC 7919 itself: the FFDHE tests read Appendix A's primes from it (their model's moduli). -->
+    <None Include="../../specs/rfc/rfc7919.txt" Link="specs/rfc/rfc7919.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

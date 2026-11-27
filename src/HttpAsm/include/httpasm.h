@@ -728,13 +728,47 @@ int httpasm_mlkem1024_decaps(uint8_t shared[HTTPASM_MLKEM_SHARED], const uint8_t
                              const uint8_t c[HTTPASM_MLKEM1024_CT]);
 
 /* ------------------------------------------------------------------------------------------
+ * FFDHE (RFC 7919): finite-field Diffie-Hellman over the five named groups TLS 1.3 offers, by
+ * their NamedGroup codes, generator 2. The private exponent comes from the caller (draw it with
+ * httpasm_random), at least RFC 7919 Appendix A's advised length (225, 275, 325, 375 and 400
+ * bits: 29, 35, 41, 47 and 50 octets) and at most p's size; its length is public (the work
+ * follows it), its value is not: constant time in it (RSA signing's exponentiation, the same
+ * frame). Public keys and shared secrets are p's size in octets, big-endian, left-padded (RFC
+ * 9846 4.2.8.1, 7.4.1). Stack: RSA signing's frame, 49,792 octets deep (tests/native/stack), touched
+ * a page at a time, wiped before a call returns.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_FFDHE2048 0x0100
+#define HTTPASM_FFDHE3072 0x0101
+#define HTTPASM_FFDHE4096 0x0102
+#define HTTPASM_FFDHE6144 0x0103
+#define HTTPASM_FFDHE8192 0x0104
+
+/* p's size in octets for a group (256, 384, 512, 768 or 1024): a public key's and a shared
+ * secret's; 0 for any other value. */
+size_t httpasm_ffdhe_size(int group);
+
+/* The public key Y = 2^x mod p of the private exponent x (private_length octets, big-endian),
+ * httpasm_ffdhe_size(group) octets. Returns 0; -1 for an unknown group or a length outside
+ * [the advised minimum, p's size] (nothing written). */
+int httpasm_ffdhe_public_key(int group, uint8_t *public_key, const uint8_t *private_key,
+                             size_t private_length);
+
+/* The shared secret Z = Y^x mod p of the peer's public key Y (httpasm_ffdhe_size(group) octets,
+ * big-endian) after RFC 7919 5.1's check 1 < Y < p - 1, as many octets. Returns 0; -1 for an
+ * unknown group, a length outside the range, or Y failing the check (nothing written: TLS then
+ * ends the handshake with illegal_parameter). */
+int httpasm_ffdhe_shared(int group, uint8_t *shared, const uint8_t *private_key, size_t private_length,
+                         const uint8_t *peer_key);
+
+/* ------------------------------------------------------------------------------------------
  * RSA signatures (RFC 8017): verification of RSASSA-PKCS1-v1_5 (certificates' sha256With-
  * RSAEncryption and its kin) and RSASSA-PSS with MGF1 (TLS 1.3's rsa_pss_rsae_*, rsa_pss_pss_*),
  * for moduli of 1024 to 8192 bits. Every input is public: these run in variable time. Products
  * by mulx with adcx/adox, or by mul.
  * Stack: verification needs up to about 13 KiB of the calling thread's stack (a key's setup,
- * 12,944 octets measured by tests/native/stack; a verification 7,304), signing about 54 KiB (a
- * private key's setup 54,992 octets, a signature 48,192: the table of powers and the CRT's
+ * 12,944 octets measured by tests/native/stack; a verification 7,304), signing about 56 KiB (a
+ * private key's setup 56,592 octets, a signature 49,792: the table of powers and the CRT's
  * values), each touched a page at a time on the way down, so a thread with too little faults on
  * its guard page rather than writing past it; signing's frame is wiped before it returns.
  * ------------------------------------------------------------------------------------------ */

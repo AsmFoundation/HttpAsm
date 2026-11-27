@@ -2480,6 +2480,95 @@ static int rsa_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_ffdhe_*: FFDHE by versions (rsa.asm's last section) ------------------------------
+ * v3 runs the Montgomery operations and the table's gather with mulx, adcx/adox and AVX2; v1 and
+ * v2 with mul and SSE2. Each round takes a group in turn (ffdhe2048 .. ffdhe8192) and two private
+ * exponents of the group's advised minimum length plus 0 to 31 octets (every 25th at ffdhe2048 its
+ * whole 256: the longest scan): both public keys, then each party's shared secret from the
+ * other's key, must be equal at every tier to v1's, the two secrets equal to each other, and the
+ * octet after each output untouched; the exponent or the peer's key sits against the guard page in
+ * turn (an over-read faults). */
+
+/* ffdhe_tiers: the check above, `randoms` rounds (at least five: one a group). Returns 0 when
+ * every tier agrees with v1, 1 at the first difference. */
+static int ffdhe_tiers(long randoms)
+{
+    static const int groups[5] = { HTTPASM_FFDHE2048, HTTPASM_FFDHE3072, HTTPASM_FFDHE4096, HTTPASM_FFDHE6144, HTTPASM_FFDHE8192 };
+    static const size_t minimum[5] = { 29, 35, 41, 47, 50 };
+    static uint8_t keys[2][1024], expected[2][1024], out[1024 + 16];
+    long rounds = randoms < 5 ? 5 : randoms, checked = 0;
+    for (long i = 0; i < rounds; i++) {
+        int g = (int)(i % 5);
+        size_t size = httpasm_ffdhe_size(groups[g]);
+        size_t length = minimum[g] + (size_t)(rng() % 32);
+        if (g == 0 && i % 25 == 0)
+            length = size;
+        uint8_t x[2][1024];
+        for (int party = 0; party < 2; party++)
+            for (size_t k = 0; k < length; k++)
+                x[party][k] = (uint8_t)rng();
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            for (int party = 0; party < 2; party++) {
+                const uint8_t *exponent = x[party];
+                if ((i + party) % 2 == 0) {                 /* the exponent against the guard */
+                    uint8_t *at = page_end - length;
+                    memcpy(at, x[party], length);
+                    exponent = at;
+                }
+                memset(out, 0xC3, sizeof out);
+                if (httpasm_ffdhe_public_key(groups[g], out, exponent, length) != 0) {
+                    fprintf(stderr, "httpasm_ffdhe_public_key at %s refused a %zu-octet exponent\n", cap_names[t], length);
+                    return 1;
+                }
+                if (out[size] != 0xC3) {
+                    fprintf(stderr, "httpasm_ffdhe_public_key at %s wrote past its %zu octets\n", cap_names[t], size);
+                    return 1;
+                }
+                if (t == 0)
+                    memcpy(keys[party], out, size);
+                else if (memcmp(out, keys[party], size) != 0) {
+                    fprintf(stderr, "httpasm_ffdhe_public_key at %s (features %#llx) differs from v1 (group %#x)\n",
+                            cap_names[t], (unsigned long long)features, groups[g]);
+                    return 1;
+                }
+            }
+            for (int party = 0; party < 2; party++) {
+                const uint8_t *peer = keys[1 - party];
+                if ((i + party) % 2 == 1) {                 /* the peer's key against the guard */
+                    uint8_t *at = page_end - size;
+                    memcpy(at, keys[1 - party], size);
+                    peer = at;
+                }
+                memset(out, 0xC3, sizeof out);
+                if (httpasm_ffdhe_shared(groups[g], out, x[party], length, peer) != 0) {
+                    fprintf(stderr, "httpasm_ffdhe_shared at %s refused a peer's key\n", cap_names[t]);
+                    return 1;
+                }
+                if (out[size] != 0xC3) {
+                    fprintf(stderr, "httpasm_ffdhe_shared at %s wrote past its %zu octets\n", cap_names[t], size);
+                    return 1;
+                }
+                if (t == 0)
+                    memcpy(expected[party], out, size);
+                else if (memcmp(out, expected[party], size) != 0) {
+                    fprintf(stderr, "httpasm_ffdhe_shared at %s (features %#llx) differs from v1 (group %#x)\n",
+                            cap_names[t], (unsigned long long)features, groups[g]);
+                    return 1;
+                }
+            }
+            if (memcmp(expected[0], expected[1], size) != 0) {
+                fprintf(stderr, "httpasm_ffdhe_shared: the two parties' secrets differ (group %#x)\n", groups[g]);
+                return 1;
+            }
+        }
+        checked++;
+    }
+    printf("httpasm_ffdhe_*: %ld rounds of two public keys and both shared secrets over the five groups at every tier, every one equal to v1's\n",
+           checked);
+    return 0;
+}
+
 /* ---- httpasm_rsa_private_key_init, httpasm_rsa_sign_*: RSA signing by versions (rsa.asm) ----
  * v3 runs the CRT's products, squares, reductions and table reads with mulx, adcx/adox and AVX2;
  * v1 and v2 with mul and SSE2. Two keys (made once with OpenSSL; their numbers below, n, e, p, q,
@@ -2912,6 +3001,8 @@ int main(int argc, char **argv)
         failed = rsa_sign_tiers(rsa_private_hex_1024, 128, randoms / 1000);
     if (!failed)
         failed = rsa_sign_tiers(rsa_private_hex_2048, 256, randoms / 4000);   /* (v1 signs it in 1.4 ms) */
+    if (!failed)
+        failed = ffdhe_tiers(randoms / 4000);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

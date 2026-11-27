@@ -521,6 +521,32 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_mlkem1024_decaps")]
     internal static partial int MlKem1024Decaps(byte* shared, byte* dk, byte* c);
 
+    /// <summary>size_t httpasm_ffdhe_size(int group).</summary>
+    /// <param name="group">A TLS NamedGroup code (ffdhe2048 = 0x0100 .. ffdhe8192 = 0x0104).</param>
+    /// <returns>p's size in octets (a public key's and a shared secret's), 0 for another value.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ffdhe_size")]
+    internal static partial nuint FfdheSize(int group);
+
+    /// <summary>int httpasm_ffdhe_public_key(group, public_key[size], private_key, private_length).</summary>
+    /// <param name="group">The group.</param>
+    /// <param name="publicKey">Receives 2^x mod p, p's size in octets, big-endian.</param>
+    /// <param name="privateKey">The exponent x, big-endian.</param>
+    /// <param name="privateLength">x's octets: from the group's advised minimum to p's size.</param>
+    /// <returns>0, or -1 for an unknown group or a length outside the range (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ffdhe_public_key")]
+    internal static partial int FfdhePublicKey(int group, byte* publicKey, byte* privateKey, nuint privateLength);
+
+    /// <summary>int httpasm_ffdhe_shared(group, shared[size], private_key, private_length, peer_key[size]).</summary>
+    /// <param name="group">The group.</param>
+    /// <param name="shared">Receives Y^x mod p, p's size in octets, big-endian (left-padded).</param>
+    /// <param name="privateKey">The exponent x, big-endian.</param>
+    /// <param name="privateLength">x's octets: from the group's advised minimum to p's size.</param>
+    /// <param name="peerKey">The peer's Y, p's size in octets.</param>
+    /// <returns>0, or -1 for an unknown group, a length outside the range, or Y outside (1, p - 1)
+    /// (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ffdhe_shared")]
+    internal static partial int FfdheShared(int group, byte* shared, byte* privateKey, nuint privateLength, byte* peerKey);
+
     /// <summary>int httpasm_rsa_public_key_init(key, n, n_length, e, e_length).</summary>
     /// <param name="key">Receives the key; all zeros when refused.</param>
     /// <param name="n">The modulus, big-endian (leading zero octets allowed).</param>

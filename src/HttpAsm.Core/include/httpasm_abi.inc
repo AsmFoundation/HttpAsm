@@ -318,6 +318,13 @@ HTTPASM_MLKEM1024_EK            equ 1568
 HTTPASM_MLKEM1024_DK            equ 3168
 HTTPASM_MLKEM1024_CT            equ 1568
 
+; FFDHE (RFC 7919; crypto/rsa.asm's last section): the groups by their TLS NamedGroup codes.
+HTTPASM_FFDHE2048               equ 0x0100
+HTTPASM_FFDHE3072               equ 0x0101
+HTTPASM_FFDHE4096               equ 0x0102
+HTTPASM_FFDHE6144               equ 0x0103
+HTTPASM_FFDHE8192               equ 0x0104
+
 ; Hash identifiers (the RSA signatures name their hash with these; SHA-1 and SHA-224 only where
 ; the caller brings the digest: PKCS#1 v1.5 verification of legacy certificates).
 HTTPASM_HASH_SHA1               equ 1

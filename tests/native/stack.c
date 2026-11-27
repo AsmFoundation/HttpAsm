@@ -4,8 +4,9 @@
  * HA_STACK_DOWN in crypto/p384.asm and crypto/rsa.asm), so that a thread whose stack is nearly
  * spent faults on its guard page instead of the frame stepping over the guard into whatever is
  * mapped below it (a stack clash: the class of CVE-2017-1000364). Every function with a frame
- * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 43 KiB, and
- * its verification), P-384's and P-256's, Ed25519's and X25519's - at v1 and at the best tier:
+ * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
+ * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-384's and P-256's,
+ * Ed25519's and X25519's - at v1 and at the best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
  *   - it runs again, in a forked child, on stacks too small for that depth (from 64 octets short
  *     down to 1 KiB, every 1000 octets: the guard page sits at every kind of place in the frame),
@@ -221,6 +222,13 @@ static void run_rsa_sign_pss(void)
     out_n = 256;
 }
 
+/* FFDHE (in RSA signing's frame): a 64-octet exponent at the smallest and the largest group. */
+static uint8_t ff_x[64], ff_peer2048[256], ff_peer8192[1024];
+static void run_ffdhe2048_public_key(void) { result = httpasm_ffdhe_public_key(HTTPASM_FFDHE2048, out, ff_x, sizeof ff_x); out_n = 256; }
+static void run_ffdhe2048_shared(void) { result = httpasm_ffdhe_shared(HTTPASM_FFDHE2048, out, ff_x, sizeof ff_x, ff_peer2048); out_n = 256; }
+static void run_ffdhe8192_public_key(void) { result = httpasm_ffdhe_public_key(HTTPASM_FFDHE8192, out, ff_x, sizeof ff_x); out_n = 1024; }
+static void run_ffdhe8192_shared(void) { result = httpasm_ffdhe_shared(HTTPASM_FFDHE8192, out, ff_x, sizeof ff_x, ff_peer8192); out_n = 1024; }
+
 static const stack_call calls[] = {
     { "mlkem512 keypair", run_mk512_keypair }, { "mlkem512 encaps", run_mk512_encaps },
     { "mlkem512 decaps", run_mk512_decaps }, { "mlkem768 keypair", run_mk768_keypair },
@@ -237,6 +245,8 @@ static const stack_call calls[] = {
     { "rsa public_key_init", run_rsa_public_key_init }, { "rsa verify_pkcs1", run_rsa_verify_pkcs1 },
     { "rsa verify_pss", run_rsa_verify_pss }, { "rsa private_key_init", run_rsa_private_key_init },
     { "rsa sign_pkcs1", run_rsa_sign_pkcs1 }, { "rsa sign_pss", run_rsa_sign_pss },
+    { "ffdhe2048 public_key", run_ffdhe2048_public_key }, { "ffdhe2048 shared", run_ffdhe2048_shared },
+    { "ffdhe8192 public_key", run_ffdhe8192_public_key }, { "ffdhe8192 shared", run_ffdhe8192_shared },
 };
 
 /* ---- running a call on a stack of our own ---- */
@@ -529,6 +539,16 @@ static int prepare(void)
         || httpasm_rsa_sign_pkcs1(&rsa_private, HTTPASM_HASH_SHA256, digest32, rsa_pkcs1, 256) != 0
         || httpasm_rsa_sign_pss(&rsa_private, HTTPASM_HASH_SHA256, digest32, rsa_salt, sizeof rsa_salt, rsa_pss, 256) != 0) {
         fprintf(stderr, "stack: RSA refused its own key\n");
+        return 1;
+    }
+    uint8_t ff_other[64];
+    for (size_t k = 0; k < sizeof ff_x; k++) {
+        ff_x[k] = (uint8_t)(0x4B ^ (11 * k));
+        ff_other[k] = (uint8_t)(0xB4 ^ (5 * k));
+    }
+    if (httpasm_ffdhe_public_key(HTTPASM_FFDHE2048, ff_peer2048, ff_other, sizeof ff_other) != 0
+        || httpasm_ffdhe_public_key(HTTPASM_FFDHE8192, ff_peer8192, ff_other, sizeof ff_other) != 0) {
+        fprintf(stderr, "stack: FFDHE refused its own exponent\n");
         return 1;
     }
     return 0;

@@ -1455,6 +1455,32 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      the sentinel intact, and each function on its depth + 1 KiB leaving the main stack's outputs.
      Its negative control is real: built from the sources before the fix, RSA's public-key setup
      at v1 on a 3,872-octet stack did not fault and wrote into the sentinel below the guard.
+   - **FFDHE** (2026-11-27), RFC 7919's five groups (TLS 1.3's ffdhe2048 .. ffdhe8192, by their
+     NamedGroup codes; generator 2): `httpasm_ffdhe_size`, `httpasm_ffdhe_public_key` (2^x mod p)
+     and `httpasm_ffdhe_shared` (Y^x mod p after RFC 7919 5.1's check 1 < Y < p - 1), outputs p's
+     size in octets, left-padded (RFC 9846 4.2.8.1, 7.4.1). *The primes* come from
+     `specs/ffdhe.cs` (CI --check), which rebuilds each from Appendix A's formula with Euler's
+     number summed exactly (floor(2^(b-130) e) from the series with 128 guard bits, accepted only
+     when the guard settles the floor), checks it equal to the pinned text's hex p and q, both
+     prime (Miller-Rabin, 32 bases), 2 of order q, and writes the limbs, R^2 mod p and n0. *The
+     exponentiation* is RSA signing's (crypto/rsa.asm's last section shares its frame and
+     rsa_power: table, gather, windows, the CPU's Montgomery operations), so the exponent meets
+     only constant-time code; what changed for it: rsa_power scans RS_EBITS bits (RSA keeps 64k,
+     its exponents' lengths secret; FFDHE gives 8 times its exponent's length, which the caller
+     chooses and is public: Appendix A's advised minimum, 225 to 400 bits, up to p's size, which
+     the functions enforce), 5-bit windows at every size (32 entries of 128 limbs fill the 32 KiB
+     table; short exponents favour the smaller table), three of the frame's slots grown to 128
+     limbs, and the exponent loaded by position alone (rsa_load_be's skipping of leading zero
+     octets would have looked at a secret). *Proven by* FfdheTests (ModPow over the primes read
+     from the pinned RFC text at every group and every kind of exponent length, random peer keys,
+     the range check's both ends and every refusal writing nothing, canaries),
+     `tests/native/tiers` (50 rounds over the five groups at every tier equal to v1's, inputs
+     against the guard page), `tests/native/stack` (49,792 octets deep: signing's frame).
+     *Measured* against OpenSSL 3.0.13's own named-group path (DH_new_by_nid, our exponent as its
+     private key, DH_generate_key / DH_compute_key_padded), the advised minimum exponents (its
+     defaults too), 41 rounds: ffdhe2048 public key 270 us against 330 (1.21x), shared secret 288
+     against 352 (1.23x); ffdhe3072 697 / 739 against 843 / 898 (1.21x); ffdhe4096 1.43 / 1.52 ms
+     against 1.77 / 1.88 (1.24x); v3 2.3-2.5x v1.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

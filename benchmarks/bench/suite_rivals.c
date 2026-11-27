@@ -1697,6 +1697,162 @@ static bench_rival mlkem_keypair_rivals[] = { { mlkem_native_name, rival_mlkem_k
 static bench_rival mlkem_encaps_rivals[] = { { mlkem_native_name, rival_mlkem_encaps } };
 static bench_rival mlkem_decaps_rivals[] = { { mlkem_native_name, rival_mlkem_decaps } };
 
+/* ---- FFDHE: a public key and a shared secret at ffdhe2048, ffdhe3072 and ffdhe4096 (RFC 7919),
+ * with exponents of the group's advised minimum length. OpenSSL 3.0.13's own path for these
+ * groups: DH_new_by_nid (the named group, its Montgomery context cached on first use), our
+ * exponent installed as the private key (DH_set0_key), then DH_generate_key (which, a private key
+ * being set, computes the public key from it) or DH_compute_key_padded (the peer's key checked,
+ * the secret left-padded to p's size: what TLS 1.3 takes). */
+
+/* The cases' exponents: two of 50 octets (the largest advised minimum), fixed; a case uses each
+ * one's first minimum-length octets. */
+static uint8_t ffdhe_input[2 * 50];
+static int ffdhe_input_made;
+
+/* ffdhe_data: the cases' data (see bench.h). */
+static const uint8_t *ffdhe_data(void)
+{
+    if (!ffdhe_input_made) {
+        for (size_t i = 0; i < sizeof ffdhe_input; i++)
+            ffdhe_input[i] = (uint8_t)(0x5C ^ (61 * i));
+        ffdhe_input_made = 1;
+    }
+    return ffdhe_input;
+}
+
+/* ffdhe_case: a case's group code, p's size in octets and the exponents' length (the advised
+ * minimum), from its length in bits. */
+static void ffdhe_case(const bench_case *c, int *group, size_t *size, size_t *length)
+{
+    *group = c->length == 2048 ? 0x0100 : c->length == 3072 ? 0x0101 : 0x0102;
+    *size = c->length / 8;
+    *length = c->length == 2048 ? 29 : c->length == 3072 ? 35 : 41;
+}
+
+/* The outputs and the peer's key the loops reuse (ffdhe4096's sizes at most). */
+static uint8_t ffdhe_out[512], ffdhe_peer[512];
+
+/* bench_ffdhe_public_key, bench_ffdhe_shared: see bench.h. */
+void bench_ffdhe_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    int group;
+    size_t size, length;
+    ffdhe_case(c, &group, &size, &length);
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ffdhe_public_key(group, ffdhe_out, c->data, length);
+    bench_sink = ffdhe_out[size - 1];
+}
+
+void bench_ffdhe_shared(const bench_build *b, const bench_case *c, long calls)
+{
+    int group;
+    size_t size, length;
+    ffdhe_case(c, &group, &size, &length);
+    b->api.httpasm_ffdhe_public_key(group, ffdhe_peer, c->data + 50, length);
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ffdhe_shared(group, ffdhe_out, c->data, length, ffdhe_peer);
+    bench_sink = ffdhe_out[size - 1];
+}
+
+/* OpenSSL's DH and BIGNUM functions (the DH_* ones deprecated in 3.0, still exported: TLS's
+ * named-group path runs them). */
+typedef void *(*openssl_dh_new_by_nid_fn)(int);
+typedef int (*openssl_dh_set0_key_fn)(void *, void *, void *);
+typedef int (*openssl_dh_generate_key_fn)(void *);
+typedef const void *(*openssl_dh_get0_pub_key_fn)(const void *);
+typedef int (*openssl_dh_compute_key_padded_fn)(unsigned char *, const void *, void *);
+typedef void *(*openssl_bn_bin2bn_fn)(const unsigned char *, int, void *);
+typedef int (*openssl_bn_bn2binpad_fn)(const void *, unsigned char *, int);
+static openssl_dh_new_by_nid_fn openssl_dh_new_by_nid;
+static openssl_dh_set0_key_fn openssl_dh_set0_key;
+static openssl_dh_generate_key_fn openssl_dh_generate_key;
+static openssl_dh_get0_pub_key_fn openssl_dh_get0_pub_key;
+static openssl_dh_compute_key_padded_fn openssl_dh_compute_key_padded;
+static openssl_bn_bin2bn_fn openssl_bn_bin2bn;
+static openssl_bn_bn2binpad_fn openssl_bn_bn2binpad;
+static openssl_free_fn openssl_dh_free, openssl_bn_free;
+enum { OPENSSL_NID_FFDHE2048 = 1126 };      /* NID_ffdhe2048; 3072, 4096 follow it */
+
+/* openssl_load_ffdhe: those functions. Returns 0, or -1 (the cases then run without this rival). */
+static int openssl_load_ffdhe(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL)
+        return -1;
+    openssl_dh_new_by_nid = (openssl_dh_new_by_nid_fn)dlsym(crypto, "DH_new_by_nid");
+    openssl_dh_set0_key = (openssl_dh_set0_key_fn)dlsym(crypto, "DH_set0_key");
+    openssl_dh_generate_key = (openssl_dh_generate_key_fn)dlsym(crypto, "DH_generate_key");
+    openssl_dh_get0_pub_key = (openssl_dh_get0_pub_key_fn)dlsym(crypto, "DH_get0_pub_key");
+    openssl_dh_compute_key_padded = (openssl_dh_compute_key_padded_fn)dlsym(crypto, "DH_compute_key_padded");
+    openssl_bn_bin2bn = (openssl_bn_bin2bn_fn)dlsym(crypto, "BN_bin2bn");
+    openssl_bn_bn2binpad = (openssl_bn_bn2binpad_fn)dlsym(crypto, "BN_bn2binpad");
+    openssl_dh_free = (openssl_free_fn)dlsym(crypto, "DH_free");
+    openssl_bn_free = (openssl_free_fn)dlsym(crypto, "BN_free");
+    if (!openssl_dh_new_by_nid || !openssl_dh_set0_key || !openssl_dh_generate_key || !openssl_dh_get0_pub_key ||
+        !openssl_dh_compute_key_padded || !openssl_bn_bin2bn || !openssl_bn_bn2binpad || !openssl_dh_free || !openssl_bn_free) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the DH functions\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_ffdhe_key: the case's named group with an exponent installed as its private key
+ * (the first exponent, or the second's when `second`), or NULL. */
+static void *openssl_ffdhe_key(const bench_case *c, int second)
+{
+    int group;
+    size_t size, length;
+    ffdhe_case(c, &group, &size, &length);
+    void *dh = openssl_dh_new_by_nid(OPENSSL_NID_FFDHE2048 + (group - 0x0100));
+    void *private_key = dh ? openssl_bn_bin2bn(c->data + (second ? 50 : 0), (int)length, NULL) : NULL;
+    if (private_key == NULL || openssl_dh_set0_key(dh, NULL, private_key) != 1) {
+        openssl_bn_free(private_key);
+        openssl_dh_free(dh);
+        return NULL;
+    }
+    return dh;
+}
+
+/* openssl_ffdhe_public_key: DH_generate_key on the key (its public key from the installed
+ * exponent) and the public key's octets, each call. */
+static void openssl_ffdhe_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *dh = openssl_ffdhe_key(c, 0);
+    if (dh != NULL) {
+        for (long i = 0; i < calls; i++) {
+            openssl_dh_generate_key(dh);
+            openssl_bn_bn2binpad(openssl_dh_get0_pub_key(dh), ffdhe_out, (int)(c->length / 8));
+        }
+    }
+    openssl_dh_free(dh);
+    bench_sink = ffdhe_out[0];
+}
+
+/* openssl_ffdhe_shared: the peer's key from its octets and DH_compute_key_padded, each call (the
+ * key with its exponent made before the loop). */
+static void openssl_ffdhe_shared(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *dh = openssl_ffdhe_key(c, 0), *peer_dh = openssl_ffdhe_key(c, 1);
+    if (dh != NULL && peer_dh != NULL && openssl_dh_generate_key(peer_dh) == 1) {
+        unsigned char peer_octets[512];
+        int size = (int)(c->length / 8);
+        openssl_bn_bn2binpad(openssl_dh_get0_pub_key(peer_dh), peer_octets, size);
+        for (long i = 0; i < calls; i++) {
+            void *peer = openssl_bn_bin2bn(peer_octets, size, NULL);
+            openssl_dh_compute_key_padded(ffdhe_out, peer, dh);
+            openssl_bn_free(peer);
+        }
+    }
+    openssl_dh_free(peer_dh);
+    openssl_dh_free(dh);
+    bench_sink = ffdhe_out[0];
+}
+
+static bench_rival ffdhe_public_key_rivals[] = { { openssl_name, openssl_ffdhe_public_key } };
+static bench_rival ffdhe_shared_rivals[] = { { openssl_name, openssl_ffdhe_shared } };
+
 /* ---- RSA verification ------------------------------------------------------------------------
  * The vectors: a public key, a SHA-256 digest and its valid PKCS#1 v1.5 signature at each size,
  * Project Wycheproof's rsa_signature_{2048,3072,4096}_sha256_test.json, each one's first valid
@@ -2657,6 +2813,35 @@ void bench_suite_rivals(void)
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = mlkem_cases[i].rivals;
         c.rival_count = 1;
+        bench_add(&c);
+    }
+    int ffdhe = openssl_load_ffdhe() == 0;
+    static const struct {
+        const char *name, *input;
+        size_t bits;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } ffdhe_cases[] = {
+        { "ffdhe2048_public_key", "public key (225-bit exponent)", 2048, bench_ffdhe_public_key, ffdhe_public_key_rivals },
+        { "ffdhe2048_shared", "shared secret (225-bit exponent)", 2048, bench_ffdhe_shared, ffdhe_shared_rivals },
+        { "ffdhe3072_public_key", "public key (275-bit exponent)", 3072, bench_ffdhe_public_key, ffdhe_public_key_rivals },
+        { "ffdhe3072_shared", "shared secret (275-bit exponent)", 3072, bench_ffdhe_shared, ffdhe_shared_rivals },
+        { "ffdhe4096_public_key", "public key (325-bit exponent)", 4096, bench_ffdhe_public_key, ffdhe_public_key_rivals },
+        { "ffdhe4096_shared", "shared secret (325-bit exponent)", 4096, bench_ffdhe_shared, ffdhe_shared_rivals },
+    };
+    for (size_t i = 0; i < sizeof ffdhe_cases / sizeof ffdhe_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call; the length is the group */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = ffdhe_cases[i].name;
+        c.input = ffdhe_cases[i].input;
+        c.data = ffdhe_data();
+        c.length = ffdhe_cases[i].bits;
+        c.octets = 0;
+        c.ours = ffdhe_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = ffdhe ? ffdhe_cases[i].rivals : NULL;
+        c.rival_count = ffdhe ? 1 : 0;
         bench_add(&c);
     }
     int ed25519 = openssl_load_ed25519() == 0;

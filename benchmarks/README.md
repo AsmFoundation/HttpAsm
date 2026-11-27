@@ -191,6 +191,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: FFDHE.** RFC 7919's groups at 2048, 3072 and 4096 bits, exponents of the advised
+minimum length (225, 275, 325 bits: OpenSSL's defaults for these groups too): a public key 2^x mod
+p and a shared secret with a peer's key made before the loop. Beside OpenSSL 3.0.13's own
+named-group path: DH_new_by_nid, our exponent installed as the private key (DH_set0_key), then
+DH_generate_key (which computes the public key from the installed exponent) or the peer's key from
+its octets and DH_compute_key_padded. 41 rounds:
+
+| Case | v3 | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| ffdhe2048 public key | 270 us | 616 us | 330 us | 1.21x OpenSSL |
+| ffdhe2048 shared secret | 288 us | 656 us | 352 us | 1.23x OpenSSL |
+| ffdhe3072 public key | 697 us | 1,664 us | 843 us | 1.21x OpenSSL |
+| ffdhe3072 shared secret | 739 us | 1,764 us | 898 us | 1.20x OpenSSL |
+| ffdhe4096 public key | 1,427 us | 3,651 us | 1,768 us | 1.23x OpenSSL |
+| ffdhe4096 shared secret | 1,515 us | 3,908 us | 1,882 us | 1.24x OpenSSL |
+
+The exponentiation is RSA signing's (5-bit windows, the gather, the Montgomery operations at k =
+32, 48, 64 limbs): the lead over OpenSSL's mont5 code is the products' and squares' (RSA's entry
+has their measurements).
+
 **2026-11-27: ML-KEM, v3 with the pool.** The hashes that ran one state at a time, H(ek) beside
 an encapsulation's matrix and H(ek) and J(z || c) beside a decapsulation's, now share the four
 lanes of the matrix's permutations (`mk_pool_v3`: each lane runs a hash or an entry, and takes

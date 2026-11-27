@@ -12,7 +12,9 @@
 #      --check and specs/ed25519.cs --check: P-256's, P-384's and Ed25519's constants and their
 #      fixed-base tables (2,368, 3,520 and 1,376 points) are proven again (each point by another
 #      route) and must match the committed includes (Ed25519's also proves fe25519.inc's
-#      hand-written inversion record for 2^255 - 19).
+#      hand-written inversion record for 2^255 - 19). And specs/ffdhe.cs --check: RFC 7919's five
+#      primes rebuilt from its formula with Euler's number, equal to its hex, safe primes with 2
+#      of order (p - 1) / 2, must match the committed include.
 #   2. dotnet build HttpAsm.slnx -c Release: the core, libhttpasm.so and the tests.
 #      AsmFoundation.Sdk's bundled toolchain (NASM, lld, from nuget.org) assembles and links on
 #      this runner, as it does on Windows and macOS.
@@ -103,6 +105,9 @@ jobs:
 
       - name: Ed25519's constants and fixed-base table are proven and current
         run: dotnet run specs/ed25519.cs -- --check
+
+      - name: FFDHE's five primes are proven (RFC 7919's formula and hex, safe primes) and current
+        run: dotnet run specs/ffdhe.cs -- --check
 
       - name: Build (core, libhttpasm.so, tests)
         run: dotnet build HttpAsm.slnx -c Release

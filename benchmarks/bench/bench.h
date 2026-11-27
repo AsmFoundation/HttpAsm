@@ -94,7 +94,9 @@
     X(httpasm_rsa_verify_pkcs1)     \
     X(httpasm_rsa_private_key_init) \
     X(httpasm_rsa_sign_pkcs1)       \
-    X(httpasm_rsa_sign_pss)
+    X(httpasm_rsa_sign_pss)         \
+    X(httpasm_ffdhe_public_key)     \
+    X(httpasm_ffdhe_shared)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -358,6 +360,14 @@ int rival_mlkem768_encaps(uint8_t *ct, uint8_t *ss, const uint8_t *pk, const uin
 int rival_mlkem1024_encaps(uint8_t *ct, uint8_t *ss, const uint8_t *pk, const uint8_t *m);
 int rival_mlkem768_decaps(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 int rival_mlkem1024_decaps(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
+
+/* The FFDHE cases (suite_rivals.c): a case's length is the group's size in bits (2048, 3072 or
+ * 4096) and its data two private exponents of the group's advised minimum length (RFC 7919
+ * Appendix A, OpenSSL's own default for these groups). bench_ffdhe_public_key: the first's public
+ * key 2^x mod p (a TLS 1.3 key share); bench_ffdhe_shared: the shared secret with the second's
+ * public key (made before the loop), RFC 7919 5.1's check included. */
+void bench_ffdhe_public_key(const bench_build *b, const bench_case *c, long calls);
+void bench_ffdhe_shared(const bench_build *b, const bench_case *c, long calls);
 
 /* An RSA verification's input (bench_rsa_input, suite_rivals.c): a public key (n of `octets`
  * octets, e = 65537) with a SHA-256 digest and its valid RSASSA-PKCS1-v1_5 signature, from

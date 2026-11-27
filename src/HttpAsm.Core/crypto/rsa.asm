@@ -1432,13 +1432,14 @@ PK_SIZE     equ httpasm_rsa_private_key_size
 ; it as they are), then the CRT's own buffers.
 RS_TABLE    equ RV_FRAME                    ; x^0 .. x^(2^w - 1), Montgomery forms (32 or 64
                                             ; entries of k limbs: room for 64 of 64 limbs)
-RS_M        equ RS_TABLE + 32768            ; m, 128 limbs (zero above its own)
-RS_X        equ RS_M + 1024                 ; the base x R mod the prime (k limbs)
-RS_ACC      equ RS_X + 512                  ; the running power
-RS_SP       equ RS_ACC + 512                ; m^dp mod p (plain)
+RS_M        equ RS_TABLE + 32768            ; m, 128 limbs (zero above its own); FFDHE's exponent
+RS_X        equ RS_M + 1024                 ; the base x R mod the prime (k limbs: up to 128, FFDHE's)
+RS_ACC      equ RS_X + 1024                 ; the running power (up to 128 limbs)
+RS_SP       equ RS_ACC + 1024               ; m^dp mod p (plain)
 RS_SQ       equ RS_SP + 512                 ; m^dq mod q (plain)
-RS_TMP      equ RS_SQ + 512                 ; a gathered entry; the CRT's scratch; the init's q^-1
-RS_PRODUCT  equ RS_TMP + 512                ; h q, or the init's p q (2k limbs)
+RS_TMP      equ RS_SQ + 512                 ; a gathered entry; the CRT's scratch; the init's q^-1;
+                                            ; FFDHE's base (up to 128 limbs)
+RS_PRODUCT  equ RS_TMP + 1024               ; h q, or the init's p q (2k limbs); FFDHE's p - 1
 RS_PRIV     equ RS_PRODUCT + 1024           ; the private key
 RS_SALT     equ RS_PRIV + 8                 ; PSS: the salt
 RS_OUT      equ RS_SALT + 8                 ; the signature's octets
@@ -1455,7 +1456,9 @@ RS_PSQR     equ RS_COUNT + 8                ; the power's square (its address: r
 RS_PMUL     equ RS_PSQR + 8                 ; the power's product
 RS_WIN      equ RS_PMUL + 8                 ; the power's window width in bits (rsa_pick_power)
 RS_ENTRIES  equ RS_WIN + 8                  ; its table's entries, 2^RS_WIN
-RS_FRAME    equ (RS_ENTRIES + 8 + 63) & ~63
+RS_EBITS    equ RS_ENTRIES + 8              ; the exponent's bits the power scans (64k for RSA's
+                                            ; primes; 8 times FFDHE's exponent length): public
+RS_FRAME    equ (RS_EBITS + 8 + 63) & ~63
 RS_BELOW    equ 4096                        ; the callees' stack under the frame that the wipe
                                             ; covers: the deepest, a square of 128 limbs (the
                                             ; fault check's), takes about 2.2 KiB
@@ -2195,10 +2198,15 @@ rsa_digit:
 ; halve a bit narrower) against a product per window (a fifth more at 5 bits): at k = 16 5 bits
 ; save about 17,000 cycles an exponentiation (measured operations: a square 573, a product 709,
 ; a 64-entry gather 300), at k = 24 the two are even, at k = 32 6 bits win by about 35,000. The
-; width depends on k alone: public. Clobbers rax, rcx, rdx.
+; width depends on k alone: public. And RS_EBITS = 64k: the power scans the exponent's every limb
+; (RSA's CRT exponents' lengths stay secret; FFDHE, whose exponent length is public, sets fewer).
+; Clobbers rax, rcx, rdx.
 ; -----------------------------------------------------------------------------
 align 16
 rsa_pick_power:
+    mov         rax, [rbp + RS_K]
+    shl         rax, 6
+    mov         [rbp + RS_EBITS], rax
     mov         eax, 5
     mov         ecx, 6
     cmp         qword [rbp + RS_K], 16      ; (k is public: the key's size)
@@ -2224,13 +2232,14 @@ rsa_pick_power:
 
 ; -----------------------------------------------------------------------------
 ; rsa_power: the frame's RS_X (x R mod p, below p), RS_PRIME, RS_PRIME0, RS_EXP (k limbs), RS_RR,
-; RS_K, RS_PSQR, RS_PMUL, RS_WIN, RS_ENTRIES -> RS_ACC = x^exp R mod p (Montgomery form, below
-; R: at k = 16 the almost-Montgomery operations leave it there, not below p), in constant time.
-; The table x^0 .. x^(2^w - 1) (w = RS_WIN, 5 or 6) in Montgomery forms: x^0 = R mod p (the
-; reduction of R^2), x^1 = x, an even entry the square of its half, an odd one the even below it
-; times x. Then the exponent's 64k bits from the top in windows of w (the first one 64k mod w
-; bits, or w): each window w squares and a product with the entry its digit names, read by gather.
-; The windows' positions depend only on k, so the exponent's own length stays secret; the table's
+; RS_K, RS_PSQR, RS_PMUL, RS_WIN, RS_ENTRIES, RS_EBITS -> RS_ACC = x^exp R mod p (Montgomery
+; form, below R: at k = 16 the almost-Montgomery operations leave it there, not below p), in
+; constant time. The table x^0 .. x^(2^w - 1) (w = RS_WIN, 5 or 6) in Montgomery forms: x^0 = R
+; mod p (the reduction of R^2), x^1 = x, an even entry the square of its half, an odd one the even
+; below it times x. Then the exponent's low RS_EBITS bits from the top in windows of w (the first
+; one RS_EBITS mod w bits, or w): each window w squares and a product with the entry its digit
+; names, read by gather. The windows' positions depend only on RS_EBITS (RSA's 64k: the exponent's
+; own length stays secret; FFDHE's from the exponent's public length in octets); the table's
 ; 2^w - 2 operations and every window run whatever the exponent. Frame routine (rbp).
 ; -----------------------------------------------------------------------------
 align 16
@@ -2285,18 +2294,16 @@ rsa_power:
     inc         ebx
     cmp         rbx, [rbp + RS_ENTRIES]
     jne         .entry
-    ; the first window: the top 64k mod w bits (or w)
-    mov         rax, r14
-    shl         rax, 6
+    ; the first window: the top RS_EBITS mod w bits (or w)
+    mov         rax, [rbp + RS_EBITS]
     xor         edx, edx
     mov         rcx, [rbp + RS_WIN]
-    div         rcx                         ; (k and w are public)
+    div         rcx                         ; (the bit count and w are public)
     test        edx, edx
     jnz         .width
     mov         edx, ecx
 .width:
-    mov         r15, r14
-    shl         r15, 6
+    mov         r15, [rbp + RS_EBITS]
     sub         r15, rdx                    ; the window's position
     mov         ecx, edx
     mov         rsi, r15
@@ -2942,6 +2949,295 @@ httpasm_rsa_sign_pss:
     mov         rcx, [rbp + RV_KBYTES]
     xor         eax, eax
     rep         stosb
+.refused:
+    mov         eax, -1
+.done:
+    RS_LEAVE
+    ret
+.end:
+
+; =============================================================================
+; FFDHE (RFC 7919): finite-field Diffie-Hellman over the five named groups TLS 1.3 offers
+; (ffdhe2048 .. ffdhe8192, NamedGroup 0x0100 .. 0x0104), generator 2: the C ABI's
+; httpasm_ffdhe_size, httpasm_ffdhe_public_key (Y = 2^x mod p) and httpasm_ffdhe_shared (Z =
+; Y^x mod p after RFC 7919 5.1's check 1 < Y < p - 1). The exponentiation is signing's: rsa_power
+; (a table of 32 powers, 5-bit windows read by gather, the Montgomery operations of the CPU's
+; version) in signing's frame, so the private exponent meets only constant-time code. Its windows
+; sit at positions fixed by its length in octets, which the caller chooses and which is public
+; (from RFC 7919 Appendix A's advised minimum, 225 to 400 bits, up to p's size), and it is loaded
+; by position alone (ffdhe_load: rsa_load_be would look at its leading octets). The primes come
+; from include/generated/ffdhe_groups.inc: specs/ffdhe.cs proves each against Appendix A's formula
+; (with Euler's number) and its hexadecimal p, p and (p - 1) / 2 prime, 2 of order (p - 1) / 2.
+; Outputs are p's size in octets, big-endian, left-padded (RFC 9846 4.2.8.1, 7.4.1). Why 5-bit
+; windows at every size: the exponents are short (a 64-entry table costs 62 products where 5-bit
+; windows over 225 to 512 bits cost 45 to 103), and 32 entries of 128 limbs fill the table's 32 KiB.
+; =============================================================================
+
+section .rodata
+%include "generated/ffdhe_groups.inc"
+
+; ffdhe_groups: a row per group in NamedGroup order: k (p's limbs), the advised minimum length of a
+; private exponent in octets, then where p, R^2 mod p and n0 are, as offsets from this table (no
+; relocation in read-only data).
+FG_K        equ 0
+FG_MIN      equ 8
+FG_P        equ 16
+FG_RR       equ 24
+FG_N0       equ 32
+FG_SIZE     equ 40
+%macro FFDHE_GROUP 1
+    dq          %1 / 64, (FFDHE%1_MIN_BITS + 7) / 8
+    dq          ffdhe%1_p - ffdhe_groups, ffdhe%1_rr - ffdhe_groups, ffdhe%1_n0 - ffdhe_groups
+%endmacro
+align 8
+ffdhe_groups:
+    FFDHE_GROUP 2048
+    FFDHE_GROUP 3072
+    FFDHE_GROUP 4096
+    FFDHE_GROUP 6144
+    FFDHE_GROUP 8192
+
+section .text
+
+; The arguments in signing's frame, by names of their own (fields only signing's encodings use).
+FD_GROUP    equ RV_HASHID                   ; the NamedGroup code
+FD_X        equ RV_DIGEST                   ; the private exponent's octets
+FD_XLEN     equ RV_SLEN                     ; their count
+FD_OUT      equ RS_OUT                      ; the output
+FD_PEER     equ RV_SIG                      ; the peer's public key
+
+; -----------------------------------------------------------------------------
+; ffdhe_group: edi = a NamedGroup code -> rax = its row of ffdhe_groups, or 0 for another value
+; (the code is public). Clobbers rax, rcx, the flags.
+; -----------------------------------------------------------------------------
+align 16
+ffdhe_group:
+    lea         ecx, [rdi - 0x0100]
+    cmp         ecx, 5                      ; (unsigned: codes below 0x0100 wrap above)
+    jae         .none
+    imul        ecx, ecx, FG_SIZE
+    lea         rax, [rel ffdhe_groups]
+    add         rax, rcx
+    ret
+.none:
+    xor         eax, eax
+    ret
+
+; -----------------------------------------------------------------------------
+; ffdhe_load: rdi = k limbs (rcx = k) <- rsi = rdx octets big-endian (rdx <= 8k): every octet taken
+; by its position alone, none looked at (a secret exponent's leading zero octets stay unseen, as
+; rsa_load_be's skipping would not keep them), zero above. Branches on rdx only (public).
+; Clobbers rax, rcx, rdx, rsi, rdi, r8, the flags.
+; -----------------------------------------------------------------------------
+align 16
+ffdhe_load:
+    mov         r8, rdi
+    xor         eax, eax
+    rep         stosq
+    mov         rdi, r8
+.limb:
+    cmp         rdx, 8
+    jb          .front
+    mov         rax, [rsi + rdx - 8]        ; the eight octets ending where the last limb began
+    bswap       rax
+    mov         [rdi], rax
+    add         rdi, 8
+    sub         rdx, 8
+    jmp         .limb
+.front:
+    test        rdx, rdx
+    jz          .done
+    xor         eax, eax
+.octet:
+    shl         rax, 8
+    mov         al, [rsi]
+    inc         rsi
+    dec         rdx
+    jnz         .octet
+    mov         [rdi], rax
+.done:
+    ret
+
+; -----------------------------------------------------------------------------
+; ffdhe_begin: the frame's FD_GROUP, FD_X, FD_XLEN -> eax = 0 with the exponentiation ready: RS_K,
+; RS_PRIME, RS_PRIME0, RS_RR, the CPU's versions (rsa_pick, rsa_pick_power), then 5-bit windows
+; over 8 FD_XLEN bits (RS_WIN, RS_ENTRIES, RS_EBITS), the exponent in RS_M (RS_EXP); or -1 for an
+; unknown group or a length outside [the group's advised minimum, p's size] (nothing set that
+; matters). Frame routine (rbp). Keeps rbx, rbp, r12-r15; clobbers the rest.
+; -----------------------------------------------------------------------------
+align 16
+ffdhe_begin:
+    push        rbx
+    mov         edi, [rbp + FD_GROUP]
+    call        ffdhe_group
+    test        rax, rax
+    jz          .refused
+    mov         rbx, rax                    ; the group's row
+    mov         rcx, [rbp + FD_XLEN]
+    cmp         rcx, [rbx + FG_MIN]
+    jb          .refused                    ; shorter than RFC 7919 Appendix A advises
+    mov         rdx, [rbx + FG_K]
+    shl         rdx, 3
+    cmp         rcx, rdx
+    ja          .refused                    ; longer than p
+    mov         rax, [rbx + FG_K]
+    mov         [rbp + RS_K], rax
+    lea         rdx, [rel ffdhe_groups]
+    mov         rax, [rbx + FG_P]
+    add         rax, rdx
+    mov         [rbp + RS_PRIME], rax
+    mov         rax, [rbx + FG_RR]
+    add         rax, rdx
+    mov         [rbp + RS_RR], rax
+    mov         rax, [rbx + FG_N0]
+    mov         rax, [rdx + rax]
+    mov         [rbp + RS_PRIME0], rax
+    call        rsa_pick
+    call        rsa_pick_power
+    mov         qword [rbp + RS_WIN], 5
+    mov         qword [rbp + RS_ENTRIES], 32
+    mov         rax, [rbp + FD_XLEN]
+    shl         rax, 3
+    mov         [rbp + RS_EBITS], rax
+    lea         rdi, [rbp + RS_M]
+    mov         rsi, [rbp + FD_X]
+    mov         rdx, [rbp + FD_XLEN]
+    mov         rcx, [rbp + RS_K]
+    call        ffdhe_load
+    lea         rax, [rbp + RS_M]
+    mov         [rbp + RS_EXP], rax
+    xor         eax, eax
+    pop         rbx
+    ret
+.refused:
+    mov         eax, -1
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; ffdhe_finish: the base (plain, below p, k limbs) in RS_TMP -> FD_OUT = base^x mod p, p's size in
+; octets, big-endian: into Montgomery form (a product with R^2 mod p), rsa_power, out of the form
+; (the reduction alone, below p), stored. Frame routine (rbp); keeps rbx, rbp, r12-r15.
+; -----------------------------------------------------------------------------
+align 16
+ffdhe_finish:
+    push        rbx                         ; (rsp 16-aligned for the callees)
+    lea         rdi, [rbp + RS_X]
+    lea         rsi, [rbp + RS_TMP]
+    mov         rdx, [rbp + RS_RR]
+    mov         rcx, [rbp + RS_PRIME]
+    mov         r8, [rbp + RS_PRIME0]
+    mov         r9, [rbp + RS_K]
+    call        [rbp + RV_MUL]
+    call        rsa_power
+    lea         rdi, [rbp + RS_TMP]
+    lea         rsi, [rbp + RS_ACC]
+    mov         rdx, [rbp + RS_PRIME]
+    mov         rcx, [rbp + RS_PRIME0]
+    mov         r8, [rbp + RS_K]
+    call        [rbp + RV_REDC]
+    mov         rdi, [rbp + FD_OUT]
+    lea         rsi, [rbp + RS_TMP]
+    mov         rdx, [rbp + RS_K]
+    shl         rdx, 3
+    call        rsa_store_be
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; size_t httpasm_ffdhe_size(int group): p's size in octets (a public key's and a shared secret's),
+; 0 for another value.
+; -----------------------------------------------------------------------------
+global httpasm_ffdhe_size:function (httpasm_ffdhe_size.end - httpasm_ffdhe_size)
+align 16
+httpasm_ffdhe_size:
+    call        ffdhe_group
+    test        rax, rax
+    jz          .done
+    mov         rax, [rax + FG_K]
+    shl         rax, 3
+.done:
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; int httpasm_ffdhe_public_key(int group, uint8_t *public_key, const uint8_t *private_key,
+;                              size_t private_length): 2^x mod p (httpasm.h).
+; -----------------------------------------------------------------------------
+global httpasm_ffdhe_public_key:function (httpasm_ffdhe_public_key.end - httpasm_ffdhe_public_key)
+align 16
+httpasm_ffdhe_public_key:
+    RS_ENTER
+    mov         [rbp + FD_GROUP], rdi
+    mov         [rbp + FD_OUT], rsi
+    mov         [rbp + FD_X], rdx
+    mov         [rbp + FD_XLEN], rcx
+    call        ffdhe_begin
+    test        eax, eax
+    jnz         .done                       ; refused: -1, nothing written
+    lea         rdi, [rbp + RS_TMP]         ; the base 2
+    mov         rcx, [rbp + RS_K]
+    xor         eax, eax
+    rep         stosq
+    mov         qword [rbp + RS_TMP], 2
+    call        ffdhe_finish
+    xor         eax, eax
+.done:
+    RS_LEAVE
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; int httpasm_ffdhe_shared(int group, uint8_t *shared, const uint8_t *private_key,
+;                          size_t private_length, const uint8_t *peer_key): Y^x mod p after
+; 1 < Y < p - 1 (httpasm.h). Y and p are public: the check may branch.
+; -----------------------------------------------------------------------------
+global httpasm_ffdhe_shared:function (httpasm_ffdhe_shared.end - httpasm_ffdhe_shared)
+align 16
+httpasm_ffdhe_shared:
+    RS_ENTER
+    mov         [rbp + FD_GROUP], rdi
+    mov         [rbp + FD_OUT], rsi
+    mov         [rbp + FD_X], rdx
+    mov         [rbp + FD_XLEN], rcx
+    mov         [rbp + FD_PEER], r8
+    call        ffdhe_begin
+    test        eax, eax
+    jnz         .done                       ; refused: -1, nothing written
+    lea         rdi, [rbp + RS_TMP]         ; Y (p's size in octets: it fits k limbs)
+    mov         rsi, [rbp + FD_PEER]
+    mov         rdx, [rbp + RS_K]
+    shl         rdx, 3
+    mov         rcx, [rbp + RS_K]
+    call        rsa_load_be
+    ; RFC 7919 5.1: 1 < Y, that is some limb above the lowest one nonzero, or the lowest above 1
+    mov         rcx, [rbp + RS_K]
+    xor         eax, eax
+    mov         edx, 1
+.high:
+    or          rax, [rbp + RS_TMP + rdx * 8]
+    inc         edx
+    cmp         rdx, rcx
+    jb          .high
+    test        rax, rax
+    jnz         .above_one
+    cmp         qword [rbp + RS_TMP], 1
+    jbe         .refused
+.above_one:
+    ; and Y < p - 1 (p is odd: p - 1 is p with its lowest bit cleared)
+    lea         rdi, [rbp + RS_PRODUCT]
+    mov         rsi, [rbp + RS_PRIME]
+    mov         rcx, [rbp + RS_K]
+    rep         movsq
+    and         qword [rbp + RS_PRODUCT], -2
+    lea         rdi, [rbp + RS_TMP]
+    lea         rsi, [rbp + RS_PRODUCT]
+    mov         rcx, [rbp + RS_K]
+    call        rsa_less
+    jnc         .refused
+    call        ffdhe_finish
+    xor         eax, eax
+    jmp         .done
 .refused:
     mov         eax, -1
 .done:
