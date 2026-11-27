@@ -191,6 +191,23 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: X25519.** `httpasm_x25519` (one shared secret a call) and a TLS 1.3 key share's
+X25519 work (`httpasm_x25519_public_key`, then `httpasm_x25519`), beside OpenSSL 3.0.13's
+EVP_PKEY X25519: the derive alone (keys and context made once), and per handshake (the private
+key from raw octets, which computes its public key; the peer's key; a context; the derive),
+9 rounds:
+
+| Case | v3 (mulx, adcx/adox) | v1 (mul, 51-bit limbs) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| shared secret | 33.8 us | 40.2 us | 40.2 us | 1.18x OpenSSL |
+| key share (public key + shared secret) | 68.3 us | 80.8 us | 87.3 us | 1.28x OpenSSL |
+
+The ladder's order of operations decided it: in RFC 7748's order both versions took 128k cycles
+a call; with independent operations side by side (the reorder buffer overlaps only what is
+adjacent), 97.5k at v3 and 111k at v1. The field's parts alone (scratchpad xx/micro.c): a
+product 48 cycles chained and 26 four at a time, a square 40 and 22, an addition 13; v1's
+product 46 and 40.
+
 **2026-11-27: ChaCha20-Poly1305.** `httpasm_chacha20_poly1305_seal` in the TLS 1.3 shape (a
 new nonce and a 5-octet AAD per record; the key is raw octets) beside OpenSSL 3.0.13's EVP
 driven the same way (the key set once, per record the nonce, the AAD, the text, the final, the

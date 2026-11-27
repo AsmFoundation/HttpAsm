@@ -134,5 +134,6 @@ fetch wycheproof/hmac_sha384_test.json "$wycheproof/hmac_sha384_test.json" 28b97
 fetch wycheproof/hkdf_sha384_test.json "$wycheproof/hkdf_sha384_test.json" 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
 fetch wycheproof/aes_gcm_test.json "$wycheproof/aes_gcm_test.json" 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
 fetch wycheproof/chacha20_poly1305_test.json "$wycheproof/chacha20_poly1305_test.json" fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
+fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
 
 echo "$tools"

@@ -195,6 +195,23 @@ static void add_chacha_seal(void)
     }
 }
 
+/* add_x25519: the tiers case of httpasm_x25519 (one shared secret a call): v1's mul on 51-bit
+ * limbs against v3's mulx and adcx/adox on 64-bit limbs (the v2 tier runs v1's code, v4 v3's). */
+static void add_x25519(void)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "x25519";
+    c.input = "shared secret";
+    c.data = bench_sha_input();
+    c.length = 64;
+    c.octets = 0;
+    c.ours = bench_x25519;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
  * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
  * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
@@ -253,6 +270,7 @@ void bench_suite_tiers(void)
     add_aes_block();
     add_gcm_seal();
     add_chacha_seal();
+    add_x25519();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

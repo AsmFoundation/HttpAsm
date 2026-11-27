@@ -48,6 +48,8 @@
     <!-- RFC 8439 itself: the ChaCha20-Poly1305 tests read its test vectors (section 2.8.2 and
          Appendix A) from the pinned file, so no octet of them is copied by hand. -->
     <None Include="../../specs/rfc/rfc8439.txt" Link="specs/rfc/rfc8439.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- RFC 7748 itself: the X25519 tests read section 5.2's and 6.1's vectors from it. -->
+    <None Include="../../specs/rfc/rfc7748.txt" Link="specs/rfc/rfc7748.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -1725,6 +1725,78 @@ static int chacha_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_x25519, httpasm_x25519_public_key: by versions (crypto/x25519.asm) -------------
+ * v1 (mul on five 51-bit limbs) against v3 (mulx with adcx/adox on four 64-bit limbs, with ADX).
+ * Every tier must give v1's shared secret, return value and public key. Scalars and points end
+ * against the guard page (an over-read faults); outputs are followed by canaries. */
+
+/* x25519_tiers: `randoms` random scalars and points (a seventh with bit 255 set, a seventh
+ * non-canonical, p to 2^255 - 1, and every so often a small-order point). Returns 0 when every
+ * tier agrees with v1, 1 at the first difference. */
+static int x25519_tiers(long randoms)
+{
+    static const uint8_t small[2][32] = { { 0 }, { 1 } };   /* u = 0 and u = 1: small order */
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        uint8_t *scalar = page_end - 64, *point = page_end - 32;
+        for (size_t k = 0; k < 32; k++) {
+            scalar[k] = (uint8_t)rng();
+            point[k] = (uint8_t)rng();
+        }
+        if (i % 7 == 1)
+            point[31] |= 0x80;
+        if (i % 7 == 2) {                                   /* p + (0..18) */
+            memset(point, 0xFF, 32);
+            point[0] = (uint8_t)(0xED + rng() % 19);
+            point[31] = 0x7F;
+        }
+        if (i % 50 == 3)
+            memcpy(point, small[i % 2], 32);
+        uint8_t expected[32], expected_public[32], out[32 + 16];
+        int expected_result = 0;
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            memset(out, 0xC3, sizeof out);
+            int result = httpasm_x25519(out, scalar, point);
+            for (size_t k = 32; k < sizeof out; k++) {
+                if (out[k] != 0xC3) {
+                    fprintf(stderr, "httpasm_x25519 at %s wrote past its 32 octets\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (t == 0) {
+                memcpy(expected, out, 32);
+                expected_result = result;
+            } else if (memcmp(out, expected, 32) != 0 || result != expected_result) {
+                fprintf(stderr, "httpasm_x25519 at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("scalar", scalar, 32);
+                dump("point", point, 32);
+                return 1;
+            }
+            int zero = 1;
+            for (size_t k = 0; k < 32; k++)
+                zero &= out[k] == 0;
+            if (result != (zero ? -1 : 0)) {
+                fprintf(stderr, "httpasm_x25519 at %s returned %d for a %s result\n", cap_names[t], result, zero ? "zero" : "nonzero");
+                return 1;
+            }
+            if (i % 8 == 0) {
+                memset(out, 0xC3, sizeof out);
+                httpasm_x25519_public_key(out, scalar);
+                if (t == 0) {
+                    memcpy(expected_public, out, 32);
+                } else if (memcmp(out, expected_public, 32) != 0) {
+                    fprintf(stderr, "httpasm_x25519_public_key at %s differs from v1\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_x25519: %ld scalar multiplications at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1988,6 +2060,8 @@ int main(int argc, char **argv)
         failed = gcm_tiers(randoms / 100);
     if (!failed)
         failed = chacha_tiers(randoms / 100);
+    if (!failed)
+        failed = x25519_tiers(randoms / 1000);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

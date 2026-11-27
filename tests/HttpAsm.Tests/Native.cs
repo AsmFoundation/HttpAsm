@@ -244,6 +244,20 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_chacha20_poly1305_open")]
     internal static partial int ChaCha20Poly1305Open(byte* key, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* tag, byte* output);
 
+    /// <summary>int httpasm_x25519(out[32], scalar[32], point[32]).</summary>
+    /// <param name="output">Receives X25519(scalar, point).</param>
+    /// <param name="scalar">The private scalar (clamped by the function).</param>
+    /// <param name="point">The peer's u-coordinate (bit 255 ignored).</param>
+    /// <returns>0, or -1 when the output is all zeros (a small-order point; zeros written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_x25519")]
+    internal static partial int X25519(byte* output, byte* scalar, byte* point);
+
+    /// <summary>void httpasm_x25519_public_key(out[32], scalar[32]).</summary>
+    /// <param name="output">Receives X25519(scalar, 9).</param>
+    /// <param name="scalar">The private scalar.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_x25519_public_key")]
+    internal static partial void X25519PublicKey(byte* output, byte* scalar);
+
     /// <summary>void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The context to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

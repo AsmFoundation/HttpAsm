@@ -727,6 +727,114 @@ static bench_rival chacha_rivals[] = {
     { openssl_name, openssl_chacha_seal },
 };
 
+/* ---- X25519: the ladder alone, and a key share's whole X25519 work. */
+
+/* bench_x25519: see bench.h. */
+void bench_x25519(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[32];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_x25519(out, c->data, c->data + 32);
+    bench_sink = out[0];
+}
+
+/* bench_x25519_share: see bench.h. */
+void bench_x25519_share(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[32], out[32];
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_x25519_public_key(public_key, c->data);
+        b->api.httpasm_x25519(out, c->data, c->data + 32);
+    }
+    bench_sink = out[0] + public_key[0];
+}
+
+typedef void *(*openssl_new_raw_fn)(int type, void *engine, const unsigned char *key, size_t length);
+typedef void *(*openssl_pkey_ctx_new_fn)(void *pkey, void *engine);
+typedef int (*openssl_pkey_ctx_fn)(void *ctx);
+typedef int (*openssl_set_peer_fn)(void *ctx, void *peer);
+typedef int (*openssl_derive_fn)(void *ctx, unsigned char *key, size_t *length);
+typedef void (*openssl_free_fn)(void *object);
+static openssl_new_raw_fn openssl_new_private, openssl_new_public;
+static openssl_pkey_ctx_new_fn openssl_pkey_ctx_new;
+static openssl_pkey_ctx_fn openssl_derive_init;
+static openssl_set_peer_fn openssl_set_peer;
+static openssl_derive_fn openssl_derive;
+static openssl_free_fn openssl_pkey_ctx_free, openssl_pkey_free;
+enum { OPENSSL_PKEY_X25519 = 1034 };        /* EVP_PKEY_X25519 (NID_X25519) */
+
+/* openssl_load_x25519: OpenSSL's EVP_PKEY functions for X25519. Returns 0, or -1 (the cases then
+ * run without this rival). */
+static int openssl_load_x25519(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL)
+        return -1;
+    openssl_new_private = (openssl_new_raw_fn)dlsym(crypto, "EVP_PKEY_new_raw_private_key");
+    openssl_new_public = (openssl_new_raw_fn)dlsym(crypto, "EVP_PKEY_new_raw_public_key");
+    openssl_pkey_ctx_new = (openssl_pkey_ctx_new_fn)dlsym(crypto, "EVP_PKEY_CTX_new");
+    openssl_derive_init = (openssl_pkey_ctx_fn)dlsym(crypto, "EVP_PKEY_derive_init");
+    openssl_set_peer = (openssl_set_peer_fn)dlsym(crypto, "EVP_PKEY_derive_set_peer");
+    openssl_derive = (openssl_derive_fn)dlsym(crypto, "EVP_PKEY_derive");
+    openssl_pkey_ctx_free = (openssl_free_fn)dlsym(crypto, "EVP_PKEY_CTX_free");
+    openssl_pkey_free = (openssl_free_fn)dlsym(crypto, "EVP_PKEY_free");
+    if (!openssl_new_private || !openssl_new_public || !openssl_pkey_ctx_new || !openssl_derive_init || !openssl_set_peer ||
+        !openssl_derive || !openssl_pkey_ctx_free || !openssl_pkey_free) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP_PKEY X25519 functions\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_x25519: OpenSSL's derive alone: the keys and the context made once, EVP_PKEY_derive
+ * `calls` times (the ladder plus EVP's per-call cost). */
+static void openssl_x25519(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *private_key = openssl_new_private(OPENSSL_PKEY_X25519, NULL, c->data, 32);
+    void *peer = openssl_new_public(OPENSSL_PKEY_X25519, NULL, c->data + 32, 32);
+    void *ctx = private_key && peer ? openssl_pkey_ctx_new(private_key, NULL) : NULL;
+    unsigned char out[32] = { 0 };
+    if (ctx != NULL && openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = 32;
+            openssl_derive(ctx, out, &length);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(private_key);
+    bench_sink = out[0];
+}
+
+/* openssl_x25519_share: a key share as a TLS stack drives OpenSSL per handshake: the private key
+ * from raw octets (which computes its public key), the peer's key, a context, the derive. */
+static void openssl_x25519_share(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[32] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *private_key = openssl_new_private(OPENSSL_PKEY_X25519, NULL, c->data, 32);
+        void *peer = openssl_new_public(OPENSSL_PKEY_X25519, NULL, c->data + 32, 32);
+        void *ctx = openssl_pkey_ctx_new(private_key, NULL);
+        size_t length = 32;
+        if (openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1)
+            openssl_derive(ctx, out, &length);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(peer);
+        openssl_pkey_free(private_key);
+    }
+    bench_sink = out[0];
+}
+
+static bench_rival x25519_rivals[] = {
+    { openssl_name, openssl_x25519 },
+};
+
+static bench_rival x25519_share_rivals[] = {
+    { openssl_name, openssl_x25519_share },
+};
+
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
                                        0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -991,6 +1099,22 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
         add("chacha20_poly1305_seal", sha_labels[i], sha, sha_lengths[i], bench_chacha_seal, chacha ? chacha_rivals : NULL,
             chacha ? sizeof chacha_rivals / sizeof chacha_rivals[0] : 0);
+    int x25519 = openssl_load_x25519() == 0;
+    for (int share = 0; share < 2; share++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = share ? "x25519_key_share" : "x25519";
+        c.input = share ? "public key + shared secret" : "shared secret";
+        c.data = sha;
+        c.length = 64;
+        c.octets = 0;
+        c.ours = share ? bench_x25519_share : bench_x25519;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = x25519 ? (share ? x25519_share_rivals : x25519_rivals) : NULL;
+        c.rival_count = x25519 ? 1 : 0;
+        bench_add(&c);
+    }
     int hmac384 = openssl_load_hmac384() == 0;
     for (size_t i = 0; i < 2; i++)
         add("hmac_sha384", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha384, hmac384 ? hmac384_rivals : NULL,

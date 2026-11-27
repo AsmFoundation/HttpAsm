@@ -978,6 +978,32 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      reordered (2.5% slower: h1 s1 last delays the carry the chain waits for) and the fold's
      times 5 as one lea (3% slower Poly1305). Kept: a short record's driver wipes only the frame
      octets its path wrote (11% faster on 64 octets at v3).
+   - **X25519** (2026-11-27), `crypto/x25519.asm` over `include/crypto/fe25519.inc` (the field,
+     for Ed25519 next): `httpasm_x25519` (the shared secret; -1, with the zeros written, when
+     the result is all zeros, a small-order point that TLS 1.3 must refuse, RFC 9846 7.4.2)
+     and `httpasm_x25519_public_key` (the scalar times u = 9). One Montgomery ladder, RFC 7748
+     5's step for step (scalar clamped, u's bit 255 masked and non-canonical u taken modulo p,
+     swaps by mask, x2 / z2 by Fermat with ref10's addition chain), expanded over two fields:
+     v3 (BMI2 and ADX) four 64-bit limbs kept below 2^256 (modulo 2^256 - 38 = 2p), sixteen
+     mulx a product in two carry chains (adcx on CF, adox on OF; OpenSSL's fe64 arrangement),
+     ten for a square; v1 five 51-bit limbs with mul, the 19-folded products summed per limb
+     (curve25519-donna's arrangement). Measured on the parts first (latency through the frame,
+     and four independent at once): a product 48 and 26 cycles, a square 40 and 22, an addition
+     13; then the ladder in RFC 7748's order of operations took 128k cycles a call in either
+     version, about 500 a step, where the parts allow about 300: only operations adjacent in
+     the code overlap (the reorder buffer holds about five of them). With the independent ones
+     side by side (the two products DA and CB with the two squares, then x2's product, E, the
+     squarings and the multiplication by 121666) a call takes 97.5k cycles at v3 and 111k at
+     v1. Proven by RFC 7748's vectors read from the pinned text (5.2's two and its iterations
+     to 1,000, 6.1's Diffie-Hellman example), Wycheproof's 518 tests (65ca494: twist points,
+     non-canonical and small-order public keys, the 31 zero results reported), the ladder in
+     BigInteger on 300 random cases, the small-order points under random scalars, and
+     `tests/native/tiers` (every tier equal to v1, inputs against the guard page). Measured
+     (benchmarks/bench.sh, 9 rounds): 33.8 us a shared secret at v3, 1.20x v1, 1.18x OpenSSL
+     3.0.13's EVP derive alone (40.2 us); a TLS 1.3 key share (the public key and the shared
+     secret) 68.3 us, 1.28x OpenSSL's per-handshake EVP sequence (87.3 us). Next lever: the
+     public key from a precomputed table of base-point multiples (edwards25519's fixed-base
+     method, with Ed25519).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

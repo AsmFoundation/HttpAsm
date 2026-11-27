@@ -472,6 +472,24 @@ int httpasm_chacha20_poly1305_open(const uint8_t key[HTTPASM_CHACHA20_KEY],
                                    const uint8_t tag[HTTPASM_POLY1305_TAG], uint8_t *out);
 
 /* ------------------------------------------------------------------------------------------
+ * X25519 (RFC 7748), TLS 1.3's first key exchange group. Versions: mulx with adcx/adox (BMI2 and
+ * ADX) on four 64-bit limbs, and mul on five 51-bit limbs; both constant time.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_X25519_KEY 32           /* octets of a scalar, a u-coordinate, a shared secret */
+
+/* out = X25519(scalar, point): the shared secret of a private scalar and a peer's public
+ * u-coordinate (its bit 255 is ignored, and values from p up are taken modulo p, as RFC 7748
+ * requires). Returns 0; or -1 when out is all zeros, which a point of small order gives: TLS 1.3
+ * must abort then (RFC 9846 7.4.2), and the zeros are written all the same. The scalar is
+ * clamped here: any 32 random octets are a valid private key. */
+int httpasm_x25519(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY],
+                   const uint8_t point[HTTPASM_X25519_KEY]);
+
+/* out = X25519(scalar, 9): the public key of a private scalar (never all zeros). */
+void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY]);
+
+/* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and
  * SHA-384, TLS 1.3's two hashes. Every buffer that held key octets is wiped before a function
  * returns, and finals wipe their context.

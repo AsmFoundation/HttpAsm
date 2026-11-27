@@ -269,6 +269,9 @@ HTTPASM_CHACHA20_NONCE          equ 12      ; octets of its nonce (RFC 8439's 96
 HTTPASM_POLY1305_KEY            equ 32      ; octets of a one-time Poly1305 key (r, then s)
 HTTPASM_POLY1305_TAG            equ 16      ; octets of a Poly1305 tag (the AEAD's tag too)
 
+; X25519 (RFC 7748; crypto/x25519.asm): scalars, u-coordinates and shared secrets are 32 octets.
+HTTPASM_X25519_KEY              equ 32
+
 ; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's
