@@ -915,6 +915,70 @@ rsa_load_be:
     ret
 
 ; -----------------------------------------------------------------------------
+; rsa_load_secret: rsa_load_be for secret numbers (a private key's p, q, dp, dq and q^-1, and
+; signing's EM, which carries the salt): rsi = an octet string of rdx octets (big-endian), rdi = k
+; limbs (rcx = k) -> the integer in limbs, zero above, every octet placed by its position alone
+; (octet i from the end into the limbs' octet i) and none looked at: rsa_load_be's skipping of
+; leading zero octets would show how many a secret number has. Octets past the limbs' 8k
+; (counted from the end: a DER INTEGER's leading zero, or a number too long for the key) are
+; ORed instead of stored: eax = 0 when they are all zero, else -1, one verdict, declassified (a
+; number that does not fit is refused, publicly). Branches on rdx and k only. Clobbers rax, rcx,
+; rdx, rsi, rdi, r8-r10, the flags.
+; -----------------------------------------------------------------------------
+align 16
+rsa_load_secret:
+    mov         r8, rdi
+    lea         r9, [rcx * 8]               ; the limbs' octets
+    xor         eax, eax
+    rep         stosq                       ; zero all k limbs
+    mov         rdi, r8
+    xor         r10d, r10d                  ; the OR of the octets past r9
+    add         rsi, rdx                    ; the string's end: octet i from it is [rsi - 1 - i]
+    xor         ecx, ecx                    ; i
+.octet:
+    cmp         rcx, rdx                    ; (rdx is public)
+    je          .done
+    dec         rsi
+    movzx       eax, byte [rsi]
+    cmp         rcx, r9                     ; (i and the limbs' size are public)
+    jae         .past
+    mov         [rdi + rcx], al
+    inc         rcx
+    jmp         .octet
+.past:
+    or          r10d, eax
+    inc         rcx
+    jmp         .octet
+.done:
+    neg         r10d                        ; CF: an octet past the limbs was not zero
+    sbb         eax, eax
+    HA_DECLASSIFY rax                       ; (public by design: the number does not fit)
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_differ: rdi, rsi = two numbers of rcx limbs (rcx at least 1) -> eax = 0 when they are equal,
+; else -1, from the OR of every limb's XOR: one verdict, the same instructions whatever the values
+; (repe cmpsq stops at the first difference, which would time where a secret value differs), and
+; declassified, for the checks whose answer is public by design: p q = n, the test signature, the
+; fault check after signing. Clobbers rax, rcx, rdx, r8, the flags.
+; -----------------------------------------------------------------------------
+align 16
+rsa_differ:
+    xor         eax, eax
+    xor         edx, edx
+.limb:
+    mov         r8, [rdi + rdx * 8]
+    xor         r8, [rsi + rdx * 8]
+    or          rax, r8
+    inc         rdx
+    cmp         rdx, rcx                    ; (rcx is public)
+    jne         .limb
+    neg         rax                         ; CF: some limb differed
+    sbb         eax, eax
+    HA_DECLASSIFY rax                       ; (public by design: a key or a signature refused)
+    ret
+
+; -----------------------------------------------------------------------------
 ; rsa_store_be: the limbs at rsi -> rdx octets big-endian at rdi (the low rdx octets of the
 ; number; the caller knows it fits): whole limbs byte-swapped into the string's end first, then
 ; the last 1 to 7 octets of the next limb at its front. Clobbers rax, rdx, rsi, the flags.
@@ -943,8 +1007,10 @@ rsa_store_be:
     ret
 
 ; -----------------------------------------------------------------------------
-; rsa_less: rdi, rsi = two numbers of rcx limbs -> CF set when the first is below the second.
-; Clobbers rax, rcx, rdx, the flags.
+; rsa_less: rdi, rsi = two numbers of rcx limbs -> CF set when the first is below the second, by
+; the borrow of their whole difference (no branch on a limb). The borrow is declassified: the
+; private key's checks (dp < p, dq < q, q^-1 < p) are verdicts on a key, public by design, and the
+; other callers' numbers are public anyway. Clobbers rax, rcx, rdx, the flags.
 ; -----------------------------------------------------------------------------
 align 16
 rsa_less:
@@ -955,6 +1021,9 @@ rsa_less:
     lea         rdx, [rdx + 1]
     dec         rcx                         ; (keeps CF)
     jnz         .limb
+    sbb         rax, rax                    ; all ones when below
+    HA_DECLASSIFY rax                       ; (public by design: see above)
+    neg         rax                         ; CF again: set when below
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1481,13 +1550,15 @@ RS_BELOW    equ 4096                        ; the callees' stack under the frame
 %endmacro
 
 ; RS_LEAVE: eax (the result) kept while every octet of the frame and RS_BELOW octets under it
-; are zeroed: the table of powers, the CRT's values, the callees' products of secrets. (Writing
-; under rsp is safe here: those octets were the callees', no one uses them now, and a signal
-; arriving meanwhile pushes its frame under rsp and is gone before the zeroing goes on.)
+; are zeroed: the table of powers, the CRT's values, the callees' products of secrets. rsp moves
+; down over those octets first, so the wipe writes nothing under rsp (the System V ABI lends only
+; the 128-octet red zone there, and memcheck refuses such writes; the callees touched those pages
+; already, so the move reaches no new one).
 %macro RS_LEAVE 0
     mov         r8d, eax
     mov         rdx, [rbp + RV_OLDSP]
-    lea         rdi, [rbp - RS_BELOW]
+    lea         rsp, [rbp - RS_BELOW]
+    mov         rdi, rsp
     mov         ecx, (RS_FRAME + RS_BELOW) / 8
     xor         eax, eax
     rep         stosq
@@ -2059,7 +2130,9 @@ rsa_pick:
 
 ; -----------------------------------------------------------------------------
 ; rsa_bits: rsi = a number of ecx limbs -> eax = its bit length (0 for 0). The loop runs over the
-; leading zero limbs: a prime's length is public (the key's size). Clobbers rax, rcx.
+; leading zero limbs: a prime's length is public (the key's size), so each limb's "is it zero" and
+; the length itself are declassified (they tell the length and nothing more: no limb below the top
+; one is looked at). Clobbers rax, rcx, the flags.
 ; -----------------------------------------------------------------------------
 align 16
 rsa_bits:
@@ -2067,11 +2140,16 @@ rsa_bits:
     dec         ecx
     js          .zero
     mov         rax, [rsi + rcx * 8]
-    test        rax, rax
+    neg         rax                         ; CF: the limb is not zero
+    sbb         eax, eax
+    HA_DECLASSIFY rax                       ; (public by design: the prime's length)
+    test        eax, eax
     jz          .top
+    mov         rax, [rsi + rcx * 8]
     bsr         rax, rax
     shl         ecx, 6
     lea         eax, [rcx + rax + 1]
+    HA_DECLASSIFY rax                       ; (public by design: the prime's length)
     ret
 .zero:
     xor         eax, eax
@@ -2495,19 +2573,20 @@ rsa_crt:
 align 16
 rsa_sign_finish:
     push        r12
-    lea         rdi, [rbp + RS_M]           ; m = OS2IP(EM), zero up to 128 limbs
-    lea         rsi, [rbp + RV_EM]
+    lea         rdi, [rbp + RS_M]           ; m = OS2IP(EM), zero up to 128 limbs (by position:
+    lea         rsi, [rbp + RV_EM]          ; EM carries PSS's salt)
     mov         rdx, [rbp + RV_EMLEN]
     mov         ecx, 128
-    call        rsa_load_be
+    call        rsa_load_secret
     call        rsa_crt
     call        rsa_public_op               ; RV_ACC = s^e mod n (public: variable time)
     mov         r12, [rbp + RV_KEY]
     mov         ecx, [r12 + RK_LIMBS]
     lea         rsi, [rbp + RV_ACC]
     lea         rdi, [rbp + RS_M]
-    repe        cmpsq
-    jne         .fault
+    call        rsa_differ
+    test        eax, eax
+    jnz         .fault
     mov         rdi, [rbp + RS_OUT]         ; I2OSP(s, k)
     lea         rsi, [rbp + RV_S]
     mov         rdx, [rbp + RV_KBYTES]
@@ -2714,14 +2793,14 @@ httpasm_rsa_private_key_init:
     mov         rsi, [r12 + httpasm_rsa_private_numbers.p]
     mov         rdx, [r12 + httpasm_rsa_private_numbers.p_length]
     mov         ecx, HTTPASM_RSA_PRIME_LIMBS
-    call        rsa_load_be
+    call        rsa_load_secret
     test        eax, eax
     jnz         .bad
     lea         rdi, [rbx + PK_Q]
     mov         rsi, [r12 + httpasm_rsa_private_numbers.q]
     mov         rdx, [r12 + httpasm_rsa_private_numbers.q_length]
     mov         ecx, HTTPASM_RSA_PRIME_LIMBS
-    call        rsa_load_be
+    call        rsa_load_secret
     test        eax, eax
     jnz         .bad
     lea         rsi, [rbx + PK_P]
@@ -2729,7 +2808,10 @@ httpasm_rsa_private_key_init:
     call        rsa_bits
     cmp         eax, 2                      ; (1 and 0 are no primes)
     jb          .bad
-    test        byte [rbx + PK_P], 1
+    movzx       ecx, byte [rbx + PK_P]
+    and         ecx, 1
+    HA_DECLASSIFY rcx                       ; (public by design: an even prime is refused)
+    test        ecx, ecx
     jz          .bad
     mov         r13d, eax                   ; p's bits
     lea         rsi, [rbx + PK_Q]
@@ -2737,7 +2819,10 @@ httpasm_rsa_private_key_init:
     call        rsa_bits
     cmp         eax, 2                      ; (1 and 0 are no primes)
     jb          .bad
-    test        byte [rbx + PK_Q], 1
+    movzx       ecx, byte [rbx + PK_Q]
+    and         ecx, 1
+    HA_DECLASSIFY rcx                       ; (public by design: an even prime is refused)
+    test        ecx, ecx
     jz          .bad
     mov         r14d, eax                   ; q's bits
     mov         eax, r13d                   ; k: the larger's limbs, rounded up to 8
@@ -2758,8 +2843,9 @@ httpasm_rsa_private_key_init:
     lea         rsi, [rbp + RS_PRODUCT]
     lea         rdi, [rbx + PK_PUBLIC + RK_N]
     lea         rcx, [r15 * 2]
-    repe        cmpsq
-    jne         .bad
+    call        rsa_differ                  ; (one verdict: no early exit on a secret product)
+    test        eax, eax
+    jnz         .bad
     lea         rcx, [r15 * 2]
 .n_above:
     cmp         ecx, HTTPASM_RSA_LIMBS
@@ -2774,7 +2860,7 @@ httpasm_rsa_private_key_init:
     mov         rsi, [r12 + httpasm_rsa_private_numbers.dp]
     mov         rdx, [r12 + httpasm_rsa_private_numbers.dp_length]
     mov         rcx, r15
-    call        rsa_load_be
+    call        rsa_load_secret
     test        eax, eax
     jnz         .bad
     lea         rdi, [rbx + PK_DP]
@@ -2786,7 +2872,7 @@ httpasm_rsa_private_key_init:
     mov         rsi, [r12 + httpasm_rsa_private_numbers.dq]
     mov         rdx, [r12 + httpasm_rsa_private_numbers.dq_length]
     mov         rcx, r15
-    call        rsa_load_be
+    call        rsa_load_secret
     test        eax, eax
     jnz         .bad
     lea         rdi, [rbx + PK_DQ]
@@ -2798,7 +2884,7 @@ httpasm_rsa_private_key_init:
     mov         rsi, [r12 + httpasm_rsa_private_numbers.qinv]
     mov         rdx, [r12 + httpasm_rsa_private_numbers.qinv_length]
     mov         rcx, r15
-    call        rsa_load_be
+    call        rsa_load_secret
     test        eax, eax
     jnz         .bad
     lea         rdi, [rbp + RS_TMP]
@@ -2857,8 +2943,9 @@ httpasm_rsa_private_key_init:
     mov         ecx, [rbx + PK_PUBLIC + RK_LIMBS]
     lea         rsi, [rbp + RV_ACC]
     lea         rdi, [rbp + RS_M]
-    repe        cmpsq
-    jne         .bad
+    call        rsa_differ
+    test        eax, eax
+    jnz         .bad
     xor         eax, eax
     jmp         .done
 .bad:

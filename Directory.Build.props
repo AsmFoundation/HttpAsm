@@ -40,6 +40,17 @@
   </PropertyGroup>
 
   <!--
+    The ConstantTime configuration (tests/ct/run.sh builds it; nothing ships it): the same
+    sources with HA_DECLASSIFY's body assembled in (httpasm_core.inc): at the few branches on a
+    value derived from a secret whose outcome is public by design, the value is marked public
+    for valgrind's memcheck, which tests/native/ct runs under with every secret input marked
+    undefined. Every other branch, address or system call that a secret reaches is reported.
+  -->
+  <PropertyGroup Condition="'$(UsingAsmFoundationSdk)' == 'true' and '$(Configuration)' == 'ConstantTime'">
+    <AsmFlags>$(AsmFlags) -DHTTPASM_CT</AsmFlags>
+  </PropertyGroup>
+
+  <!--
     The Coverage configuration (tests/coverage/run.sh builds it; nothing ships it): the same
     sources, assembled through tests/coverage/instrument.cs, which marks every block and every
     branch edge, with tests/coverage/coverage_rt.asm linked into libhttpasm.so to write the marks

@@ -46,7 +46,14 @@
 #      gate: every marker of libhttpasm.so runs under the tests or is listed, with its reason,
 #      in tests/coverage/unreachable.tsv, and no listed one runs (bar the races and the
 #      kernel-dependent ones, which may run or not); code the build could not mark fails it.
-#   5. tests/fuzz/run.sh: each fuzzer for 30 s with libFuzzer, AddressSanitizer and
+#   5. tests/ct/run.sh: constant time. The ConstantTime build (HA_DECLASSIFY's few sites of
+#      values public by design marked defined) runs every function of the C ABI that takes a
+#      secret (tests/native/ct.c, at every tier valgrind's CPU offers) under valgrind's memcheck
+#      with the secrets marked undefined: any branch, memory address or system call argument a
+#      secret reaches is reported and fails the step; a negative control (a branch on a secret)
+#      must be reported first, so a clean run means something. valgrind is installed from the
+#      runner's Ubuntu archive.
+#   6. tests/fuzz/run.sh: each fuzzer for 30 s with libFuzzer, AddressSanitizer and
 #      UndefinedBehaviorSanitizer, steered by the assembly's own branch edges. A finding fails
 #      the run and is printed in base64, so the log alone reproduces it.
 # Benchmarks do not run here: they are local only (benchmarks/bench.sh, the owner's choice of
@@ -151,6 +158,12 @@ jobs:
           fi
           { echo "### Coverage of libhttpasm.so"; echo; sed -n '/^Coverage of/,/^Not run/p' coverage.md | sed '$d'; tail -1 coverage.md; } >> "$GITHUB_STEP_SUMMARY"
           tail -1 coverage.md
+
+      - name: Constant time - every secret through valgrind's memcheck, which must report no branch, address or system call it reaches (a negative control first)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q valgrind
+          bash tests/ct/run.sh
 
       - name: Fuzzing tools - clang with libFuzzer
         # The runner image's clang may come without its sanitizer runtimes (libclang-rt-*-dev);

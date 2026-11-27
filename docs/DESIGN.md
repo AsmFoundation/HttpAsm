@@ -499,8 +499,9 @@ HTTP/2, the drivers, the client):
      - HttpAsm decodes HPACK 1.48x faster than nghttp2;
      - HttpAsm's best tier equals its v1. Acceleration must reach the whole parse, not one
        routine;
-   - **constant-time checks**, for M2: valgrind with secrets marked undefined, and statistical
-     timing tests.
+   - **constant-time checks**, for M2: valgrind with secrets marked undefined (done 2026-11-27:
+     `tests/ct/run.sh`, M2's proof below), and statistical timing tests (done 2026-11-28:
+     `tests/ct/dudect.sh`, local only, the same bullet).
 3. *Tests from every angle* for M1's rows: section 2's matrix for each proven row. Also the
    published attack corpora (request smuggling, HTTP/2 floods, HPACK bombs, slowloris on both
    versions), memory and connection exhaustion, and races between deferred answers and stops.
@@ -816,6 +817,61 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      Project Wycheproof's files at commit 65ca494 (2026-11-11) as each primitive needs them.
      `tests/run-linux.sh` names the directory in `HTTPASM_VECTORS` with
      `HTTPASM_REQUIRE_VECTORS=1`, so a vector test cannot skip there.
+   - **Constant time** (2026-11-27), `tests/ct/run.sh` (CI runs it): every function of the C ABI
+     that takes a secret runs under valgrind's memcheck with the secret marked undefined
+     (`tests/native/ct.c`: hashes, HMAC and HKDF, AES and its GCM, ChaCha20, Poly1305 and their
+     AEAD, X25519 and X448, P-256, P-384 and P-521's public keys, shared secrets and signatures,
+     n - 18 among P-521's keys, Ed25519 and Ed448, ML-KEM's three sizes with a valid and a
+     tampered ciphertext, FFDHE, RSA's prepared keys and both signatures at 1024 and 2048 bits),
+     at every tier valgrind's CPU offers (v1, v2, v3). memcheck follows undefinedness bit by bit
+     and reports a branch, a memory address or a system call argument it reaches; cmov, masks,
+     adc of masks and table scans by mask are data flow, which it lets through, so the check
+     sees exactly what constant time forbids. The library under it is the ConstantTime build
+     (`Directory.Build.props`: `-DHTTPASM_CT`), which differs from Release in two ways:
+     `HA_DECLASSIFY` (`httpasm_core.inc`) marks defined the few values computed from a secret
+     whose outcome is public by design, each at its site with its reason (a private key refused
+     as out of range, RFC 6979's redrawn candidate, r or s of 0, an AEAD tag's verdict, X25519's
+     and X448's all-zero output, ML-KEM's rho and dk's embedded ek, an RSA prime's length and its
+     key's checks); and its CPU detection takes ADX with BMI2, which valgrind's CPU executes but
+     does not report, so the curves' and RSA's mulx/adcx/adox versions run too. A negative
+     control (a branch on a secret octet) must be reported first. What memcheck cannot run is
+     named in the script: the SHA extensions and VAES (valgrind raises SIGILL; the AES-NI and
+     scalar versions run instead) and AVX-512, straight-line versions that tests/native/tiers
+     proves equal to v1. *Its first run found* (all fixed in the same commit, each a site memcheck
+     named): RSA's private numbers (p, q, dp, dq, q^-1) and signing's EM were loaded by
+     rsa_load_be, which skips leading zero octets and so looked at secret ones (now
+     `rsa_load_secret`: every octet placed by its position, the octets past the limbs ORed into
+     one verdict); p q = n, the key's test signature and signing's fault check compared with
+     `repe cmpsq`, which stops at the first differing limb of a secret value (now `rsa_differ`:
+     an OR of XORs, one verdict); and RS_LEAVE wiped the 4 KiB under the frame below rsp, which
+     the System V ABI does not lend beyond the red zone (now rsp moves down over them first). Its
+     reports also showed the expected public-by-design sites above, and no finding in the curves,
+     the Edwards and Montgomery code, ML-KEM, the AEADs or the hashes. The fixes cost nothing
+     measurable: `bench.sh ab` against the commit before them (RSA signing at 2048, 3072 and
+     4096 bits with both paddings, key preparation, verification, FFDHE2048) says "no
+     difference" at the best tier and at v1, every process within 0.991x to 1.010x. Measured:
+     under a minute with the build (the memcheck run itself about five seconds).
+     *On the hardware,* `tests/ct/dudect.sh` (local only, like the benchmarks: a shared runner's
+     timing is noise) applies dudect's method (Reparaz, Balasch and Verbauwhede, DATE 2017) to
+     what memcheck cannot run or cannot see: the best tier's SHA-extension and VAES versions (and
+     AVX-512's on a CPU that has it), and instructions whose latency follows their operands. A
+     fixed secret chosen to be special (zero keys, d = 1, P-521's n - 18, a valid ML-KEM
+     ciphertext, RSA's zero digest, FFDHE's exponent 2^255) and random ones are interleaved in a
+     random order, each call timed with rdtscp between lfences, and Welch's t compares the classes
+     over all times and below the 99th, 95th, 90th, 75th and 50th percentiles; |t| above 10
+     fails, above 4.5 warns (dudect's thresholds). A negative control must fail first: a 64-octet
+     compare that stops at its first differing octet (about 135 ticks a call) reached t = 339
+     in 20,000 calls. On the i9-13900K (WSL, pinned to one performance core; 2026-11-28, scale 4:
+     8,000 to 800,000 calls a line) all 22 lines, eleven functions at v1 and at the best tier
+     (v3 with VAES and the SHA extensions; no AVX-512 there), pass: the largest |t| is 2.49.
+     Median TSC ticks, v1 / best: AES-256-GCM sealing 1 KiB 28,786 / 612; ChaCha20-Poly1305
+     3,814 / 2,564; HMAC-SHA256 of 64 octets 3,288 / 910; X25519 115,174 / 97,348; P-256 ECDH
+     159,284 / 154,790 and signing 61,646 / 46,396; P-521 ECDH 1,300,968 / 769,164; Ed25519
+     signing 36,046 / 30,530; ML-KEM-768 decapsulation 169,518 / 32,644 (valid and implicitly
+     rejected ciphertexts alike); RSA-2048 PKCS#1 signing 3,856,596 / 1,684,814; FFDHE2048's
+     public key from a 256-bit exponent 2,040,564 / 892,196. A pass bounds an effect (none this
+     many calls could see), it does not prove there is none: memcheck's run is the proof, this
+     the hardware's witness. Scale 1 takes 23 seconds with the build.
    - **SHA-256** (2026-11-27), `crypto/sha256.asm`: the running hash and the one-shot form of
      the C ABI (`httpasm_sha256_ctx`), over `ha_sha256_blocks` in two versions: v1 the 64
      rounds unrolled with the working variables renamed by the assembler (no moves between

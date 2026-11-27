@@ -85,7 +85,17 @@ benchmarks/run.sh                                  # HttpAsm, nginx and h2o, sid
 benchmarks/bench.sh --quick                        # routines per CPU tier, parsers, rivals (single thread)
 tests/coverage/run.sh                              # every block and branch edge the tests run, and the gate
 tests/fuzz/run.sh 60                               # each fuzzer for 60 s (clang with libFuzzer, Linux or WSL)
+tests/ct/run.sh                                    # constant time: every secret through valgrind's memcheck
+tests/ct/dudect.sh                                 # constant time on the hardware: dudect's timing test (local)
 ```
+
+`tests/ct/` checks that no secret steers the code. `run.sh` builds the ConstantTime
+configuration and runs every function of the C ABI that takes a secret under valgrind's memcheck
+with the secret marked undefined, at every tier valgrind's CPU offers: a branch, a memory address
+or a system call argument that a secret reaches fails it, and a negative control must be caught
+first. `dudect.sh` times the Release library on this CPU, every tier it has included: a fixed
+special secret against random ones, compared by Welch's t-test. It runs locally, like the
+benchmarks, because timing on a shared CI runner is noise.
 
 `tests/fuzz/` holds the coverage-guided fuzzers. Assembly has no compiler instrumentation, so the
 coverage instrument's markers go into libFuzzer's extra counters, and the fuzzer steers by the

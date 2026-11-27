@@ -384,6 +384,7 @@ align 32
     neg         rax
     sbb         r9d, r9d                    ; -1 unless zero
     not         r9d
+    HA_DECLASSIFY r9                        ; (public by design: the peer's point had small order)
     xor         eax, eax
     mov         ecx, XF_RSP / 8
     mov         rdi, rbp

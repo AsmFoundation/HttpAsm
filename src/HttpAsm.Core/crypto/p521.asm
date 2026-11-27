@@ -1101,6 +1101,7 @@ p521_check_scalar:
     call        p521_set_k2
     mov         eax, ecx
     not         eax
+    HA_DECLASSIFY rax                       ; (public by design: a key or a candidate refused)
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1774,6 +1775,7 @@ p521_sign_%1:
     P521_COPY   rbp + PF_R, S_PX, 9
     F9_NREDUCE  rbp + PF_R                  ; r = x mod n
     P521_IS_ZERO rax, rbp + PF_R
+    HA_DECLASSIFY rax                       ; (public by design: r = 0 draws again)
     test        rax, rax
     jnz         .retry
     P521_COPY   rbp + PF_KINV, rbp + PF_K, 9
@@ -1788,6 +1790,7 @@ p521_sign_%1:
     F9_NMUL     rbp + PF_S, rbp + PF_S, rbp + PF_KINV
     F9_NMUL     rbp + PF_S, rbp + PF_S, rel p521_n_r2      ; s
     P521_IS_ZERO rax, rbp + PF_S
+    HA_DECLASSIFY rax                       ; (public by design: s = 0 draws again)
     test        rax, rax
     jnz         .retry
     mov         rdi, [rbp + PF_OUT]

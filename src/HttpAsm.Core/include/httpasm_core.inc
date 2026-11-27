@@ -127,4 +127,88 @@ extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", 
     sub         rsp, (%1) % 4032
 %endmacro
 
+; -----------------------------------------------------------------------------
+; HA_DECLASSIFY reg: marks reg's value public from here on, for the constant-time check
+; (tests/native/ct.c under valgrind's memcheck, which tracks the secret inputs it was told about
+; as "undefined" and reports every branch, address or system call that depends on them). Only
+; the ConstantTime configuration (Directory.Build.props: -DHTTPASM_CT; nothing ships it) gets a
+; body; every other build assembles nothing here, so shipped code is unchanged.
+; Use it where code branches on a value derived from a secret ON PURPOSE because the outcome is
+; public by design, and say why at the site: a private key refused as out of range, a nonce
+; candidate redrawn (RFC 6979's rejection), an AEAD tag's verdict, X25519's all-zero output. A
+; branch on a secret that is not public by design is a bug, and declassifying it would hide it.
+; The body: memcheck's client request MAKE_MEM_DEFINED (valgrind.h's amd64 sequence: rax = the
+; request's six qwords, rdx = the default answer, then four rotations of rdi that cancel out and
+; xchg rbx, rbx, which valgrind intercepts; on hardware the whole is a no-op) over a stack copy of
+; the value, which is then loaded back. reg is any 64-bit register; every other register is kept
+; (rax, rdx, rdi saved around the request; reg restored last, so it may be one of them). Clobbers
+; the flags (the rotations).
+; -----------------------------------------------------------------------------
+%macro HA_DECLASSIFY 1
+%ifdef HTTPASM_CT
+    sub         rsp, 80                     ; [0, 48) the request, [48] the value, [56..72] saved
+    mov         [rsp + 48], %1
+    mov         [rsp + 56], rdi
+    mov         [rsp + 64], rdx
+    mov         [rsp + 72], rax
+    mov         qword [rsp], 0x4D430002     ; VG_USERREQ__MAKE_MEM_DEFINED (memcheck.h: 'M' 'C' + 2)
+    lea         rax, [rsp + 48]
+    mov         [rsp + 8], rax              ; the address
+    mov         qword [rsp + 16], 8         ; the length
+    xor         eax, eax
+    mov         [rsp + 24], rax
+    mov         [rsp + 32], rax
+    mov         [rsp + 40], rax
+    mov         rax, rsp
+    xor         edx, edx
+    rol         rdi, 3
+    rol         rdi, 13
+    rol         rdi, 61
+    rol         rdi, 51
+    xchg        rbx, rbx
+    mov         rdi, [rsp + 56]
+    mov         rdx, [rsp + 64]
+    mov         rax, [rsp + 72]
+    mov         %1, [rsp + 48]              ; last: reg may be rax, rdx or rdi
+    add         rsp, 80
+%endif
+%endmacro
+
+; -----------------------------------------------------------------------------
+; HA_DECLASSIFY_MEM address, octets: HA_DECLASSIFY for memory: the octets at address (an
+; effective address, which lea takes: "rbp + X", "rdi + 32") are public from here on, in the
+; ConstantTime configuration only (elsewhere nothing). For values public by design that are
+; computed from a secret, such as ML-KEM's matrix seed rho, which comes out of G(d) with the
+; secret sigma and is then published in the encapsulation key. octets is an immediate. address may
+; be rsp-based: it is taken before rsp moves (rax parked in the red zone meanwhile, which signal
+; frames skip). Keeps every register; clobbers the flags.
+; -----------------------------------------------------------------------------
+%macro HA_DECLASSIFY_MEM 2
+%ifdef HTTPASM_CT
+    mov         [rsp - 8], rax
+    lea         rax, [%1]
+    sub         rsp, 80                     ; [0, 48) the request, [48], [56] saved, [72] rax
+    mov         [rsp + 48], rdi
+    mov         [rsp + 56], rdx
+    mov         [rsp + 8], rax              ; the address
+    mov         qword [rsp], 0x4D430002     ; VG_USERREQ__MAKE_MEM_DEFINED
+    mov         qword [rsp + 16], %2        ; the length
+    xor         eax, eax
+    mov         [rsp + 24], rax
+    mov         [rsp + 32], rax
+    mov         [rsp + 40], rax
+    mov         rax, rsp
+    xor         edx, edx
+    rol         rdi, 3
+    rol         rdi, 13
+    rol         rdi, 61
+    rol         rdi, 51
+    xchg        rbx, rbx
+    mov         rdi, [rsp + 48]
+    mov         rdx, [rsp + 56]
+    mov         rax, [rsp + 72]
+    add         rsp, 80
+%endif
+%endmacro
+
 %endif

@@ -1257,6 +1257,7 @@ ha_x448_base_%1:
     neg         rax                         ; -1 when u is 0, else 0
     sbb         rax, rax
     not         rax
+    HA_DECLASSIFY rax                       ; (public by design: the key is all zeros, 4q's)
     mov         [rbp + EF_RES], rax
     ED_FINISH   %1
 .end:

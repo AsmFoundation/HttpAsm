@@ -1481,10 +1481,14 @@ httpasm_chacha20_poly1305_open:
     movdqu      xmm1, [rsp + CO_TAG]
     pcmpeqb     xmm0, xmm1
     pmovmskb    eax, xmm0
+    xor         eax, 0xFFFF                 ; 0 when all sixteen octets matched
+    neg         eax                         ; CF: some octet differed
+    sbb         eax, eax                    ; the verdict: all ones on a mismatch
+    HA_DECLASSIFY rax                       ; (public by design; which octets matched is not)
     pxor        xmm1, xmm1
     movdqu      [rsp + CO_TAG], xmm1        ; the computed tag wiped either way
-    cmp         eax, 0xFFFF
-    je          .match
+    test        eax, eax
+    jz          .match
     ; A mismatch: no unauthenticated plaintext may stay. (The comparison above took the same
     ; instructions whichever octets differed; this branch only says that some did.)
     mov         rdi, [rsp + CR_OUT]

@@ -970,6 +970,7 @@ p384_load_scalar:
     call        p384_set_k2
     mov         eax, ecx
     not         eax
+    HA_DECLASSIFY rax                       ; (public by design: a key or a candidate refused)
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1563,6 +1564,7 @@ p384_sign_%2:
     P384_COPY   rbp + PF_R, S_PX, 6
     P384_NREDUCE rbp + PF_R                 ; r = x mod n
     P384_IS_ZERO rax, rbp + PF_R
+    HA_DECLASSIFY rax                       ; (public by design: r = 0 draws again)
     test        rax, rax
     jnz         .retry
     P384_COPY   rbp + PF_KINV, rbp + PF_K, 6
@@ -1577,6 +1579,7 @@ p384_sign_%2:
     F6_NMUL     rbp + PF_S, rbp + PF_S, rbp + PF_KINV
     F6_NMUL     rbp + PF_S, rbp + PF_S, rel p384_n_r2      ; s
     P384_IS_ZERO rax, rbp + PF_S
+    HA_DECLASSIFY rax                       ; (public by design: s = 0 draws again)
     test        rax, rax
     jnz         .retry
     mov         rdi, [rbp + PF_OUT]

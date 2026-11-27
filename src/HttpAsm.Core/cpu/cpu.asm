@@ -171,6 +171,15 @@ ha_cpu_detect:
     jz      .no_adx
     or      esi, HTTPASM_CPU_ADX
 .no_adx:
+%ifdef HTTPASM_CT
+    ; The ConstantTime configuration runs under valgrind only (tests/native/ct refuses anything
+    ; else), whose CPU executes adcx and adox but does not report ADX: taken with BMI2 there, so
+    ; memcheck runs the curves' and RSA's mulx/adcx/adox versions too. Never in a shipped build.
+    test    r10d, L7B_BMI2
+    jz      .no_ct_adx
+    or      esi, HTTPASM_CPU_ADX
+.no_ct_adx:
+%endif
 
     ; v2.
     HA_ALL_SET r9d, V2_L1C, eax

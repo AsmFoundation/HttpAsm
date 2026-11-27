@@ -581,6 +581,7 @@ p256_load_scalar:
     call        p256_set_k2
     mov         eax, ecx
     not         eax
+    HA_DECLASSIFY rax                       ; (public by design: a key or a candidate refused)
     ret
 
 ; -----------------------------------------------------------------------------
@@ -1161,6 +1162,7 @@ p256_sign_%2:
     P256_COPY   rbp + PF_R, S_PX, 4
     FN_REDUCE   rbp + PF_R                  ; r = x mod n
     P256_IS_ZERO rax, rbp + PF_R
+    HA_DECLASSIFY rax                       ; (public by design: r = 0 draws again)
     test        rax, rax
     jnz         .retry
     P256_COPY   rbp + PF_KINV, rbp + PF_K, 4
@@ -1175,6 +1177,7 @@ p256_sign_%2:
     FN_MUL      rbp + PF_S, rbp + PF_S, rbp + PF_KINV
     FN_MUL      rbp + PF_S, rbp + PF_S, rel p256_n_r2      ; s
     P256_IS_ZERO rax, rbp + PF_S
+    HA_DECLASSIFY rax                       ; (public by design: s = 0 draws again)
     test        rax, rax
     jnz         .retry
     mov         rdi, [rbp + PF_OUT]

@@ -2993,6 +2993,7 @@ align 16
     mov         esi, 33
     lea         rdx, [rbp + MF_G]
     call        httpasm_sha3_512
+    HA_DECLASSIFY_MEM rbp + MF_G, 32        ; (rho is public by design: ek carries it; sigma not)
     ; s (vector 1) and e (vector 2), transformed
   %assign mi 0
   %rep MS_K
@@ -3151,6 +3152,7 @@ align 16
     mov         [rbp + MF_OUT], rdi         ; key
     mov         [rbp + MF_ARG1], rsi        ; dk
     mov         [rbp + MF_ARG2], rdx        ; c
+    HA_DECLASSIFY_MEM rsi + 384 * MS_K, MS_EK + 32 ; (dk's ek and H(ek): public by definition)
     ; the hash check (public data: dk's ek and the hash beside it)
     lea         rdi, [rsi + 384 * MS_K]
     mov         esi, MS_EK
@@ -3451,6 +3453,7 @@ align 16
     mov         esi, 33
     lea         rdx, [rbp + MF_G]
     call        httpasm_sha3_512
+    HA_DECLASSIFY_MEM rbp + MF_G, 32        ; (rho is public by design: ek carries it; sigma not)
     lea         rdi, [rbp + M3_P]           ; s (vector 1), e (vector 2)
     lea         rsi, [rbp + MF_G + 32]
     mov         ecx, 2 * M3_K
@@ -3605,6 +3608,7 @@ align 16
     mov         [rbp + MF_OUT], rdi         ; key
     mov         [rbp + MF_ARG1], rsi        ; dk
     mov         [rbp + MF_ARG2], rdx        ; c
+    HA_DECLASSIFY_MEM rsi + 384 * M3_K, M3_EK + 32 ; (dk's ek and H(ek): public by definition)
     add         rsi, 768 * M3_K             ; rho, in dk's ek
     MK3_POOL_QUEUE rsi
     xor         edi, edi                    ; lane 0: H(dk's ek), SHA3-256
