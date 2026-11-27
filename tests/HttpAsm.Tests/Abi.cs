@@ -323,6 +323,108 @@ internal unsafe struct RsaPublicKey
 }
 
 /// <summary>
+/// httpasm_rsa_private_key (httpasm_abi.inc; opaque in httpasm.h), 6720 octets: a private key
+/// ready to sign, its public key first. The tests read its fields and plant faults in them (a bit
+/// flipped in a CRT exponent after the init); a caller only passes it. All zeros after a refused
+/// init. Both primes run on <see cref="Limbs"/> limbs, R = 2^(64 Limbs).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RsaPrivateKey
+{
+    /// <summary>The public key (verifications may run under it).</summary>
+    public RsaPublicKey Public;
+
+    /// <summary>The prime p, 64 little-endian limbs.</summary>
+    public fixed ulong P[64];
+
+    /// <summary>The prime q.</summary>
+    public fixed ulong Q[64];
+
+    /// <summary>d mod (p - 1).</summary>
+    public fixed ulong Dp[64];
+
+    /// <summary>d mod (q - 1).</summary>
+    public fixed ulong Dq[64];
+
+    /// <summary>R^2 mod p.</summary>
+    public fixed ulong RrP[64];
+
+    /// <summary>R^2 mod q.</summary>
+    public fixed ulong RrQ[64];
+
+    /// <summary>R^3 mod p.</summary>
+    public fixed ulong RrrP[64];
+
+    /// <summary>R^3 mod q.</summary>
+    public fixed ulong RrrQ[64];
+
+    /// <summary>q^-1 R mod p.</summary>
+    public fixed ulong QinvR[64];
+
+    /// <summary>-p^-1 mod 2^64.</summary>
+    public ulong P0;
+
+    /// <summary>-q^-1 mod 2^64.</summary>
+    public ulong Q0;
+
+    /// <summary>The primes' limbs: the larger's rounded up to 8.</summary>
+    public uint Limbs;
+
+    /// <summary>Unused.</summary>
+    public fixed uint Reserved[3];
+}
+
+/// <summary>
+/// httpasm_rsa_private_numbers (httpasm.h), 112 octets: an RSAPrivateKey's numbers for
+/// httpasm_rsa_private_key_init, each a big-endian octet string and its length.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RsaPrivateNumbers
+{
+    /// <summary>The modulus.</summary>
+    public byte* N;
+
+    /// <summary>Its length.</summary>
+    public nuint NLength;
+
+    /// <summary>The public exponent.</summary>
+    public byte* E;
+
+    /// <summary>Its length.</summary>
+    public nuint ELength;
+
+    /// <summary>The prime p.</summary>
+    public byte* P;
+
+    /// <summary>Its length.</summary>
+    public nuint PLength;
+
+    /// <summary>The prime q.</summary>
+    public byte* Q;
+
+    /// <summary>Its length.</summary>
+    public nuint QLength;
+
+    /// <summary>d mod (p - 1).</summary>
+    public byte* Dp;
+
+    /// <summary>Its length.</summary>
+    public nuint DpLength;
+
+    /// <summary>d mod (q - 1).</summary>
+    public byte* Dq;
+
+    /// <summary>Its length.</summary>
+    public nuint DqLength;
+
+    /// <summary>q^-1 mod p.</summary>
+    public byte* Qinv;
+
+    /// <summary>Its length.</summary>
+    public nuint QinvLength;
+}
+
+/// <summary>
 /// httpasm_hmac_sha384_ctx (httpasm.h): a running HMAC-SHA384, 416 octets: SHA-384's inner and
 /// outer hashes past their key blocks. Copying it after init MACs again under the same key.
 /// </summary>

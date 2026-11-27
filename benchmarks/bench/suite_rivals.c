@@ -1220,6 +1220,231 @@ void bench_rsa_init(const bench_build *b, const bench_case *c, long calls)
     bench_sink = (uint8_t)(sum + (int)key.opaque[0]);
 }
 
+/* ---- RSA signing -----------------------------------------------------------------------------
+ * The keys: Project Wycheproof's rsa_pkcs1_{2048,3072,4096}_sig_gen_test.json, at each size the
+ * first SHA-256 group with e = 65537 (its PKCS#8 key's numbers: n, e, d, p, q, dp, dq, q^-1; the
+ * 2048-bit n is the verification vector's) and the digest of its first valid test's message,
+ * whose PKCS#1 v1.5 signature the vector holds (checked when the hex was made). Hex, decoded on
+ * first use. */
+static const struct {
+    const char *n, *e, *d, *p, *q, *dp, *dq, *qinv, *digest;
+} rsa_private_hex[] = {
+    {   /* 2048 bits: tcId 81, the 0-octet message's digest */
+        "a2b451a07d0aa5f96e455671513550514a8a5b462ebef717094fa1fee82224e637f9746d3f7cafd31878d80325b6ef5a"
+        "1700f65903b469429e89d6eac8845097b5ab393189db92512ed8a7711a1253facd20f79c15e8247f3d3e42e46e48c98e"
+        "254a2fe9765313a03eff8f17e1a029397a1fa26a8dce26f490ed81299615d9814c22da610428e09c7d9658594266f5c0"
+        "21d0fceca08d945a12be82de4d1ece6b4c03145b5d3495d4ed5411eb878daf05fd7afc3e09ada0f1126422f590975a19"
+        "69816f48698bcbba1b4d9cae79d460d8f9f85e7975005d9bc22c4e5ac0f7c1a45d12569a62807d3b9a02e5a530e77306"
+        "6f453d1f5b4c2e9cf7820283f742b9d5",
+        "010001",
+        "7627eef3567b2a27268e52053ecd31c3a7172ccb9ddcee819b306a5b3c66b7573ca4fa88efc6f3c4a00bfa0ae7139f64"
+        "543a4dac3d05823f6ff477cfcec84fe2ac7a68b17204b390232e110310c4e899c4e7c10967db4acde042dbbf19dbe00b"
+        "4b4741de1020aaaaffb5054c797c9f136f7d93ac3fc8caff6654242d7821ebee517bf537f44366a0fdd45ae05b9909c2"
+        "e6cc1ed9281eff4399f76c96b96233ec29ae0bbf0d752b234fc197389f51050aa1acd01c074c3ac8fbdb9ea8b651a959"
+        "95e8db4ad5c43b6c8673e5a126e7ee94b8dff4c5afc01259bc8da76950bae6f8bae715f50985b0d6f66d04c6fef3b700"
+        "720eecdcdf171bb7b1ecbe7289c467c1",
+        "dc431050f782e894fb5248247d98cb7d58b8d1e24f3b55d041c56e4de086b0d5bb028bda42eeb5d234d5681e5809d415"
+        "e6a289ad4cfbf78f978f6c35814f50eebff1c5b80a69f788e81e6bab5ddaa78369d659d143ec6f17e79813a575cfad9c"
+        "569156b90113e2e9110ad9e7b48a1c9348a6e653321191290ea36cfb3a5b18f1",
+        "bd1a81e7977f9898122273ae3222b598ea5fb19eb4eabc38308a5e32196603b2e500ffb79f5b886816611debc472fac4"
+        "5544070beb057c941378a6868af3b7a03d3f9880ec47d5e089b94fbde542aba9ae8d72c57088d7abf5b131f39098f7bc"
+        "160f90536abc9492fd4e06f3ed7299d4b97bb03677207d95669f140cfbc20f25",
+        "a94b528b28f291599121d91952ffd1c7f21d7c1479d99d478885fb161870ee1218bf08472612dbe5497e8d9c650688e0"
+        "9c786961ae3e2c354dc48ae34514759c4c23c4588488961dc06b414e61c0e1e7fbbd2923d31532fe289f96da220711e5"
+        "8c14019808e00414276933bb07e4efb9b4a9b37656917205209f33f09515d7c1",
+        "3af0e72a933aef09ff2503df78bafed531c02ff1a2bc437c540cdcbd4ad35435cf511763596543480629b114ca7f780f"
+        "f7efa32ea0cb6e000d6d9ea1f2ef71fd9cf9948422a165557e37e755edfe70d90b920502eb478bc98a63f788ce3a0f85"
+        "6d6ede7251a383bfa8fa480a81a925af7b3cc538c4bab8c9f7597ffb68011d8d",
+        "2640fbfbcfefb163ee7a87b6483a66ee41f956d90fa8a7939bfc042ee0924b1b7993d0445f758d51933e85179c0320b0"
+        "c968b48a91c38b5be923e1097c0c562f88d42294b6a2759bafa5428a74f1270874e45f6fcc60f21602de5eccd143cf31"
+        "241f5921b5ad3983fb54ef17be3b285367e50c999c67247b552fe4bfce945f7b",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+    {   /* 3072 bits: tcId 105, the 0-octet message's digest */
+        "c6fe23792566023c265287c5ac6f71541c0994d11d059ee6403986efa21c24b51bd91d8862f9df79a4e328e3e27c83df"
+        "260b25a9b43420affc44b51e8d7525b6f29c372a405104732007527a62ed82fac73f4892a80e09682a41a58cd347017f"
+        "3be7d801334f92d9321aafd53b51bffabfc752cfccae0b1ee03bdaff9e428cc1c117f1ac96b4fe23f8c23e6381186a66"
+        "fd59289339ae55c4bcdadbff84abdaa532240d4e1d28b2d0481dadd3b246557ca8fe18092817730b39e6ee378ffcc85b"
+        "19ffdc916a9b991a6b66d4a9c7bab5f5e7a3722101142e7a4108c15d573b15289e07e46eaea07b42c2abcba330e99554"
+        "b4656165bb4c0db2b6393a07eca575c51a93c4e15bdb0f747909447e3efe34c67ca8954b530e56a20a1b6d84d45ed1bc"
+        "d3aa58ec06f184ee5857aaa819e1cca9a26f4e28d6b977d33916db9896d252d1afa762e287cb0d384cc75bfe53f4e922"
+        "d02dd0a481c042e2d306b4b3c189371e575b25e0005a164cf69dd0976e4d5be476806ea6be6084e71ab4f5ac5c1b1203",
+        "010001",
+        "72ac6bb6d9a5726e454b5430c71125c6e9ad5fd42e1c5a18a8343e9d83d72214386b2308c0b8ec5ec6759dcfcd6a21f8"
+        "8b8ceaf46403923eb86ac3d14a8592e95de0462e14085c3f17db005dc4fac87b4a2d1ede5cf851d5745c8651a4438c0a"
+        "4d746ad72e419207964728c301bf379a01c094e9693376f721137d3dc76ee47c9790fbd590b7d6a8d626e21b277ef17a"
+        "4e4f7e0171c1146e1ec324fa97f30d3a1bae08f8d5f6e92cfc121665239c429167359e9650434b29d2015190356adfee"
+        "12f25b341b08f12b7fec6379598af7d5cc24fe7f00de1d47133ce3ad8b6be1c9a854e33fb952e164ac6dd2a9052186ee"
+        "144ee7dd986a8f03891d0da21ed78516dcdc2ac89cdddc8b544731d66f9d89bf17a50c6d987a598b02c938dc36521b88"
+        "1ea994e4c8fb2ba8fd001f73335d4dd1bdbe177d3093cf3883657c9ff944e8f5c9cde548b7c1b0741929b0d74977ecda"
+        "694d940aefd9d2fc75323e0b3a114b99feaf3e2518f5158d1fd9d953aa20af158e67d27e2ce2f18d97fd02f369981979",
+        "f5eca16e0e83696b0ed9ac8a812545daba55f20a964c4e6343604a7f2be2860fce9fa16a1cc92120939deb88dff68550"
+        "383ead851fac07ad1b2e8a9b2bb69525d96ceabb7ee83ce50f08d649107f449a14521a6893f3f3c5c5a703b2fc28bfcf"
+        "e261a4f7f450558080deaeaab651c7a9ae586c1e7f5c52cda93e40aac908e4e3357984fc116af9cbe9539bc7a8d3b351"
+        "a73ea5c2413d1da2e0b448b454670aca89ffe73b1401e9b8554fc3f23d6c904623251a1d29962ca9b26d973345bc4c5f",
+        "cf25446f59cf512919ddbfcfa2d9670495ad92b6f295d61032057f9da6dbefc4510a623c2b47a5220082a3bc42af1a14"
+        "4f98c9ee4fdae41be0ec501ccc94b2b0640191099b355611160deb327e8ace018b898025ef470e4373ec1d97f669e298"
+        "e1d845c6553c0a546ccb168d5b510dbe6018fd4ed9a3545f9bdb81968f4a6d7c790e5c34729a8efb496086fa1300249a"
+        "b8b28f38951d7bee1c127ac3c4d0bd596edee1e9d17781dbb8227d7b5d76ce8b8bce03c5d339b9757981610848c55cdd",
+        "6357a59679d26801514c6940c20eb67b370e84e9f5f0f9316c0437d3cb7c843f5a6e6d9c19e8bdb3152e93f904cfe6e6"
+        "92f1eed27a0ada46f95601b3d122be793dad9bdd05d4f6d469105ecfc11448381dc154ddadf6bc20c649435b483585d6"
+        "8a527b7b967be52e35e0be9a437021c1cfa5f4771567cc233c1ce3ae99eb37daf8bd10156b4bd580a3ce9c7d391bdbb2"
+        "3e67363a947405c6c812cbd3dccc8b356a2dafd0d3b23a21b684b458e4ab3854bcd9be04cdc9d65ceeb10a8531c470ed",
+        "0004dadabfc15b1a8bdc0f566f876191088a7986f6c2b8c04ba0e0801d31cbf5d2a4139a39cec9df14ecee22e846a7d3"
+        "f4a5e8eed2a70c7a4c2cf95ce74fe42c4bf60c135a264919bb4cc906ba283d1896f0ae48529b490f0c85ab03068cbfee"
+        "8fa6bb6ae73b182d25cd66f5205b038b4eeaf1aafe2e1ba5de97c88d40fa1ac47626602fc90ae694734f44f3e4e88d18"
+        "4e8805a755ac2904be8fe9def6b7a62cc9ebcf4d7c2d6c9f9e86b2483e9bf22ce51861bbb4e73e731a4dbeba87772d29",
+        "214a1f73130e48b336fe01b950885ecdb3443d93e7e8ca62fb0da96bd423759d8be552c8be44f139fbee6ec24b75fbf0"
+        "744fac4daabf5488fe6c3600d9b8e9a922481fc74a7a3d622662db8c85318de48ee8b716f19429fb594990da705ebdf7"
+        "ef6613dd6bf885c16ad65e9fe6c280386bee976c25dbaff8fbf69baed9510be5eded3f90e0ba4a97e5c81a2189f11467"
+        "0745ab95edda215bd05fdc78929fa0cfe8b01c83f2aec93e3ad1a334fd85aa8794eacf955ae5dacd45b268741fca195c",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+    {   /* 4096 bits: tcId 129, the 0-octet message's digest */
+        "956353ecb7561945dc5544e4602466078c93f28507701ffd39e2a9813c8ac8740e6ad61c955d484e513b3dcea527e001"
+        "a018ee2c207c1806a96763280236cd3c820dff79837c9b709cb4b522d3ddbc9192242259c43be75ea244d37ccfa8a4c7"
+        "5024a2cf7cc76e842ea69cc7ca1227405b070047387a5068e4976e4b8ed5f9aadd7b4db024fbb8d7bd8a040d8f6610c1"
+        "c6eb1d4b606dfd182235d0360880304d5a750603af0c424b8c8e6dbc12c3697d2d609c97547e774e2e362ea96d1690dc"
+        "9432112c535258b3db2c4c32ad510d6c07ad0788357883869efb8b629298724847925cf42b34386be700f02903db5852"
+        "276bee2370941f397bdc3905e30964a0b5e73602703340960c3ed6078263b611f197955fecce4b9a32e43cd1d2e5e87c"
+        "4ceb65edc8853a7ee31d28e16e5adffb8ac7b760fbfc63d5f174f4d0936461dbb12c964a6b6d6cee752e5fca1ab4a9fd"
+        "238dd3e8860a1d763d2019f9e7b99ed7666d4e038710f90e0093bc566987d6c0092f571376e705b342d066c54e6e2578"
+        "927b92c1f0928de44e9a6e1f49b907c6aa4f605ec9c398d55df81c67373b03cc8110162fb417f96fd321048647dfcbb3"
+        "92455115cd912ea83351853e6a185284648842adcbd25e67174a3b93b8a64ce2ce9de0e8577b8b662ce32e2565782665"
+        "dd38e5bb5fcc4fe12e4320dab7773b545a09c6d39d9dbad459f21f3e624ee6ed",
+        "010001",
+        "097a59d2c4f70377793937bbbd95d19b5d01edfb1eb3b073e27e4cfed416820d4af4e04cc3f53d272ae43551ad0cd09b"
+        "89cacb21a595f9f8423b3b0148d2ad46cf818fd9e7cbba18f4f84a1dc18f69ed5a764c6fa191a3664fa94a39bafb1a29"
+        "431e6fedf61eb9164dd7684f0cb506248121fa948a32c8733f3d9453dae61c8708b2500582f32d91128775265f18bcab"
+        "6eb170145e33dc40f1bab451194cf8c38f9fa91806bd225fa4b54ca50813b9d7a54f61e0000e5e0769cb2a3eb99b1ae9"
+        "c3c5416dac83a6f91248c734d7e63291ce12de4d780703614128f878f29015801c7a5ec7670e531e1573ebc8ce63d640"
+        "b01b9aea48b43d1eea8ad85b55423d4e142bcf73315f3e9e978b65f0556246066596013fad97b83ba552140c6957ef44"
+        "3ccec4051b2a8c9cd9f25c4cf6bdc2e904f46063e319643283462a4047d49c38bdbb0ee3d87980ec08410d5d2dee8e53"
+        "49958e4178aba065a55d79d89080570fd4af5678b1573e42f2e0f863b31bb4e19ba232c02ae5b8f948d1ce8145c4968d"
+        "24b56ac930b4f67047257f3c0b86bce7a77b8d0d87124c4a4141409ac11377fb9fc805d60012386becc2ba8478e663be"
+        "cc3d73239ce3036c2d2fc9e6e2e370c2c78053ee1bcef7a87872ef92b784638b84713a5d78ba8c3a868e3466f2275b25"
+        "2e19766d2104ec60537bc1589b1558b76643751f6a60fd8a5102b6c788e0f049",
+        "c3c677495c2bd56619e44e26140d2ede0037409b81f3a5b3886a0904eb486140f43b8626af13d14a33918eb72b786b3c"
+        "9114f39017871528953c09104e1fd2d36b725388f54ffea30373077895a6934ab174e55ca6a12c21923a7b775b5ffaff"
+        "bd813f9fb752805b016a5735b883c639fedd55ba2e233a6dc1673063d8487390d1676123544d3def177a91caeef98b13"
+        "f38860474e44993d4c6060926d878a2059855d0de1c794ac8dbdad655fbbad20f152f15c73b95ac544cbb87b8bec8fd3"
+        "c007ad09d76ae22a5e993302aa72f11deb265a7f28b88976af5d0c912d97b7284b1783c5bc91a6dcb7a9b97fe5371396"
+        "5857742b7e4032dc5141acd4afd4771f",
+        "c357cf685f9b8d4e59e96686f7b8752f0a982efbe6658e6bcdb615d921f5e7056882825347455782d7bc78d637e17e0e"
+        "6810c2136ad81b16cc1c81750785924616f2bdf5964b26c7fc50fa98fb67b746b50812705b379f5deadbd11dcd2fec7b"
+        "724d042aef25cea2eb37f85b7554d7ad49fe5f47737ff436bded418507f2f175c695e324fbb11beb0544a7a7cb3f0792"
+        "4e291b5c8ddaa6a7dbb07e23bce1960cb52b9000d3a7aab1f58e3c750b6d978adf3d085ae7693b7e6a46cf6dbb6d2ad9"
+        "81f4bca5d15e0962c39066a9fc27985b9ba1f51132355792796a5dd847400804f98671ee4899050bdc2e7872ce6fb2b7"
+        "8b1050436d882425ee0745546a6a1c73",
+        "a6bbb5460638d2b2f5242aa6657760cdf3731b1415d5f2ee77248f6fe00e31bdc70396da054ba47844791809c9fcf19f"
+        "90943e671e928e23950d9f4e82aab9bc138b37b7b1ed2219a54b67367c8574762db237d0f39cda5ff110dbac286712f6"
+        "9167ad4f122b3263cf4dc8de58b9e9ade4f08e1d5543ed74223e06c9521f4a45310291892c37e8a262e5a19b2a71decf"
+        "ec1dde997c00125e5158d7867dbfec9466899d59c04b60c4a0a6c5314c1a2375a5f194dbbf37422635d426d719b12c41"
+        "140fb5806735814ec268493861002977e8982e8493a2ae78251be32315a85b75f6961d44dfb7505c34135987a2288907"
+        "074fdc015ab1c45f3cd8e91fee6bcdd3",
+        "178cd58f72bf5118da141e6d351e42da69ff90e2839348c94c62a05dae0f744b9d9ee6515ded4930980bbbd1afa8fac6"
+        "87db455a8bee03ce0acb80fbf7ed2d864fabf224d27abaf12f45200123860c7d74c3c55d5051f35fa239e00b24ba9b5b"
+        "029bb05df0b8f12189141558095c32284d1c62a63d917682c700fc7e2a482abe1533eacf819c878e1cf37af6eab4ed97"
+        "c0de89d2edb327966310f31421e85c6ba9c7d7b391d0cbee6a793c66abfb09630fa8cf020e960c3b205aeb15029c95a6"
+        "e558f90950a572a23a8b852507264ae2f86f5d1936a161ae61fee5d3763b8cfbf48d35dd1159895735b350881ec52e99"
+        "9c255a57d6b3ac0ffa935bd36284ea6b",
+        "484ad86e79415ea3c78af5f6c807cc99decfb14ca1e80c8e6a1ef00ee582d3d180774236a54ec9dc8dbcca51f4da4379"
+        "cf634f3a07cea4b7748d7b5d94cacd4d474111f92d19f3ab5eb4def8dba57b990844efd28d85344666e283f5d5fb0e6e"
+        "8d96f07411c882bf280446e49b3b9b15218fc24da34ce8f01e02735920ef48a343b4de11f99b26547a251afa7aaa6908"
+        "3c421e2447b1a989d50712bf8fc35882b63517c7c39843cf67b92645b68c6d8f90331600142e6cb97032a5af6ef7c20f"
+        "87630c6b25dddeb57f2cc0cd8c8a0661b5f40ed6632989f5d40f33bbfd9be09374483606c2cd7ed8b5fcb8bf3df1f936"
+        "8a13922b1240c0d25792505b857d3e8d",
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+};
+
+static bench_rsa_private_vector rsa_private_vectors[3];
+
+/* bench_rsa_private_input: see bench.h. */
+const bench_rsa_private_vector *bench_rsa_private_input(size_t which)
+{
+    if (which >= sizeof rsa_private_vectors / sizeof rsa_private_vectors[0])
+        return NULL;
+    bench_rsa_private_vector *v = &rsa_private_vectors[which];
+    if (v->octets == 0) {
+        v->octets = rsa_hex_decode(rsa_private_hex[which].n, v->n, sizeof v->n);
+        v->half = rsa_hex_decode(rsa_private_hex[which].p, v->p, sizeof v->p);
+        /* every number at its own size: e three octets, d n's, the CRT numbers the primes' */
+        if (v->octets == 0 || v->half == 0 || rsa_hex_decode(rsa_private_hex[which].e, v->e, sizeof v->e) != sizeof v->e
+            || rsa_hex_decode(rsa_private_hex[which].d, v->d, sizeof v->d) != v->octets
+            || rsa_hex_decode(rsa_private_hex[which].q, v->q, sizeof v->q) != v->half
+            || rsa_hex_decode(rsa_private_hex[which].dp, v->dp, sizeof v->dp) != v->half
+            || rsa_hex_decode(rsa_private_hex[which].dq, v->dq, sizeof v->dq) != v->half
+            || rsa_hex_decode(rsa_private_hex[which].qinv, v->qinv, sizeof v->qinv) != v->half
+            || rsa_hex_decode(rsa_private_hex[which].digest, v->digest, sizeof v->digest) != 32) {
+            fprintf(stderr, "bench: the RSA signing key %zu does not decode\n", which);
+            exit(2);
+        }
+    }
+    return v;
+}
+
+/* rsa_private_numbers: the vector's numbers as httpasm_rsa_private_key_init takes them (pointers
+ * into the vector, which outlives every call). */
+static httpasm_rsa_private_numbers rsa_private_numbers(const bench_rsa_private_vector *v)
+{
+    httpasm_rsa_private_numbers numbers = {
+        v->n, v->octets, v->e, sizeof v->e, v->p, v->half, v->q, v->half, v->dp, v->half, v->dq, v->half, v->qinv, v->half,
+    };
+    return numbers;
+}
+
+/* rsa_private_key: the vector's key prepared by build b into key; a key the build refuses ends
+ * the process (a case that signed with a zeroed key would time a refusal). */
+static void rsa_private_key(const bench_build *b, const bench_rsa_private_vector *v, httpasm_rsa_private_key *key)
+{
+    httpasm_rsa_private_numbers numbers = rsa_private_numbers(v);
+    if (b->api.httpasm_rsa_private_key_init(key, &numbers) != 0) {
+        fprintf(stderr, "bench: build %s refuses the %zu-bit RSA signing key\n", b->name, v->octets * 8);
+        exit(2);
+    }
+}
+
+/* bench_rsa_sign_pkcs1: see bench.h. */
+void bench_rsa_sign_pkcs1(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_private_vector *v = (const bench_rsa_private_vector *)c->data;
+    static httpasm_rsa_private_key key;     /* (6.7 KB: static, off the stack the signing uses) */
+    uint8_t signature[512];
+    rsa_private_key(b, v, &key);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_rsa_sign_pkcs1(&key, HTTPASM_HASH_SHA256, v->digest, signature, v->octets);
+    bench_sink = (uint8_t)(sum + signature[0]);
+}
+
+/* bench_rsa_sign_pss: see bench.h. */
+void bench_rsa_sign_pss(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_private_vector *v = (const bench_rsa_private_vector *)c->data;
+    static httpasm_rsa_private_key key;
+    uint8_t signature[512], salt[32];
+    rsa_private_key(b, v, &key);
+    int sum = 0;
+    for (long i = 0; i < calls; i++) {
+        sum += b->api.httpasm_random(salt, sizeof salt);
+        sum += b->api.httpasm_rsa_sign_pss(&key, HTTPASM_HASH_SHA256, v->digest, salt, sizeof salt, signature, v->octets);
+    }
+    bench_sink = (uint8_t)(sum + signature[0]);
+}
+
+/* bench_rsa_private_init: see bench.h. */
+void bench_rsa_private_init(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_private_vector *v = (const bench_rsa_private_vector *)c->data;
+    static httpasm_rsa_private_key key;
+    httpasm_rsa_private_numbers numbers = rsa_private_numbers(v);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_rsa_private_key_init(&key, &numbers);
+    bench_sink = (uint8_t)(sum + (int)key.opaque[0]);
+}
+
 typedef void *(*openssl_bld_new_fn)(void);
 typedef int (*openssl_bld_push_bn_fn)(void *bld, const char *key, const void *bn);
 typedef void *(*openssl_bld_to_param_fn)(void *bld);
@@ -1329,6 +1554,113 @@ static void openssl_rsa_fresh(const bench_build *b, const bench_case *c, long ca
 
 static bench_rival rsa_verify_rivals[] = { { openssl_name, openssl_rsa_verify } };
 static bench_rival rsa_init_verify_rivals[] = { { openssl_name, openssl_rsa_fresh } };
+
+typedef int (*openssl_set_int_fn)(void *ctx, int value);
+static openssl_set_int_fn openssl_set_rsa_padding, openssl_set_rsa_pss_saltlen;
+static void *rsa_private_params[3];
+
+enum {
+    OPENSSL_KEYPAIR = 0x87,                 /* EVP_PKEY_KEYPAIR: all parameters + both keys */
+    OPENSSL_PKCS1_PSS_PADDING = 6,          /* RSA_PKCS1_PSS_PADDING */
+};
+
+/* openssl_load_rsa_sign: OpenSSL's functions for RSA signing (the padding and the PSS salt's
+ * length; the rest come with openssl_load_rsa, which must have succeeded first) and each signing
+ * key's parameters (n, e, d and the CRT's five numbers, OpenSSL's names), made once. Returns 0, or
+ * -1 (the signing cases then run without this rival). */
+static int openssl_load_rsa_sign(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL)
+        return -1;
+    openssl_set_rsa_padding = (openssl_set_int_fn)dlsym(crypto, "EVP_PKEY_CTX_set_rsa_padding");
+    openssl_set_rsa_pss_saltlen = (openssl_set_int_fn)dlsym(crypto, "EVP_PKEY_CTX_set_rsa_pss_saltlen");
+    if (!openssl_set_rsa_padding || !openssl_set_rsa_pss_saltlen) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the RSA padding functions\n");
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof rsa_private_params / sizeof rsa_private_params[0]; i++) {
+        const bench_rsa_private_vector *v = bench_rsa_private_input(i);
+        const struct {
+            const char *name;
+            const uint8_t *octets;
+            size_t length;
+        } numbers[] = {
+            { "n", v->n, v->octets },           { "e", v->e, sizeof v->e },           { "d", v->d, v->octets },
+            { "rsa-factor1", v->p, v->half },   { "rsa-factor2", v->q, v->half },     { "rsa-exponent1", v->dp, v->half },
+            { "rsa-exponent2", v->dq, v->half }, { "rsa-coefficient1", v->qinv, v->half },
+        };
+        void *bld = openssl_bld_new();
+        if (bld == NULL)
+            return -1;
+        for (size_t k = 0; k < sizeof numbers / sizeof numbers[0]; k++) {
+            void *bn = openssl_bin2bn(numbers[k].octets, (int)numbers[k].length, NULL);
+            if (bn == NULL || openssl_bld_push_bn(bld, numbers[k].name, bn) != 1) {
+                fprintf(stderr, "bench: rivals: OpenSSL refused an RSA signing key's %s\n", numbers[k].name);
+                return -1;
+            }
+        }
+        if ((rsa_private_params[i] = openssl_bld_to_param(bld)) == NULL) {
+            fprintf(stderr, "bench: rivals: OpenSSL refused an RSA signing key's parameters\n");
+            return -1;
+        }
+        /* (the builder and the numbers stay, as openssl_load_rsa's: a few KB, once per process) */
+    }
+    return 0;
+}
+
+/* openssl_rsa_private_key: an EVP_PKEY of a signing vector's numbers through EVP_PKEY_fromdata
+ * (as a server gets its key from a PKCS#8 file), or NULL. */
+static void *openssl_rsa_private_key(const bench_case *c)
+{
+    size_t which = (size_t)((const bench_rsa_private_vector *)c->data - rsa_private_vectors);
+    void *key = NULL;
+    if (openssl_fromdata_init(rsa_fromdata_ctx) != 1 || openssl_fromdata(rsa_fromdata_ctx, &key, OPENSSL_KEYPAIR, rsa_private_params[which]) != 1)
+        return NULL;
+    return key;
+}
+
+/* openssl_rsa_signing: EVP_PKEY_sign of the vector's digest with SHA-256, `calls` times, the key
+ * and the context made once (OpenSSL computes the key's Montgomery constants and its blinding on
+ * the first signature, then keeps them); pss selects RSASSA-PSS with a 32-octet salt (drawn from
+ * OpenSSL's DRBG each call; MGF1 takes the signature's digest), else PKCS#1 v1.5 (RSA's default).
+ * Like ours, OpenSSL checks every CRT result under e against faults (rsa_ossl_mod_exp); unlike
+ * ours, it blinds the base, where ours runs in constant time without. */
+static void openssl_rsa_signing(const bench_case *c, long calls, int pss)
+{
+    const bench_rsa_private_vector *v = (const bench_rsa_private_vector *)c->data;
+    void *key = openssl_rsa_private_key(c);
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    uint8_t signature[512] = { 0 };
+    int sum = 0;
+    if (ctx != NULL && openssl_sign_init(ctx) == 1 && openssl_set_signature_md(ctx, openssl_rsa_md) == 1
+        && (!pss || (openssl_set_rsa_padding(ctx, OPENSSL_PKCS1_PSS_PADDING) == 1 && openssl_set_rsa_pss_saltlen(ctx, 32) == 1))) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            sum += openssl_sign(ctx, signature, &length, v->digest, 32);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)(sum + signature[0]);
+}
+
+/* openssl_rsa_sign: OpenSSL's PKCS#1 v1.5 signature (openssl_rsa_signing). */
+static void openssl_rsa_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    openssl_rsa_signing(c, calls, 0);
+}
+
+/* openssl_rsa_sign_pss: OpenSSL's PSS signature (openssl_rsa_signing). */
+static void openssl_rsa_sign_pss(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    openssl_rsa_signing(c, calls, 1);
+}
+
+static bench_rival rsa_sign_rivals[] = { { openssl_name, openssl_rsa_sign } };
+static bench_rival rsa_sign_pss_rivals[] = { { openssl_name, openssl_rsa_sign_pss } };
 
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -1662,6 +1994,38 @@ void bench_suite_rivals(void)
             c.ours = rsa_cases[i].ours;
             c.tiers = BENCH_TIERS_BEST_V1;
             c.rivals = rsa && rsa_cases[i].rivals ? rsa_cases[i].rivals : NULL;
+            c.rival_count = c.rivals ? 1 : 0;
+            bench_add(&c);
+        }
+    }
+    int rsa_sign = rsa && openssl_load_rsa_sign() == 0;
+    static const char *const rsa_pss_labels[] = { "2048-bit, PSS SHA-256, 32-octet salt", "3072-bit, PSS SHA-256, 32-octet salt",
+                                                  "4096-bit, PSS SHA-256, 32-octet salt" };
+    static const char *const rsa_key_labels[] = { "2048-bit key (CRT numbers)", "3072-bit key (CRT numbers)",
+                                                  "4096-bit key (CRT numbers)" };
+    static const struct {
+        const char *name;
+        bench_batch ours;
+        const bench_rival *rivals;
+        const char *const *labels;
+    } rsa_sign_cases[] = {
+        { "rsa_sign", bench_rsa_sign_pkcs1, rsa_sign_rivals, rsa_labels },
+        { "rsa_sign_pss", bench_rsa_sign_pss, rsa_sign_pss_rivals, rsa_pss_labels },
+        { "rsa_private_key_init", bench_rsa_private_init, NULL, rsa_key_labels },
+    };
+    for (size_t i = 0; i < sizeof rsa_sign_cases / sizeof rsa_sign_cases[0]; i++) {
+        for (size_t size = 0; size < 3; size++) {
+            bench_case c;                   /* by hand: one operation a call, no octets to rate */
+            memset(&c, 0, sizeof c);
+            c.suite = "rivals";
+            c.name = rsa_sign_cases[i].name;
+            c.input = rsa_sign_cases[i].labels[size];
+            c.data = (const uint8_t *)bench_rsa_private_input(size);
+            c.length = sizeof(bench_rsa_private_vector);
+            c.octets = 0;
+            c.ours = rsa_sign_cases[i].ours;
+            c.tiers = BENCH_TIERS_BEST_V1;
+            c.rivals = rsa_sign && rsa_sign_cases[i].rivals ? rsa_sign_cases[i].rivals : NULL;
             c.rival_count = c.rivals ? 1 : 0;
             bench_add(&c);
         }

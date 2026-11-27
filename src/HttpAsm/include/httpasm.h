@@ -252,7 +252,8 @@ uint32_t httpasm_abi_version(void);
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
- * 16 httpasm_rsa_public_key; 0 for any other value. */
+ * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers; 0 for
+ * any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -578,6 +579,52 @@ int httpasm_rsa_verify_pkcs1(const httpasm_rsa_public_key *key, int hash, const 
  * 9.1.2's checks. */
 int httpasm_rsa_verify_pss(const httpasm_rsa_public_key *key, int hash, const uint8_t *digest,
                            size_t salt_length, const uint8_t *signature, size_t signature_length);
+
+/* An RSAPrivateKey's numbers (RFC 8017 A.1.2) for httpasm_rsa_private_key_init: big-endian octet
+ * strings with their lengths (leading zero octets allowed). d itself is not needed. */
+typedef struct httpasm_rsa_private_numbers {
+    const uint8_t *n;    size_t n_length;
+    const uint8_t *e;    size_t e_length;
+    const uint8_t *p;    size_t p_length;
+    const uint8_t *q;    size_t q_length;
+    const uint8_t *dp;   size_t dp_length;      /* d mod (p - 1) */
+    const uint8_t *dq;   size_t dq_length;      /* d mod (q - 1) */
+    const uint8_t *qinv; size_t qinv_length;    /* q^-1 mod p */
+} httpasm_rsa_private_numbers;
+
+/* A private key ready to sign (6720 octets): its public key first (verify under
+ * (const httpasm_rsa_public_key *)&key), then the primes, the CRT exponents and the Montgomery
+ * constants. Its octets ARE the secret: copy it only where it may live, zero it when done. */
+typedef struct httpasm_rsa_private_key {
+    uint64_t opaque[840];
+} httpasm_rsa_private_key;
+
+/* Prepares key from an RSAPrivateKey's numbers. Returns 0; or -1 (key then all zeros) when the
+ * public part is refused as httpasm_rsa_public_key_init refuses it, a prime is even, 1, or over
+ * 4096 bits, p q is not n, dp is not below p, dq not below q, qinv not below p, or a test signature
+ * made with the key does not verify under e (inconsistent numbers). The primes' sizes need not
+ * match. Constant time in the secrets; about one signature's worth (the test signature is most
+ * of it: 0.60 ms at 2048 bits), so prepare a key once and keep it. */
+int httpasm_rsa_private_key_init(httpasm_rsa_private_key *key, const httpasm_rsa_private_numbers *numbers);
+
+/* RSASSA-PKCS1-v1_5 signature (RFC 8017 8.2.1) of a digest of the hash named (HTTPASM_HASH_*),
+ * signature_length octets: the modulus' length. CRT with constant-time exponentiation (fixed
+ * 6-bit windows over the primes' whole width, every table entry read), checked against faults
+ * by verifying it under e before it is returned. It needs about 48 KiB of stack (the window
+ * table of 64 entries at 4096 bits each, whatever the key's size), all of it zeroed before it
+ * returns, as httpasm_rsa_private_key_init does: a thread that signs must have that room. Returns
+ * 0; or -1 (signature zeroed when its length was right) for an unknown hash, a wrong length, a
+ * refused key, or a result that failed the check. */
+int httpasm_rsa_sign_pkcs1(const httpasm_rsa_private_key *key, int hash, const uint8_t *digest,
+                           uint8_t *signature, size_t signature_length);
+
+/* RSASSA-PSS signature (RFC 8017 8.1.1, MGF1 with the same hash) of a SHA-256, SHA-384 or
+ * SHA-512 digest with the caller's salt (TLS 1.3: random octets of the digest's length, from
+ * httpasm_random; salt may be NULL when salt_length is 0). The same as httpasm_rsa_sign_pkcs1
+ * otherwise; also -1 when the salt does not fit (RFC 8017 9.1.1 step 3). */
+int httpasm_rsa_sign_pss(const httpasm_rsa_private_key *key, int hash, const uint8_t *digest,
+                         const uint8_t *salt, size_t salt_length, uint8_t *signature,
+                         size_t signature_length);
 
 /* ------------------------------------------------------------------------------------------
  * Randomness: the kernel's generator (getrandom(2), the urandom source), for TLS randoms,

@@ -308,6 +308,55 @@ struc httpasm_rsa_public_key
     .reserved:          resq 1
 endstruc
 
+HTTPASM_RSA_PRIME_LIMBS         equ 64      ; 64-bit limbs of the largest prime (4096 bits)
+
+; -----------------------------------------------------------------------------
+; httpasm_rsa_private_numbers: an RSAPrivateKey's numbers (RFC 8017 A.1.2) for
+; httpasm_rsa_private_key_init, each a big-endian octet string (leading zero octets allowed, as
+; DER's INTEGERs carry them) and its length; 112 octets. d itself is not needed: the CRT
+; exponents and the coefficient are.
+; -----------------------------------------------------------------------------
+struc httpasm_rsa_private_numbers
+    .n:                 resq 1
+    .n_length:          resq 1
+    .e:                 resq 1
+    .e_length:          resq 1
+    .p:                 resq 1
+    .p_length:          resq 1
+    .q:                 resq 1
+    .q_length:          resq 1
+    .dp:                resq 1      ; d mod (p - 1)
+    .dp_length:         resq 1
+    .dq:                resq 1      ; d mod (q - 1)
+    .dq_length:         resq 1
+    .qinv:              resq 1      ; q^-1 mod p
+    .qinv_length:       resq 1
+endstruc
+
+; -----------------------------------------------------------------------------
+; httpasm_rsa_private_key: a private key ready to sign (crypto/rsa.asm), 6720 octets; opaque in
+; httpasm.h (struct size id 17). It begins with its public key (a caller may verify under
+; (const httpasm_rsa_public_key *)&key). Both primes run on the same limbs (the larger's, rounded
+; up to 8), R = 2^(64 limbs) for both. Its octets are secrets: the caller zeroes them when done.
+; A refused key is all zeros and every signature under it fails.
+; -----------------------------------------------------------------------------
+struc httpasm_rsa_private_key
+    .public:            resb httpasm_rsa_public_key_size
+    .p:                 resq HTTPASM_RSA_PRIME_LIMBS
+    .q:                 resq HTTPASM_RSA_PRIME_LIMBS
+    .dp:                resq HTTPASM_RSA_PRIME_LIMBS
+    .dq:                resq HTTPASM_RSA_PRIME_LIMBS
+    .rr_p:              resq HTTPASM_RSA_PRIME_LIMBS    ; R^2 mod p
+    .rr_q:              resq HTTPASM_RSA_PRIME_LIMBS    ; R^2 mod q
+    .rrr_p:             resq HTTPASM_RSA_PRIME_LIMBS    ; R^3 mod p
+    .rrr_q:             resq HTTPASM_RSA_PRIME_LIMBS    ; R^3 mod q
+    .qinv_r:            resq HTTPASM_RSA_PRIME_LIMBS    ; q^-1 R mod p (Montgomery form)
+    .p0:                resq 1      ; -p^-1 mod 2^64
+    .q0:                resq 1      ; -q^-1 mod 2^64
+    .limbs:             resd 1      ; the primes' limbs: a multiple of 8, 8..64
+    .reserved:          resd 3
+endstruc
+
 ; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's

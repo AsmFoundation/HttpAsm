@@ -92,6 +92,9 @@ extern httpasm_p256_verify          ; int (public_key[65], digest, length, signa
 extern httpasm_rsa_public_key_init  ; int (httpasm_rsa_public_key *key, n, n_length, e, e_length): 0, -1 refused
 extern httpasm_rsa_verify_pkcs1     ; int (key, hash, digest, signature, signature_length): 0 valid, -1 not
 extern httpasm_rsa_verify_pss       ; int (key, hash, digest, salt_length, signature, signature_length): 0 valid, -1 not
+extern httpasm_rsa_private_key_init ; int (httpasm_rsa_private_key *key, const httpasm_rsa_private_numbers *numbers): 0, -1 refused
+extern httpasm_rsa_sign_pkcs1       ; int (key, hash, digest, signature, signature_length): 0, -1 (signature zeroed)
+extern httpasm_rsa_sign_pss         ; int (key, hash, digest, salt, salt_length, signature, signature_length): 0, -1
 extern httpasm_random               ; int (void *buffer, size_t length): 0, or -errno (getrandom refused)
 extern httpasm_hmac_sha384_init     ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha384_update   ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *data, size_t n)

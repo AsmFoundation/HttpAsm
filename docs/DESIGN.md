@@ -1134,8 +1134,64 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      verification with the key kept 1.24x at 2048 bits (15.8 us), 1.27x at 3072, 1.25x at
      4096; with the key made from n and e each time (a TLS certificate's case: its key
      verifies one signature) 1.85x (17.7 us against 33.0), 1.52x and 1.39x; v3 2.38x v1. Next:
-     signing (private keys, CRT, a constant-time windowed exponentiation, PSS and PKCS#1 v1.5
-     encoding), then on CPUs with AVX-512 IFMA 52-bit limbs.
+     signing (below), then on CPUs with AVX-512 IFMA 52-bit limbs.
+   - **RSA signing** (2026-11-27), `crypto/rsa.asm`: `httpasm_rsa_private_key_init` (an
+     RSAPrivateKey's numbers: n, e, p, q, dp, dq, q^-1; no d), `httpasm_rsa_sign_pkcs1` (every
+     hash verification takes) and `httpasm_rsa_sign_pss` (SHA-256, -384, -512 with the caller's
+     salt: TLS 1.3's CertificateVerify under an RSA certificate). *The key*
+     (`httpasm_rsa_private_key`, 6720 octets, struct size 17): the public key first (the same
+     octets: it verifies as one), then p, q, dp, dq, each prime's R^2 and R^3, q^-1 R mod p, the
+     n0s and k, the larger prime's limbs rounded up to 8 (both primes run on it: their sizes need
+     not match, as Wycheproof's e = 3 keys with primes of 681 and 343 bits show). The init
+     refuses (zeros) a public part the verification refuses, a prime even, 1 or over 4096 bits,
+     p q other than n, dp, dq or q^-1 not below its prime, and any key whose test signature (of
+     2) does not verify under e; R^2 mod each prime in constant time (2^(bits - 1) doubled by
+     masks to 2^c R, then squared: no division, which would branch on the secret prime).
+     *Signing:* the encoding (RFC 8017 9.2's 00 01 FF.. 00 DigestInfo digest; 9.1.1's maskedDB,
+     H and bc, the salt given), then CRT: per prime m R^-1 as the reduction of m's low k limbs
+     plus its high k limbs (m < p q < p R keeps the high half below the prime), times R^3 into
+     Montgomery form; the exponentiation by fixed 6-bit windows over the exponent's whole width
+     64k (the window positions depend on k alone), the 64-entry table built whatever the
+     exponent, every window's entry read by a constant-time gather (all 64 entries ANDed with a
+     compare mask: v3 AVX2 sixteen limbs a pass, v1 SSE2 eight); at k = 16 (RSA-2048's primes)
+     v3 runs the power on a square and a product of its own, straight lines instead of a call per
+     row and a loop per 8-limb group, with "almost Montgomery" results (below R, not below p: n
+     subtracted once when t's top limb is set, so one masked pass ends each operation), which
+     the reduction out of Montgomery form takes below p; Garner's recombination (s_q mod p, the
+     difference mod p by masks, times q^-1 R, then h q + s_q, below n) runs on the generic
+     product, whose results are below p. The result is verified under e before it
+     leaves (s^e mod n = m, else -1 and zeros: one faulty half would hand out a prime, Boneh,
+     DeMillo and Lipton's attack), and the stack the routine used, about 48 KiB with 4096 below
+     its frame for the callees, is zeroed on return. Constant time in the key and the message
+     (the hash's and the salt's lengths are public), with no blinding. *Proven by* FIPS 186-3's
+     SigGen15 (80) and SigGenPSS (60 signed under the file's salts, the 20 with SHA-224
+     refused) octet for octet, each key's primes recovered from n, e and d (SP 800-56B C.2: the
+     files give no primes); Wycheproof's rsa_pkcs1_*_sig_gen files at 1024 to 4096 bits (158
+     signatures exact, the unbalanced e = 3 keys among them); .NET's RSA on six key sizes (1024,
+     1032, 2048, 2056, 3072, 4096: PKCS#1 v1.5 equal to .NET's, PSS verified by .NET and equal to
+     the model's encoding signed with d); keys from chosen primes at 1025 and 2049 bits (24 limbs:
+     a limb past 1024 bits) with e = 3 and 65537, every hash and salts of 0, 1, hLen and the
+     largest that fits; twenty inconsistent keys refused, each of the init's checks in turn;
+     calls outside the rules; one bit flipped in dp, dq, q^-1 R or R^3 after the init caught by
+     the fault check; and `tests/native/tiers` (a 1024-bit key, 200 rounds, and a 2048-bit one,
+     50, which takes v3's k = 16 path: each key equal at every tier with each of its seven
+     numbers against the guard page, both signatures equal at every tier, verified, the octets
+     after them untouched). *Measured* against OpenSSL 3.0.13's EVP (the key kept, the context
+     made once; OpenSSL blinds and checks each result under e): PKCS#1 v1.5 at 2048 bits 618 us
+     against OpenSSL's 701 (1.13x), at 3072 2.10 ms and 4096 4.77 ms (parity); PSS 613 against
+     697 us at 2048 bits (1.12x, a salt drawn with httpasm_random each call), parity above; v3
+     2.30x v1; the init 0.60 ms at 2048 bits (its test signature is most of it). The first
+     version (the generic square and product in the power) took 743 us, 0.92x OpenSSL: at k = 16
+     the calls per row and per group were a fifth of a square (705 cycles, now 573) and a tenth
+     of a product (795, now 709), which now sit at the floor of about 1.4 cycles a
+     multiply-accumulate; at 3072 and 4096 bits the rows are long enough that the generic ones
+     sit there too, as OpenSSL's bn_power5 (mulx and adcx/adox, 5-bit windows) does. Measured and
+     not kept: the k = 16 product in CIOS order (731 cycles against 709), two table entries a
+     gather step. Next lever: 5-bit windows at k = 16 (a 32-entry table: half the gather, half
+     the table's operations, a fifth more products; about 2% by the measured operations).
+     Weighed and not taken: the fault check per prime at k = 16 instead of under n at k = 32
+     (about 17,500 cycles, 1%, for a second check path in place of the public key's, which
+     would also need s < n checked apart).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

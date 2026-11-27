@@ -1,9 +1,11 @@
 ; =============================================================================
-; crypto/rsa.asm - RSA signature verification (RFC 8017), as TLS 1.3 needs it for certificate
-; chains (sha256WithRSAEncryption and its kin: RSASSA-PKCS1-v1_5) and for CertificateVerify
-; (rsa_pss_rsae_sha256/384/512: RSASSA-PSS with MGF1): the C ABI's
+; crypto/rsa.asm - RSA signatures (RFC 8017), as TLS 1.3 needs them for certificate chains
+; (sha256WithRSAEncryption and its kin: RSASSA-PKCS1-v1_5) and for CertificateVerify
+; (rsa_pss_rsae_sha256/384/512: RSASSA-PSS with MGF1). Verification: the C ABI's
 ; httpasm_rsa_public_key_init, httpasm_rsa_verify_pkcs1 and httpasm_rsa_verify_pss, for moduli
-; of 1024 to 8192 bits and public exponents up to 2^64 - 1.
+; of 1024 to 8192 bits and public exponents up to 2^64 - 1. Signing (its own section below, in
+; constant time): httpasm_rsa_private_key_init, httpasm_rsa_sign_pkcs1 and httpasm_rsa_sign_pss,
+; by CRT with primes of up to 4096 bits.
 ;
 ; The arithmetic. Numbers are little-endian 64-bit limbs; a key's operations run on k limbs, its
 ; modulus' limbs rounded up to a multiple of 8 (the v3 loops take eight limbs a step; the zero
@@ -1390,5 +1392,1529 @@ httpasm_rsa_verify_pss:
     mov         eax, -1
 .done:
     RV_LEAVE
+    ret
+.end:
+
+; =============================================================================
+; RSA signing (RFC 8017 8.1.1 RSASSA-PSS, 8.2.1 RSASSA-PKCS1-v1_5): httpasm_rsa_private_key_init,
+; httpasm_rsa_sign_pkcs1 and httpasm_rsa_sign_pss. The secrets (the primes, the CRT exponents,
+; m mod p and mod q, the powers) meet only constant-time code: the Montgomery operations above,
+; the modular addition and subtraction below (masks, no branch on a value), the table of powers
+; read by gather (every entry read, the one wanted kept by mask), the exponent's windows at
+; positions fixed by the primes' width (not by the exponent's length). Public values (the digest,
+; the encoding, the signature, e and n) take the verification's variable-time paths. A signature's
+; s^e mod n is compared with m before it is returned: a fault in one CRT half would otherwise
+; hand out a prime (Boneh, DeMillo and Lipton). Then every octet of the frame, and of the
+; callees' stack under it, is zeroed.
+; =============================================================================
+
+; The private key's layout (httpasm_abi.inc), by shorter names.
+PK_PUBLIC   equ httpasm_rsa_private_key.public
+PK_P        equ httpasm_rsa_private_key.p
+PK_Q        equ httpasm_rsa_private_key.q
+PK_DP       equ httpasm_rsa_private_key.dp
+PK_DQ       equ httpasm_rsa_private_key.dq
+PK_RR_P     equ httpasm_rsa_private_key.rr_p
+PK_RR_Q     equ httpasm_rsa_private_key.rr_q
+PK_RRR_P    equ httpasm_rsa_private_key.rrr_p
+PK_RRR_Q    equ httpasm_rsa_private_key.rrr_q
+PK_QINV_R   equ httpasm_rsa_private_key.qinv_r
+PK_P0       equ httpasm_rsa_private_key.p0
+PK_Q0       equ httpasm_rsa_private_key.q0
+PK_LIMBS    equ httpasm_rsa_private_key.limbs
+PK_SIZE     equ httpasm_rsa_private_key_size
+
+; The signing frame: the verification's (RV_*: rsa_public_op, the hashes and the encodings work on
+; it as they are), then the CRT's own buffers.
+RS_TABLE    equ RV_FRAME                    ; x^0 .. x^63, Montgomery forms (64 entries of k limbs)
+RS_M        equ RS_TABLE + 32768            ; m, 128 limbs (zero above its own)
+RS_X        equ RS_M + 1024                 ; the base x R mod the prime (k limbs)
+RS_ACC      equ RS_X + 512                  ; the running power
+RS_SP       equ RS_ACC + 512                ; m^dp mod p (plain)
+RS_SQ       equ RS_SP + 512                 ; m^dq mod q (plain)
+RS_TMP      equ RS_SQ + 512                 ; a gathered entry; the CRT's scratch; the init's q^-1
+RS_PRODUCT  equ RS_TMP + 512                ; h q, or the init's p q (2k limbs)
+RS_PRIV     equ RS_PRODUCT + 1024           ; the private key
+RS_SALT     equ RS_PRIV + 8                 ; PSS: the salt
+RS_OUT      equ RS_SALT + 8                 ; the signature's octets
+RS_GATHER   equ RS_OUT + 8                  ; the gather's version (its address)
+RS_PLAIN    equ RS_GATHER + 8               ; the plain product's
+RS_PRIME    equ RS_PLAIN + 8                ; the prime rsa_power works under (its address)
+RS_PRIME0   equ RS_PRIME + 8                ; its n0
+RS_EXP      equ RS_PRIME0 + 8               ; its exponent (the address)
+RS_RR       equ RS_EXP + 8                  ; its R^2 (the address)
+RS_RRR      equ RS_RR + 8                   ; its R^3 (the address)
+RS_K        equ RS_RRR + 8                  ; the primes' limbs
+RS_COUNT    equ RS_K + 8                    ; rsa_prime_rr's squares left
+RS_PSQR     equ RS_COUNT + 8                ; the power's square (its address: rsa_pick_power)
+RS_PMUL     equ RS_PSQR + 8                 ; the power's product
+RS_FRAME    equ (RS_PMUL + 8 + 63) & ~63
+RS_BELOW    equ 4096                        ; the callees' stack under the frame that the wipe
+                                            ; covers: the deepest, a square of 128 limbs (the
+                                            ; fault check's), takes about 2.2 KiB
+
+; RS_ENTER: the pushes and a 64-aligned frame of RS_FRAME octets at rbp (RV_OLDSP keeps rsp).
+%macro RS_ENTER 0
+    push        rbx
+    push        rbp
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         rax, rsp
+    and         rsp, -64
+    sub         rsp, RS_FRAME
+    mov         rbp, rsp
+    mov         [rbp + RV_OLDSP], rax
+%endmacro
+
+; RS_LEAVE: eax (the result) kept while every octet of the frame and RS_BELOW octets under it
+; are zeroed: the table of powers, the CRT's values, the callees' products of secrets. (Writing
+; under rsp is safe here: those octets were the callees', no one uses them now, and a signal
+; arriving meanwhile pushes its frame under rsp and is gone before the zeroing goes on.)
+%macro RS_LEAVE 0
+    mov         r8d, eax
+    mov         rdx, [rbp + RV_OLDSP]
+    lea         rdi, [rbp - RS_BELOW]
+    mov         ecx, (RS_FRAME + RS_BELOW) / 8
+    xor         eax, eax
+    rep         stosq
+    mov         eax, r8d
+    mov         rsp, rdx
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbp
+    pop         rbx
+%endmacro
+
+; -----------------------------------------------------------------------------
+; rsa_mod_add: rdi = out, rsi = a, rdx = b, rcx = m, r8 = k (a and b below m; out may be either)
+; -> out = (a + b) mod m in constant time: the sum, the sum less m into a stack copy, and the one
+; kept chosen by a mask (all ones only when the sum stayed below m: no carry out, a borrow).
+; Clobbers rax, rcx, rdx, r9-r11, the flags; 520 octets of stack.
+; -----------------------------------------------------------------------------
+align 16
+rsa_mod_add:
+    sub         rsp, 512 + 8
+    mov         r9, rcx                     ; m
+    mov         rcx, r8
+    xor         r10d, r10d                  ; the index; CF = 0
+.add:
+    mov         rax, [rsi + r10 * 8]
+    adc         rax, [rdx + r10 * 8]
+    mov         [rdi + r10 * 8], rax
+    lea         r10, [r10 + 1]
+    dec         rcx                         ; (dec keeps CF)
+    jnz         .add
+    sbb         r11, r11
+    neg         r11                         ; the carry out, 0 or 1
+    mov         rcx, r8
+    xor         r10d, r10d                  ; CF = 0
+.subtract:
+    mov         rax, [rdi + r10 * 8]
+    sbb         rax, [r9 + r10 * 8]
+    mov         [rsp + r10 * 8], rax
+    lea         r10, [r10 + 1]
+    dec         rcx
+    jnz         .subtract
+    sbb         r11, 0                      ; carry - borrow: -1 when the sum is below m, else 0
+    mov         rcx, r8
+    xor         r10d, r10d
+.select:
+    mov         rax, [rsp + r10 * 8]        ; the sum where r11 is all ones, else the difference
+    mov         rdx, [rdi + r10 * 8]
+    xor         rdx, rax
+    and         rdx, r11
+    xor         rax, rdx
+    mov         [rdi + r10 * 8], rax
+    inc         r10
+    dec         rcx
+    jnz         .select
+    add         rsp, 512 + 8
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_mod_sub: rdi = out, rsi = a, rdx = b, rcx = m, r8 = k (a and b below m; out may be either)
+; -> out = (a - b) mod m in constant time: the difference, then m masked by its borrow added (the
+; masked m goes to a stack copy first: and clears CF, so it cannot sit inside the adc chain).
+; Clobbers rax, rcx, r9-r11, the flags; 520 octets of stack.
+; -----------------------------------------------------------------------------
+align 16
+rsa_mod_sub:
+    sub         rsp, 512 + 8
+    mov         r9, rcx
+    mov         rcx, r8
+    xor         r10d, r10d
+.subtract:
+    mov         rax, [rsi + r10 * 8]
+    sbb         rax, [rdx + r10 * 8]
+    mov         [rdi + r10 * 8], rax
+    lea         r10, [r10 + 1]
+    dec         rcx
+    jnz         .subtract
+    sbb         r11, r11                    ; all ones when it borrowed
+    mov         rcx, r8
+    xor         r10d, r10d
+.mask:
+    mov         rax, [r9 + r10 * 8]
+    and         rax, r11
+    mov         [rsp + r10 * 8], rax
+    inc         r10
+    dec         rcx
+    jnz         .mask
+    mov         rcx, r8
+    xor         r10d, r10d                  ; CF = 0
+.add:
+    mov         rax, [rsp + r10 * 8]
+    adc         [rdi + r10 * 8], rax
+    lea         r10, [r10 + 1]
+    dec         rcx
+    jnz         .add
+    add         rsp, 512 + 8
+    ret
+
+; =============================================================================
+; The exponentiation's square and product at k = 16 (RSA-2048's 1024-bit primes, the keys TLS
+; servers hold), v3 only. void ha_bn_sqr16_v3(uint64_t *out, const uint64_t *a, const uint64_t *n,
+; uint64_t n0, size_t k) and void ha_bn_mul16_v3(uint64_t *out, const uint64_t *a,
+; const uint64_t *b, const uint64_t *n, uint64_t n0, size_t k): the generic ones' arguments (k is
+; not read: 16), out = a^2 R^-1 or a b R^-1 mod n, R = 2^1024; out may be a or b (t lives on the
+; stack until the end). Two differences, each measured (scratchpad rsa/k16, cycles at k = 16):
+;   straight lines where the generic ones call ha_bn_groups per row and loop per 8-limb group:
+;   the square's 120 products above the diagonal all inline, its 16 squares inline, the
+;   reduction's and the product's rows a loop of 16 limbs inline (705 -> 587 cycles a square, 795
+;   -> 716 a product);
+;   "almost Montgomery" results: below R, not below n. Inputs below R give t = (a b + M n) / R <
+;   R + n < 2R, so t's top limb is 0 or 1 and subtracting n once when it is 1 brings t below R,
+;   congruent all the same; one pass with n masked by mulx (rdx = the top limb: mulx keeps the
+;   flags the borrow chain needs) instead of the subtraction, the borrow and the select of the
+;   full reduction (587 -> 573 a square, 716 -> 709 a product).
+; Measured and not kept: the product in CIOS order (each round's product row, then its reduction
+; row, both straight: 731 cycles against 709 for the whole product first, then the reduction).
+; So their results are fit for each other and for the reduction alone (ha_bn_redc_v3 takes any t
+; below R to a value below n: (t + M n) / R <= n, the last subtraction removing n itself), which
+; is how rsa_crt leaves the power; NOT for Garner's steps, which need values below p (those keep
+; the generic product). The same instructions whatever the values. System V: keeps rbx, rbp,
+; r12-r15.
+; =============================================================================
+
+; The frame (rsp-based, below the six pushes): t, 34 limbs (32 and two spare for the pending
+; carries' stores), then out.
+B16_T       equ 0
+B16_OUT     equ 34 * 8
+B16_FRAME   equ B16_OUT + 8 + 8             ; (16-aligned after the pushes and the return address)
+
+%macro B16_ENTER 0
+    push        rbx
+    push        rbp
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    sub         rsp, B16_FRAME
+    lea         rbx, [rsp + B16_T]
+    mov         [rsp + B16_OUT], rdi
+%endmacro
+
+%macro B16_LEAVE 0
+    add         rsp, B16_FRAME
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbp
+    pop         rbx
+%endmacro
+
+; B16_ADD_ROW src, tbase, from, count: t[tbase + from + q] += src[from + q] rdx for q < count, the
+; two chains running through (CF the sums with t, OF the high words: r10 carries the last one).
+%macro B16_ADD_ROW 4
+  %assign q 0
+  %rep %4
+    mulx        r11, rax, [%1 + 8 * ((%3) + q)]
+    adcx        rax, [%2 + 8 * ((%3) + q)]
+    adox        rax, r10
+    mov         [%2 + 8 * ((%3) + q)], rax
+    mov         r10, r11
+    %assign q q + 1
+  %endrep
+%endmacro
+
+; B16_REDUCE: the 32 limbs of t reduced by 16 rows: m_i = t_i n0, t[i .. i+16) += m_i n (limb
+; 0's sum is 0 by m_i's choice: only its carries go on), then t[i+16] += the high word, CF, OF
+; and the pending carry, whose own carries are the next pending one (0 to 2). r12 = n, r13 = n0;
+; out: r14 = the last pending carry, t's top limb (0 or 1: t < 2R). Clobbers rax, rcx, rdx,
+; r9-r11, r15.
+%macro B16_REDUCE 0
+    xor         r14d, r14d                  ; the pending carry
+    xor         r9d, r9d                    ; 0, for the chains' ends
+    mov         r15, rbx                    ; &t[i]
+    mov         ecx, 16
+%%row:
+    mov         rdx, [r15]
+    imul        rdx, r13                    ; m_i
+    xor         r10d, r10d                  ; CF = OF = 0
+    mulx        r11, rax, [r12]
+    adcx        rax, [r15]
+    adox        rax, r10
+    mov         r10, r11
+    B16_ADD_ROW r12, r15, 1, 15
+    mov         rax, [r15 + 128]            ; t[i+16] + the high word + CF + the pending + OF
+    adcx        rax, r10
+    adox        rax, r14
+    mov         [r15 + 128], rax
+    mov         r14d, 0
+    adcx        r14, r9
+    adox        r14, r9
+    lea         r15, [r15 + 8]
+    dec         ecx                         ; (the chains are done: dec may write OF)
+    jnz         %%row
+%endmacro
+
+; B16_ALMOST: out = t[16 .. 32) - r14 n, below R (r14 is t's top limb, 0 or 1). n's limbs are
+; masked by mulx with rdx = r14 (n_j or 0; mulx leaves the borrow chain's CF alone, where and
+; would clear it). r12 = n. Clobbers rax, rdx, rdi, r8, r9.
+%macro B16_ALMOST 0
+    mov         rdi, [rsp + B16_OUT]
+    mov         rdx, r14
+    mulx        r9, rax, [r12]
+    mov         r8, [rbx + 128]
+    sub         r8, rax
+    mov         [rdi], r8
+  %assign j 1
+  %rep 15
+    mulx        r9, rax, [r12 + 8 * j]
+    mov         r8, [rbx + 128 + 8 * j]
+    sbb         r8, rax
+    mov         [rdi + 8 * j], r8
+    %assign j j + 1
+  %endrep
+%endmacro
+
+align 64
+ha_bn_sqr16_v3:
+    B16_ENTER
+    mov         r12, rdx                    ; n
+    mov         r13, rcx                    ; n0
+    ; 1. the triangle: row 0 writes t[1 .. 15] (nothing to add yet: one chain) and its carry
+    ; word t[16]; row i (1 .. 14; row 15 has no products above the diagonal) adds a_i a[i+1 ..
+    ; 15] to t[2i+1 .. i+15] and writes its carry word into t[i+16], which no row wrote before
+    ; (row i-1's went to t[i+15], the last this row adds to); the word's fold of CF and OF cannot
+    ; overflow, the row's sum staying below 2^(64 (16 - i))
+    mov         rdx, [rsi]
+    xor         eax, eax                    ; CF = 0
+    mulx        r10, rax, [rsi + 8]
+    mov         [rbx + 8], rax
+  %assign j 2
+  %rep 14
+    mulx        r11, rax, [rsi + 8 * j]
+    adcx        rax, r10
+    mov         [rbx + 8 * j], rax
+    mov         r10, r11
+    %assign j j + 1
+  %endrep
+    mov         eax, 0
+    adcx        r10, rax
+    mov         [rbx + 128], r10
+  %assign i 1
+  %rep 14
+    mov         rdx, [rsi + 8 * i]
+    xor         r10d, r10d                  ; CF = OF = 0
+    %assign j i + 1
+    %rep 15 - i
+    mulx        r11, rax, [rsi + 8 * j]     ; t[i+j] += a_i a_j
+    adcx        rax, [rbx + 8 * (i + j)]
+    adox        rax, r10
+    mov         [rbx + 8 * (i + j)], rax
+    mov         r10, r11
+      %assign j j + 1
+    %endrep
+    mov         eax, 0
+    adcx        r10, rax
+    adox        r10, rax                    ; the carry word
+    mov         [rbx + 8 * (i + 16)], r10
+    %assign i i + 1
+  %endrep
+    ; 2. t = 2t + the squares a_i^2 at t[2i], t[2i+1]: CF doubles, OF adds (t[0] and t[31], which
+    ; no row reached, zeroed first; a^2 < R^2: nothing carries out of t[31])
+    mov         qword [rbx], 0
+    mov         qword [rbx + 248], 0
+    xor         eax, eax                    ; CF = OF = 0
+  %assign i 0
+  %rep 16
+    mov         rdx, [rsi + 8 * i]
+    mulx        r11, rax, rdx
+    mov         r8, [rbx + 16 * i]
+    adcx        r8, r8
+    adox        r8, rax
+    mov         [rbx + 16 * i], r8
+    mov         r8, [rbx + 16 * i + 8]
+    adcx        r8, r8
+    adox        r8, r11
+    mov         [rbx + 16 * i + 8], r8
+    %assign i i + 1
+  %endrep
+    ; 3. the reduction, 4. below R
+    B16_REDUCE
+    B16_ALMOST
+    B16_LEAVE
+    ret
+
+align 64
+ha_bn_mul16_v3:
+    B16_ENTER
+    mov         rbp, rdx                    ; &b_i
+    mov         r12, rcx                    ; n
+    mov         r13, r8                     ; n0
+    ; 1. t = a b: row 0 writes t[0 .. 15] (one chain) and its carry word t[16]; rows 1 .. 15 add
+    ; a b_i to t[i .. i+16), their carry words into t[i+16] (written first there)
+    mov         rdx, [rbp]
+    xor         eax, eax                    ; CF = 0
+    mulx        r10, rax, [rsi]
+    mov         [rbx], rax
+  %assign j 1
+  %rep 15
+    mulx        r11, rax, [rsi + 8 * j]
+    adcx        rax, r10
+    mov         [rbx + 8 * j], rax
+    mov         r10, r11
+    %assign j j + 1
+  %endrep
+    mov         eax, 0
+    adcx        r10, rax
+    mov         [rbx + 128], r10
+    lea         r15, [rbx + 8]              ; &t[i]
+    lea         rbp, [rbp + 8]
+    mov         ecx, 15
+.row:
+    mov         rdx, [rbp]
+    xor         r10d, r10d                  ; CF = OF = 0
+    B16_ADD_ROW rsi, r15, 0, 16
+    mov         eax, 0
+    adcx        r10, rax
+    adox        r10, rax                    ; the carry word (the row's sum fits 17 limbs)
+    mov         [r15 + 128], r10
+    lea         r15, [r15 + 8]
+    lea         rbp, [rbp + 8]
+    dec         ecx
+    jnz         .row
+    ; 2. the reduction, 3. below R
+    B16_REDUCE
+    B16_ALMOST
+    B16_LEAVE
+    ret
+
+; =============================================================================
+; The plain product. void ha_bn_mul_plain_vN(uint64_t *out, const uint64_t *a, const uint64_t *b,
+; size_t k): out = a b (2k limbs; out is neither a nor b), k a multiple of 8. Rows t[i .. i+k] +=
+; a b_i: v3 whole groups through ha_bn_groups, the carry word into t[i+k], which no row wrote
+; before (the row above ended a limb lower); v1 mul. Constant time. System V.
+; =============================================================================
+align 16
+ha_bn_mul_plain_v3:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         r12, rdi
+    mov         r13, rsi
+    mov         r14, rdx
+    mov         rbx, rcx
+    xor         eax, eax
+    rep         stosq                       ; out[0 .. k) = 0: row 0 adds to them
+    xor         r8d, r8d                    ; i
+.row:
+    mov         rdx, [r14 + r8 * 8]         ; b_i
+    mov         rsi, r13
+    lea         r15, [r12 + r8 * 8]
+    mov         rcx, rbx
+    shr         rcx, 3
+    neg         rcx
+    xor         r10d, r10d                  ; CF = OF = 0
+    call        ha_bn_groups
+    mov         eax, 0                      ; (mov: the flags stay)
+    adcx        r10, rax
+    adox        r10, rax                    ; the carry word (a row's sum fits k + 1 limbs)
+    mov         [r15], r10
+    inc         r8
+    cmp         r8, rbx
+    jne         .row
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+align 16
+ha_bn_mul_plain_v1:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         r12, rdi
+    mov         r13, rsi
+    mov         r14, rdx
+    mov         rbx, rcx
+    xor         eax, eax
+    rep         stosq
+    xor         r15d, r15d                  ; i
+.row:
+    mov         r11, [r14 + r15 * 8]        ; b_i
+    lea         rdi, [r12 + r15 * 8]        ; t[i ..]
+    xor         r10d, r10d                  ; the carry
+    xor         r9d, r9d                    ; j
+.limb:
+    mov         rax, [r13 + r9 * 8]
+    mul         r11
+    add         rax, r10
+    adc         rdx, 0
+    add         rax, [rdi + r9 * 8]
+    adc         rdx, 0
+    mov         [rdi + r9 * 8], rax
+    mov         r10, rdx
+    inc         r9
+    cmp         r9, rbx
+    jne         .limb
+    mov         [rdi + r9 * 8], r10         ; t[i+k]
+    inc         r15
+    cmp         r15, rbx
+    jne         .row
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; =============================================================================
+; The table read. void ha_rsa_gather_vN(uint64_t *out, const uint64_t *table, uint32_t index,
+; size_t k): out = entry index of 64 (entry j at table + 8kj; k a multiple of 8), in constant
+; time: every entry is read and ANDed with a mask that is all ones only for the index (a compare
+; of a running counter with it), the masked entries ORed; no address depends on the index. v3:
+; sixteen limbs a pass over the 64 entries in four ymm (vpcmpeqq; one pass at k = 16: 300 cycles
+; against 340 for two passes of eight, scratchpad rsa/k16; two entries a step: no faster), then a
+; pass of eight in two ymm when k leaves eight; v1: eight limbs a pass in four xmm (SSE2's pcmpeqd
+; on the index in every dword).
+; Clobbers rax, rcx, rdx, rsi, rdi, r8-r10, the vector registers used.
+; =============================================================================
+align 16
+ha_rsa_gather_v3:
+    vmovd       xmm15, edx
+    vpbroadcastq ymm15, xmm15               ; the index in every lane
+    vpcmpeqd    ymm12, ymm12, ymm12         ; -1 in every lane: the counter's step (subtracted)
+    mov         r8, rcx
+    shr         r8, 4                       ; passes of sixteen limbs
+    jz          .eight                      ; (k is public: the branch shows nothing)
+.pass16:
+    vpxor       xmm0, xmm0, xmm0
+    vpxor       xmm1, xmm1, xmm1
+    vpxor       xmm2, xmm2, xmm2
+    vpxor       xmm3, xmm3, xmm3
+    vpxor       xmm13, xmm13, xmm13         ; the counter j = 0
+    mov         r9, rsi                     ; this pass's sixteen limbs of entry 0
+    mov         r10d, 64
+.entry16:
+    vpcmpeqq    ymm4, ymm13, ymm15          ; all ones where j = index
+    vpand       ymm5, ymm4, [r9]
+    vpand       ymm6, ymm4, [r9 + 32]
+    vpand       ymm7, ymm4, [r9 + 64]
+    vpand       ymm8, ymm4, [r9 + 96]
+    vpor        ymm0, ymm0, ymm5
+    vpor        ymm1, ymm1, ymm6
+    vpor        ymm2, ymm2, ymm7
+    vpor        ymm3, ymm3, ymm8
+    vpsubq      ymm13, ymm13, ymm12         ; j + 1
+    lea         r9, [r9 + rcx * 8]          ; the next entry
+    dec         r10d
+    jnz         .entry16
+    vmovdqu     [rdi], ymm0
+    vmovdqu     [rdi + 32], ymm1
+    vmovdqu     [rdi + 64], ymm2
+    vmovdqu     [rdi + 96], ymm3
+    add         rdi, 128
+    add         rsi, 128                    ; the next sixteen limbs
+    dec         r8
+    jnz         .pass16
+.eight:
+    test        ecx, 8                      ; eight limbs left (k = 8 mod 16)?
+    jz          .done
+    vpxor       ymm0, ymm0, ymm0            ; the last eight limbs: one pass
+    vpxor       ymm1, ymm1, ymm1
+    vpxor       ymm13, ymm13, ymm13         ; the counter j = 0
+    mov         r9, rsi                     ; their limbs of entry 0
+    mov         r10d, 64
+.entry:
+    vpcmpeqq    ymm2, ymm13, ymm15          ; all ones where j = index
+    vpand       ymm3, ymm2, [r9]
+    vpand       ymm4, ymm2, [r9 + 32]
+    vpor        ymm0, ymm0, ymm3
+    vpor        ymm1, ymm1, ymm4
+    vpsubq      ymm13, ymm13, ymm12         ; j + 1
+    lea         r9, [r9 + rcx * 8]          ; the next entry
+    dec         r10d
+    jnz         .entry
+    vmovdqu     [rdi], ymm0
+    vmovdqu     [rdi + 32], ymm1
+.done:
+    vzeroupper
+    ret
+
+align 16
+ha_rsa_gather_v1:
+    movd        xmm15, edx
+    pshufd      xmm15, xmm15, 0             ; the index in every dword
+    pcmpeqd     xmm12, xmm12                ; -1 in every dword: the counter's step
+    mov         r8, rcx
+    shr         r8, 3
+.pass:
+    pxor        xmm0, xmm0
+    pxor        xmm1, xmm1
+    pxor        xmm2, xmm2
+    pxor        xmm3, xmm3
+    pxor        xmm13, xmm13                ; j = 0 in every dword
+    mov         r9, rsi
+    mov         r10d, 64
+.entry:
+    movdqa      xmm4, xmm13
+    pcmpeqd     xmm4, xmm15                 ; all ones where j = index (every dword alike)
+    movdqu      xmm5, [r9]
+    pand        xmm5, xmm4
+    por         xmm0, xmm5
+    movdqu      xmm5, [r9 + 16]
+    pand        xmm5, xmm4
+    por         xmm1, xmm5
+    movdqu      xmm5, [r9 + 32]
+    pand        xmm5, xmm4
+    por         xmm2, xmm5
+    movdqu      xmm5, [r9 + 48]
+    pand        xmm5, xmm4
+    por         xmm3, xmm5
+    psubd       xmm13, xmm12                ; j + 1
+    lea         r9, [r9 + rcx * 8]
+    dec         r10d
+    jnz         .entry
+    movdqu      [rdi], xmm0
+    movdqu      [rdi + 16], xmm1
+    movdqu      [rdi + 32], xmm2
+    movdqu      [rdi + 48], xmm3
+    add         rdi, 64
+    add         rsi, 64
+    dec         r8
+    jnz         .pass
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_pick: the versions for this CPU into the frame (RV_MUL, RV_SQR, RV_REDC, RS_GATHER,
+; RS_PLAIN): v3 (mulx with adcx/adox, AVX2's gather) when BMI2 and ADX are within the cap (one
+; test of both, as p256.asm picks), else v1 (mul, SSE2). Clobbers rax, the flags.
+; -----------------------------------------------------------------------------
+align 16
+rsa_pick:
+    HA_CPU_PICK HTTPASM_CPU_V3 | HTTPASM_CPU_ADX, .v3
+    lea         rax, [rel ha_bn_mul_v1]
+    mov         [rbp + RV_MUL], rax
+    lea         rax, [rel ha_bn_sqr_v1]
+    mov         [rbp + RV_SQR], rax
+    lea         rax, [rel ha_bn_redc_v1]
+    mov         [rbp + RV_REDC], rax
+    lea         rax, [rel ha_rsa_gather_v1]
+    mov         [rbp + RS_GATHER], rax
+    lea         rax, [rel ha_bn_mul_plain_v1]
+    mov         [rbp + RS_PLAIN], rax
+    ret
+.v3:
+    lea         rax, [rel ha_bn_mul_v3]
+    mov         [rbp + RV_MUL], rax
+    lea         rax, [rel ha_bn_sqr_v3]
+    mov         [rbp + RV_SQR], rax
+    lea         rax, [rel ha_bn_redc_v3]
+    mov         [rbp + RV_REDC], rax
+    lea         rax, [rel ha_rsa_gather_v3]
+    mov         [rbp + RS_GATHER], rax
+    lea         rax, [rel ha_bn_mul_plain_v3]
+    mov         [rbp + RS_PLAIN], rax
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_bits: rsi = a number of ecx limbs -> eax = its bit length (0 for 0). The loop runs over the
+; leading zero limbs: a prime's length is public (the key's size). Clobbers rax, rcx.
+; -----------------------------------------------------------------------------
+align 16
+rsa_bits:
+.top:
+    dec         ecx
+    js          .zero
+    mov         rax, [rsi + rcx * 8]
+    test        rax, rax
+    jz          .top
+    bsr         rax, rax
+    shl         ecx, 6
+    lea         eax, [rcx + rax + 1]
+    ret
+.zero:
+    xor         eax, eax
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_n0: rcx = an odd number's low limb -> rax = -its inverse mod 2^64 (Newton's x = x (2 - a x)
+; doubles the good bits; (3a) xor 2 is good to 5, four steps reach 64). Constant time. Clobbers
+; rdx.
+; -----------------------------------------------------------------------------
+align 16
+rsa_n0:
+    lea         rax, [rcx + rcx * 2]
+    xor         rax, 2
+  %rep 4
+    mov         rdx, rcx
+    imul        rdx, rax
+    neg         rdx
+    add         rdx, 2
+    imul        rax, rdx
+  %endrep
+    neg         rax
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_prime_rr: rdi = rr (k limbs, written), rsi = a prime (k limbs, odd), edx = its bits, rcx =
+; k, r8 = its n0; the frame's RV_SQR -> rr = R^2 mod p (R = 2^(64k)) in constant time, the
+; prime's value steering nothing (its bit length, public as the key's size, sets the counts):
+; 2^(bits - 1), below p, doubled modulo p 64k - bits + 1 + c times (rsa_mod_add: masks), to
+; 2^c R mod p where 64k = c 2^j, then squared j times: the Montgomery square of 2^c R is
+; 2^(2c) R, and so on to 2^(c 2^j) R = R R. Frame routine (rbp).
+; -----------------------------------------------------------------------------
+align 16
+rsa_prime_rr:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         r12, rdi                    ; rr
+    mov         r13, rsi                    ; p
+    mov         r14, rcx                    ; k
+    mov         r15, r8                     ; n0
+    mov         ebx, edx                    ; bits
+    xor         eax, eax
+    rep         stosq                       ; rr = 0 (rdi = rr, rcx = k)
+    lea         ecx, [rbx - 1]              ; then 2^(bits - 1)
+    mov         edx, ecx
+    shr         edx, 6
+    and         ecx, 63
+    mov         eax, 1
+    shl         rax, cl
+    mov         [r12 + rdx * 8], rax
+    mov         rax, r14
+    shl         rax, 6                      ; 64k
+    bsf         rcx, rax                    ; j
+    mov         [rbp + RS_COUNT], rcx
+    mov         rdx, rax
+    shr         rdx, cl                     ; c
+    sub         rax, rbx
+    lea         rbx, [rax + rdx + 1]        ; the doublings
+.double:
+    mov         rdi, r12
+    mov         rsi, r12
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        rsa_mod_add
+    dec         rbx
+    jnz         .double
+.square:
+    mov         rdi, r12
+    mov         rsi, r12
+    mov         rdx, r13
+    mov         rcx, r15
+    mov         r8, r14
+    call        [rbp + RV_SQR]
+    dec         qword [rbp + RS_COUNT]
+    jnz         .square
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_digit: rsi = a bit position, ecx = a width (1..6), both public -> eax = the bits [position,
+; position + width) of the frame's RS_EXP (a digit of a secret exponent: only the gather's index).
+; The one branch is on the position. Clobbers rax, rcx, rdx, r8-r10.
+; -----------------------------------------------------------------------------
+align 16
+rsa_digit:
+    mov         r8, [rbp + RS_EXP]
+    mov         r9, rsi
+    shr         r9, 6                       ; the limb
+    mov         r10d, ecx                   ; the width
+    mov         ecx, esi
+    and         ecx, 63                     ; the shift
+    mov         rax, [r8 + r9 * 8]
+    shr         rax, cl
+    lea         edx, [rcx + r10]
+    cmp         edx, 64
+    jbe         .inside                     ; (the position decides: public)
+    mov         rdx, [r8 + r9 * 8 + 8]      ; the digit runs into the next limb
+    neg         ecx                         ; shl takes cl mod 64: 64 - shift
+    shl         rdx, cl
+    or          rax, rdx
+.inside:
+    mov         ecx, r10d
+    mov         edx, 1
+    shl         edx, cl
+    dec         edx
+    and         eax, edx
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_pick_power: the frame's RV_SQR and RV_MUL (rsa_pick's versions) and RS_K -> RS_PSQR and
+; RS_PMUL, the square and product rsa_power runs: ha_bn_sqr16_v3 and ha_bn_mul16_v3 when k is 16
+; and the v3 versions were picked (RSA-2048's primes; their results are below R, not below the
+; prime, which the power's table and windows take and its final reduction undoes), else the
+; picked ones themselves. Clobbers rax, rcx, rdx.
+; -----------------------------------------------------------------------------
+align 16
+rsa_pick_power:
+    mov         rax, [rbp + RV_SQR]
+    mov         rcx, [rbp + RV_MUL]
+    cmp         qword [rbp + RS_K], 16      ; (k is public: the key's size)
+    jne         .set
+    lea         rdx, [rel ha_bn_sqr_v3]
+    cmp         rax, rdx
+    jne         .set
+    lea         rax, [rel ha_bn_sqr16_v3]
+    lea         rcx, [rel ha_bn_mul16_v3]
+.set:
+    mov         [rbp + RS_PSQR], rax
+    mov         [rbp + RS_PMUL], rcx
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_power: the frame's RS_X (x R mod p, below p), RS_PRIME, RS_PRIME0, RS_EXP (k limbs), RS_RR,
+; RS_K, RS_PSQR, RS_PMUL -> RS_ACC = x^exp R mod p (Montgomery form, below R: at k = 16 the
+; almost-Montgomery operations leave it there, not below p), in constant time. The table x^0 ..
+; x^63 in Montgomery forms: x^0 = R mod p (the reduction of R^2), x^1 = x, an even entry the
+; square of its half, an odd one the even below it times x. Then the exponent's 64k bits from the
+; top in windows of 6 (the first one 64k mod 6 bits, or 6): each window 6 squares and a product
+; with the entry its digit names, read by gather. The windows' positions depend only on k, so the
+; exponent's own length stays secret; the table's 62 operations and every window run whatever the
+; exponent. Frame routine (rbp).
+; -----------------------------------------------------------------------------
+align 16
+rsa_power:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         r12, [rbp + RS_PRIME]
+    mov         r13, [rbp + RS_PRIME0]
+    mov         r14, [rbp + RS_K]
+    ; entry 0 = R mod p; entry 1 = x
+    lea         rdi, [rbp + RS_TABLE]
+    mov         rsi, [rbp + RS_RR]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RV_REDC]
+    lea         rdi, [rbp + RS_TABLE + r14 * 8]
+    lea         rsi, [rbp + RS_X]
+    mov         rcx, r14
+    rep         movsq
+    ; entries 2 .. 63
+    mov         ebx, 2
+.entry:
+    mov         rax, r14
+    imul        rax, rbx
+    lea         rdi, [rbp + RS_TABLE + rax * 8]
+    test        ebx, 1                      ; (the entry's number: public)
+    jnz         .odd
+    mov         rax, rbx                    ; even: the square of entry j / 2
+    shr         rax, 1
+    imul        rax, r14
+    lea         rsi, [rbp + RS_TABLE + rax * 8]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RS_PSQR]
+    jmp         .entered
+.odd:
+    mov         rsi, rdi                    ; odd: entry j - 1 times x
+    mov         rax, r14
+    shl         rax, 3
+    sub         rsi, rax
+    lea         rdx, [rbp + RS_X]
+    mov         rcx, r12
+    mov         r8, r13
+    mov         r9, r14
+    call        [rbp + RS_PMUL]
+.entered:
+    inc         ebx
+    cmp         ebx, 64
+    jne         .entry
+    ; the first window: the top 64k mod 6 bits (or 6)
+    mov         rax, r14
+    shl         rax, 6
+    xor         edx, edx
+    mov         ecx, 6
+    div         rcx                         ; (k is public)
+    test        edx, edx
+    jnz         .width
+    mov         edx, 6
+.width:
+    mov         r15, r14
+    shl         r15, 6
+    sub         r15, rdx                    ; the window's position
+    mov         ecx, edx
+    mov         rsi, r15
+    call        rsa_digit
+    lea         rdi, [rbp + RS_ACC]
+    lea         rsi, [rbp + RS_TABLE]
+    mov         edx, eax
+    mov         rcx, r14
+    call        [rbp + RS_GATHER]
+.window:
+    test        r15, r15
+    jz          .done
+    sub         r15, 6
+    mov         ebx, 6
+.square:
+    lea         rdi, [rbp + RS_ACC]
+    lea         rsi, [rbp + RS_ACC]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RS_PSQR]
+    dec         ebx
+    jnz         .square
+    mov         ecx, 6
+    mov         rsi, r15
+    call        rsa_digit
+    lea         rdi, [rbp + RS_TMP]
+    lea         rsi, [rbp + RS_TABLE]
+    mov         edx, eax
+    mov         rcx, r14
+    call        [rbp + RS_GATHER]
+    lea         rdi, [rbp + RS_ACC]
+    lea         rsi, [rbp + RS_ACC]
+    lea         rdx, [rbp + RS_TMP]
+    mov         rcx, r12
+    mov         r8, r13
+    mov         r9, r14
+    call        [rbp + RS_PMUL]
+    jmp         .window
+.done:
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_crt: the frame's RS_M (m below n, zero up to 128 limbs) and RS_PRIV -> RV_S = m^d mod n
+; (the public key's limbs), by CRT, constant time. For p, then q: m R^-1 mod the prime as the
+; reduction of m's low k limbs plus its high k limbs (m < p q < prime R: the high half is below
+; the prime), times R^3 into Montgomery form, the power (rsa_power), reduced out of Montgomery
+; form. Then Garner: h = (s_p - s_q mod p) q^-1 mod p (s_q mod p: the reduction of s_q, times
+; R^2; q^-1 is in the key as q^-1 R), s = s_q + h q, below n since (q - 1) + (p - 1) q < p q.
+; The power's own square and product (rsa_pick_power) may leave it below R only: the reduction
+; out of Montgomery form takes it below the prime, and Garner's steps run on the generic product,
+; whose results are below p. Frame routine (rbp).
+; -----------------------------------------------------------------------------
+align 16
+rsa_crt:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         rbx, [rbp + RS_PRIV]
+    mov         r14d, [rbx + PK_LIMBS]
+    mov         [rbp + RS_K], r14
+    call        rsa_pick_power
+    xor         r15d, r15d                  ; 0: p, 1: q
+.prime:
+    lea         r12, [rbx + PK_P]
+    mov         r13, [rbx + PK_P0]
+    lea         rax, [rbx + PK_DP]
+    lea         rcx, [rbx + PK_RR_P]
+    lea         rdx, [rbx + PK_RRR_P]
+    test        r15d, r15d
+    jz          .described
+    lea         r12, [rbx + PK_Q]
+    mov         r13, [rbx + PK_Q0]
+    lea         rax, [rbx + PK_DQ]
+    lea         rcx, [rbx + PK_RR_Q]
+    lea         rdx, [rbx + PK_RRR_Q]
+.described:
+    mov         [rbp + RS_PRIME], r12
+    mov         [rbp + RS_PRIME0], r13
+    mov         [rbp + RS_EXP], rax
+    mov         [rbp + RS_RR], rcx
+    mov         [rbp + RS_RRR], rdx
+    lea         rdi, [rbp + RS_TMP]         ; m's low half R^-1
+    lea         rsi, [rbp + RS_M]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RV_REDC]
+    lea         rdi, [rbp + RS_TMP]         ; + the high half: m R^-1 mod the prime
+    lea         rsi, [rbp + RS_TMP]
+    lea         rdx, [rbp + RS_M + r14 * 8]
+    mov         rcx, r12
+    mov         r8, r14
+    call        rsa_mod_add
+    lea         rdi, [rbp + RS_X]           ; times R^3: m R, the Montgomery form
+    lea         rsi, [rbp + RS_TMP]
+    mov         rdx, [rbp + RS_RRR]
+    mov         rcx, r12
+    mov         r8, r13
+    mov         r9, r14
+    call        [rbp + RV_MUL]
+    call        rsa_power
+    lea         rdi, [rbp + RS_SP]          ; out of Montgomery form
+    test        r15d, r15d
+    jz          .into
+    lea         rdi, [rbp + RS_SQ]
+.into:
+    lea         rsi, [rbp + RS_ACC]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RV_REDC]
+    inc         r15d
+    cmp         r15d, 2
+    jne         .prime
+    ; Garner, under p
+    lea         r12, [rbx + PK_P]
+    mov         r13, [rbx + PK_P0]
+    lea         rdi, [rbp + RS_TMP]         ; s_q R^-1 mod p (s_q < q < R: below p R)
+    lea         rsi, [rbp + RS_SQ]
+    mov         rdx, r12
+    mov         rcx, r13
+    mov         r8, r14
+    call        [rbp + RV_REDC]
+    lea         rdi, [rbp + RS_TMP]         ; times R^2: s_q mod p
+    lea         rsi, [rbp + RS_TMP]
+    lea         rdx, [rbx + PK_RR_P]
+    mov         rcx, r12
+    mov         r8, r13
+    mov         r9, r14
+    call        [rbp + RV_MUL]
+    lea         rdi, [rbp + RS_TMP]         ; (s_p - s_q) mod p
+    lea         rsi, [rbp + RS_SP]
+    lea         rdx, [rbp + RS_TMP]
+    mov         rcx, r12
+    mov         r8, r14
+    call        rsa_mod_sub
+    lea         rdi, [rbp + RS_TMP]         ; h = that q^-1 mod p
+    lea         rsi, [rbp + RS_TMP]
+    lea         rdx, [rbx + PK_QINV_R]
+    mov         rcx, r12
+    mov         r8, r13
+    mov         r9, r14
+    call        [rbp + RV_MUL]
+    lea         rdi, [rbp + RS_PRODUCT]     ; h q, 2k limbs
+    lea         rsi, [rbp + RS_TMP]
+    lea         rdx, [rbx + PK_Q]
+    mov         rcx, r14
+    call        [rbp + RS_PLAIN]
+    xor         ecx, ecx                    ; + s_q, the carry on through the high half; CF = 0
+    mov         rdx, r14
+.low:
+    mov         rax, [rbp + RS_SQ + rcx * 8]
+    adc         [rbp + RS_PRODUCT + rcx * 8], rax
+    lea         rcx, [rcx + 1]
+    dec         rdx
+    jnz         .low
+    mov         rdx, r14
+.high:
+    adc         qword [rbp + RS_PRODUCT + rcx * 8], 0
+    lea         rcx, [rcx + 1]
+    dec         rdx
+    jnz         .high
+    mov         ecx, [rbx + PK_PUBLIC + RK_LIMBS]   ; s into RV_S: n's limbs (at most 2k, which
+    lea         rsi, [rbp + RS_PRODUCT]             ; hold zeros past s's own)
+    lea         rdi, [rbp + RV_S]
+    rep         movsq
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_sign_finish: the frame's RV_EM (the encoded message, RV_EMLEN octets), RS_OUT (the
+; signature's place, RV_KBYTES octets) -> eax = 0 and the signature written; or -1 with it zeroed
+; when s^e mod n is not m (a fault). Frame routine.
+; -----------------------------------------------------------------------------
+align 16
+rsa_sign_finish:
+    push        r12
+    lea         rdi, [rbp + RS_M]           ; m = OS2IP(EM), zero up to 128 limbs
+    lea         rsi, [rbp + RV_EM]
+    mov         rdx, [rbp + RV_EMLEN]
+    mov         ecx, 128
+    call        rsa_load_be
+    call        rsa_crt
+    call        rsa_public_op               ; RV_ACC = s^e mod n (public: variable time)
+    mov         r12, [rbp + RV_KEY]
+    mov         ecx, [r12 + RK_LIMBS]
+    lea         rsi, [rbp + RV_ACC]
+    lea         rdi, [rbp + RS_M]
+    repe        cmpsq
+    jne         .fault
+    mov         rdi, [rbp + RS_OUT]         ; I2OSP(s, k)
+    lea         rsi, [rbp + RV_S]
+    mov         rdx, [rbp + RV_KBYTES]
+    call        rsa_store_be
+    xor         eax, eax
+    pop         r12
+    ret
+.fault:
+    mov         rdi, [rbp + RS_OUT]
+    mov         rcx, [rbp + RV_KBYTES]
+    xor         eax, eax
+    rep         stosb
+    mov         eax, -1
+    pop         r12
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_sign_begin: the frame's RV_KEY, RV_SIGLEN -> RV_KBYTES and the versions; eax = 0, or -1 for
+; a refused key (no bits) or a signature length other than the modulus' octets (nothing written).
+; -----------------------------------------------------------------------------
+align 16
+rsa_sign_begin:
+    mov         rax, [rbp + RV_KEY]
+    mov         eax, [rax + RK_BITS]
+    cmp         eax, HTTPASM_RSA_MIN_BITS
+    jb          .bad
+    add         eax, 7
+    shr         eax, 3
+    mov         [rbp + RV_KBYTES], rax
+    cmp         rax, [rbp + RV_SIGLEN]
+    jne         .bad
+    call        rsa_pick
+    xor         eax, eax
+    ret
+.bad:
+    mov         eax, -1
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_encode_pkcs1: rdx = the DigestInfo prefix, rcx = its length; the frame's RV_KBYTES,
+; RV_DIGEST, RV_HLEN -> RV_EM = 00 01 FF..FF 00 prefix digest (RFC 8017 9.2), RV_EMLEN = kbytes.
+; At least 8 FF always: kbytes >= 128 and T at most 83. Clobbers rax, rcx, rsi, rdi, r8, r9.
+; -----------------------------------------------------------------------------
+align 16
+rsa_encode_pkcs1:
+    mov         r8, rdx
+    mov         r9, rcx
+    mov         rax, [rbp + RV_KBYTES]
+    mov         [rbp + RV_EMLEN], rax
+    lea         rdi, [rbp + RV_EM]
+    mov         word [rdi], 0x0100          ; 00 01
+    add         rdi, 2
+    mov         rcx, rax
+    sub         rcx, r9
+    sub         rcx, [rbp + RV_HLEN]
+    sub         rcx, 3                      ; the FF octets
+    mov         al, 0xFF
+    rep         stosb
+    mov         byte [rdi], 0
+    inc         rdi
+    mov         rsi, r8
+    mov         rcx, r9
+    rep         movsb                       ; the prefix
+    mov         rsi, [rbp + RV_DIGEST]
+    mov         rcx, [rbp + RV_HLEN]
+    rep         movsb                       ; the digest
+    ret
+
+; -----------------------------------------------------------------------------
+; rsa_encode_pss: the frame's RV_KEY, RV_HASHID, RV_DIGEST, RV_HLEN, RV_SLEN, RS_SALT ->
+; RV_EM = maskedDB || H || BC (RFC 8017 9.1.1) and RV_EMLEN; eax = 0, or -1 when emLen < hLen +
+; sLen + 2 (step 3). emBits = bits - 1: emLen is the modulus' octets, or one less when bits = 1
+; mod 8. H = Hash(00^8 || mHash || salt) goes straight to its place in EM; DB = PS || 01 || salt
+; is written in place and masked by MGF1(H). Frame routine.
+; -----------------------------------------------------------------------------
+align 16
+rsa_encode_pss:
+    push        rbx
+    push        r12
+    push        r13
+    push        r14
+    push        r15
+    mov         r12, [rbp + RV_KEY]
+    mov         eax, [r12 + RK_BITS]
+    lea         r13d, [rax - 1]             ; emBits
+    lea         eax, [r13 + 7]
+    shr         eax, 3
+    mov         [rbp + RV_EMLEN], rax
+    mov         rbx, rax                    ; emLen
+    mov         rax, [rbp + RV_HLEN]        ; step 3
+    add         rax, [rbp + RV_SLEN]
+    jc          .no_room
+    add         rax, 2
+    jc          .no_room
+    cmp         rbx, rax
+    jb          .no_room
+    lea         rdi, [rbp + RV_MP]          ; steps 5-6: M' = 00^8 || mHash || salt
+    mov         qword [rdi], 0
+    add         rdi, 8
+    mov         rsi, [rbp + RV_DIGEST]
+    mov         rcx, [rbp + RV_HLEN]
+    rep         movsb
+    mov         rsi, [rbp + RS_SALT]
+    mov         rcx, [rbp + RV_SLEN]
+    rep         movsb                       ; (no octets for an empty salt: it may be NULL)
+    lea         rsi, [rbp + RV_MP]
+    sub         rdi, rsi
+    mov         rsi, rdi                    ; M''s length
+    lea         rdi, [rbp + RV_MP]
+    mov         r14, rbx                    ; dbLen = emLen - hLen - 1
+    sub         r14, [rbp + RV_HLEN]
+    dec         r14
+    lea         rdx, [rbp + RV_EM + r14]    ; H, at its place
+    mov         ecx, [rbp + RV_HASHID]
+    call        rsa_hash
+    mov         byte [rbp + RV_EM + rbx - 1], 0xBC
+    lea         rdi, [rbp + RV_EM]          ; steps 7-8: DB = PS || 01 || salt
+    mov         rcx, r14
+    sub         rcx, [rbp + RV_SLEN]
+    dec         rcx                         ; PS's octets
+    xor         eax, eax
+    rep         stosb
+    mov         byte [rdi], 1
+    inc         rdi
+    mov         rsi, [rbp + RS_SALT]
+    mov         rcx, [rbp + RV_SLEN]
+    rep         movsb
+    lea         rsi, [rbp + RV_EM + r14]    ; steps 9-10: DB ^= MGF1(H, dbLen): the seed H || counter
+    lea         rdi, [rbp + RV_SEED]
+    mov         rcx, [rbp + RV_HLEN]
+    rep         movsb
+    mov         qword [rbp + RV_CNT], 0
+    xor         r15d, r15d                  ; DB's octets masked
+.mgf1:
+    mov         rax, [rbp + RV_CNT]
+    bswap       eax
+    mov         rcx, [rbp + RV_HLEN]
+    mov         [rbp + RV_SEED + rcx], eax  ; the counter, big-endian
+    lea         rdi, [rbp + RV_SEED]
+    lea         rsi, [rcx + 4]
+    lea         rdx, [rbp + RV_HASH]
+    mov         ecx, [rbp + RV_HASHID]
+    call        rsa_hash
+    inc         qword [rbp + RV_CNT]
+    xor         ecx, ecx
+.xor:
+    cmp         r15, r14
+    je          .masked
+    cmp         rcx, [rbp + RV_HLEN]
+    je          .mgf1
+    mov         al, [rbp + RV_HASH + rcx]
+    xor         [rbp + RV_EM + r15], al
+    inc         r15
+    inc         rcx
+    jmp         .xor
+.masked:
+    mov         ecx, ebx                    ; step 11: the top 8 emLen - emBits bits to 0
+    shl         ecx, 3
+    sub         ecx, r13d
+    mov         eax, 0xFF
+    shr         eax, cl
+    and         [rbp + RV_EM], al
+    xor         eax, eax
+    jmp         .done
+.no_room:
+    mov         eax, -1
+.done:
+    pop         r15
+    pop         r14
+    pop         r13
+    pop         r12
+    pop         rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; int httpasm_rsa_private_key_init(httpasm_rsa_private_key *key,
+;                                  const httpasm_rsa_private_numbers *numbers)
+; -----------------------------------------------------------------------------
+global httpasm_rsa_private_key_init:function (httpasm_rsa_private_key_init.end - httpasm_rsa_private_key_init)
+align 16
+httpasm_rsa_private_key_init:
+    RS_ENTER
+    mov         [rbp + RS_PRIV], rdi
+    mov         rbx, rdi                    ; the key
+    mov         r12, rsi                    ; the numbers
+    xor         eax, eax                    ; the whole key zeroed first: a refused key is zeros
+    mov         ecx, PK_SIZE / 8
+    rep         stosq
+    lea         rdi, [rbx + PK_PUBLIC]      ; the public part, as httpasm_rsa_public_key_init takes it
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.n]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.n_length]
+    mov         rcx, [r12 + httpasm_rsa_private_numbers.e]
+    mov         r8, [r12 + httpasm_rsa_private_numbers.e_length]
+    call        httpasm_rsa_public_key_init
+    test        eax, eax
+    jnz         .bad
+    lea         rax, [rbx + PK_PUBLIC]
+    mov         [rbp + RV_KEY], rax
+    call        rsa_pick
+    ; the primes: odd, above 1, at most 4096 bits (64 limbs). Their sizes need not match: both
+    ; run on the larger's limbs, which keeps m < p R and m < q R (RFC 8017 sets no balance;
+    ; Wycheproof's e = 3 keys have primes of 681 and 343 bits)
+    lea         rdi, [rbx + PK_P]
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.p]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.p_length]
+    mov         ecx, HTTPASM_RSA_PRIME_LIMBS
+    call        rsa_load_be
+    test        eax, eax
+    jnz         .bad
+    lea         rdi, [rbx + PK_Q]
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.q]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.q_length]
+    mov         ecx, HTTPASM_RSA_PRIME_LIMBS
+    call        rsa_load_be
+    test        eax, eax
+    jnz         .bad
+    lea         rsi, [rbx + PK_P]
+    mov         ecx, HTTPASM_RSA_PRIME_LIMBS
+    call        rsa_bits
+    cmp         eax, 2                      ; (1 and 0 are no primes)
+    jb          .bad
+    test        byte [rbx + PK_P], 1
+    jz          .bad
+    mov         r13d, eax                   ; p's bits
+    lea         rsi, [rbx + PK_Q]
+    mov         ecx, HTTPASM_RSA_PRIME_LIMBS
+    call        rsa_bits
+    cmp         eax, 2                      ; (1 and 0 are no primes)
+    jb          .bad
+    test        byte [rbx + PK_Q], 1
+    jz          .bad
+    mov         r14d, eax                   ; q's bits
+    mov         eax, r13d                   ; k: the larger's limbs, rounded up to 8
+    cmp         eax, r14d
+    cmovb       eax, r14d
+    add         eax, 511
+    shr         eax, 9
+    shl         eax, 3
+    mov         [rbx + PK_LIMBS], eax
+    mov         [rbp + RS_K], rax
+    mov         r15, rax
+    ; p q = n: the product's 2k limbs, and n's zero above them
+    lea         rdi, [rbp + RS_PRODUCT]
+    lea         rsi, [rbx + PK_P]
+    lea         rdx, [rbx + PK_Q]
+    mov         rcx, r15
+    call        [rbp + RS_PLAIN]
+    lea         rsi, [rbp + RS_PRODUCT]
+    lea         rdi, [rbx + PK_PUBLIC + RK_N]
+    lea         rcx, [r15 * 2]
+    repe        cmpsq
+    jne         .bad
+    lea         rcx, [r15 * 2]
+.n_above:
+    cmp         ecx, HTTPASM_RSA_LIMBS
+    je          .exponents
+    cmp         qword [rbx + PK_PUBLIC + RK_N + rcx * 8], 0
+    jne         .bad
+    inc         ecx
+    jmp         .n_above
+.exponents:
+    ; dp below p, dq below q, q^-1 below p
+    lea         rdi, [rbx + PK_DP]
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.dp]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.dp_length]
+    mov         rcx, r15
+    call        rsa_load_be
+    test        eax, eax
+    jnz         .bad
+    lea         rdi, [rbx + PK_DP]
+    lea         rsi, [rbx + PK_P]
+    mov         rcx, r15
+    call        rsa_less
+    jnc         .bad
+    lea         rdi, [rbx + PK_DQ]
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.dq]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.dq_length]
+    mov         rcx, r15
+    call        rsa_load_be
+    test        eax, eax
+    jnz         .bad
+    lea         rdi, [rbx + PK_DQ]
+    lea         rsi, [rbx + PK_Q]
+    mov         rcx, r15
+    call        rsa_less
+    jnc         .bad
+    lea         rdi, [rbp + RS_TMP]
+    mov         rsi, [r12 + httpasm_rsa_private_numbers.qinv]
+    mov         rdx, [r12 + httpasm_rsa_private_numbers.qinv_length]
+    mov         rcx, r15
+    call        rsa_load_be
+    test        eax, eax
+    jnz         .bad
+    lea         rdi, [rbp + RS_TMP]
+    lea         rsi, [rbx + PK_P]
+    mov         rcx, r15
+    call        rsa_less
+    jnc         .bad
+    ; the Montgomery constants: n0, R^2 (constant time), R^3, q^-1 R
+    mov         rcx, [rbx + PK_P]
+    call        rsa_n0
+    mov         [rbx + PK_P0], rax
+    mov         rcx, [rbx + PK_Q]
+    call        rsa_n0
+    mov         [rbx + PK_Q0], rax
+    lea         rdi, [rbx + PK_RR_P]
+    lea         rsi, [rbx + PK_P]
+    mov         edx, r13d
+    mov         rcx, r15
+    mov         r8, [rbx + PK_P0]
+    call        rsa_prime_rr
+    lea         rdi, [rbx + PK_RR_Q]
+    lea         rsi, [rbx + PK_Q]
+    mov         edx, r14d
+    mov         rcx, r15
+    mov         r8, [rbx + PK_Q0]
+    call        rsa_prime_rr
+    lea         rdi, [rbx + PK_RRR_P]
+    lea         rsi, [rbx + PK_RR_P]
+    lea         rdx, [rbx + PK_RR_P]
+    lea         rcx, [rbx + PK_P]
+    mov         r8, [rbx + PK_P0]
+    mov         r9, r15
+    call        [rbp + RV_MUL]
+    lea         rdi, [rbx + PK_RRR_Q]
+    lea         rsi, [rbx + PK_RR_Q]
+    lea         rdx, [rbx + PK_RR_Q]
+    lea         rcx, [rbx + PK_Q]
+    mov         r8, [rbx + PK_Q0]
+    mov         r9, r15
+    call        [rbp + RV_MUL]
+    lea         rdi, [rbx + PK_QINV_R]
+    lea         rsi, [rbp + RS_TMP]
+    lea         rdx, [rbx + PK_RR_P]
+    lea         rcx, [rbx + PK_P]
+    mov         r8, [rbx + PK_P0]
+    mov         r9, r15
+    call        [rbp + RV_MUL]
+    ; a test signature of m = 2: wrong dp, dq or q^-1 shows here
+    lea         rdi, [rbp + RS_M]
+    xor         eax, eax
+    mov         ecx, 128
+    rep         stosq
+    mov         qword [rbp + RS_M], 2
+    call        rsa_crt
+    call        rsa_public_op
+    mov         ecx, [rbx + PK_PUBLIC + RK_LIMBS]
+    lea         rsi, [rbp + RV_ACC]
+    lea         rdi, [rbp + RS_M]
+    repe        cmpsq
+    jne         .bad
+    xor         eax, eax
+    jmp         .done
+.bad:
+    mov         rdi, [rbp + RS_PRIV]
+    xor         eax, eax
+    mov         ecx, PK_SIZE / 8
+    rep         stosq
+    mov         eax, -1
+.done:
+    RS_LEAVE
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; int httpasm_rsa_sign_pkcs1(const httpasm_rsa_private_key *key, int hash, const uint8_t *digest,
+;                            uint8_t *signature, size_t signature_length)
+; -----------------------------------------------------------------------------
+global httpasm_rsa_sign_pkcs1:function (httpasm_rsa_sign_pkcs1.end - httpasm_rsa_sign_pkcs1)
+align 16
+httpasm_rsa_sign_pkcs1:
+    RS_ENTER
+    mov         [rbp + RS_PRIV], rdi
+    lea         rax, [rdi + PK_PUBLIC]
+    mov         [rbp + RV_KEY], rax
+    mov         [rbp + RV_HASHID], rsi
+    mov         [rbp + RV_DIGEST], rdx
+    mov         [rbp + RS_OUT], rcx
+    mov         [rbp + RV_SIGLEN], r8
+    call        rsa_sign_begin
+    test        eax, eax
+    jnz         .refused                    ; (a refused key or another length: nothing written)
+    mov         esi, [rbp + RV_HASHID]
+    call        rsa_hash_info
+    test        eax, eax
+    jz          .zeroed                     ; an unknown hash
+    mov         [rbp + RV_HLEN], rax
+    call        rsa_encode_pkcs1            ; (rdx, rcx: the prefix)
+    call        rsa_sign_finish
+    jmp         .done
+.zeroed:
+    mov         rdi, [rbp + RS_OUT]
+    mov         rcx, [rbp + RV_KBYTES]
+    xor         eax, eax
+    rep         stosb
+.refused:
+    mov         eax, -1
+.done:
+    RS_LEAVE
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
+; int httpasm_rsa_sign_pss(const httpasm_rsa_private_key *key, int hash, const uint8_t *digest,
+;                          const uint8_t *salt, size_t salt_length, uint8_t *signature,
+;                          size_t signature_length)
+; -----------------------------------------------------------------------------
+global httpasm_rsa_sign_pss:function (httpasm_rsa_sign_pss.end - httpasm_rsa_sign_pss)
+align 16
+httpasm_rsa_sign_pss:
+    mov         r10, [rsp + 8]              ; the seventh argument, before the pushes move rsp
+    RS_ENTER
+    mov         [rbp + RS_PRIV], rdi
+    lea         rax, [rdi + PK_PUBLIC]
+    mov         [rbp + RV_KEY], rax
+    mov         [rbp + RV_HASHID], rsi
+    mov         [rbp + RV_DIGEST], rdx
+    mov         [rbp + RS_SALT], rcx
+    mov         [rbp + RV_SLEN], r8
+    mov         [rbp + RS_OUT], r9
+    mov         [rbp + RV_SIGLEN], r10
+    call        rsa_sign_begin
+    test        eax, eax
+    jnz         .refused
+    mov         esi, [rbp + RV_HASHID]
+    cmp         esi, HTTPASM_HASH_SHA256    ; PSS: SHA-256, -384, -512 (unsigned: negatives fail too)
+    jb          .zeroed
+    cmp         esi, HTTPASM_HASH_SHA512
+    ja          .zeroed
+    call        rsa_hash_info
+    mov         [rbp + RV_HLEN], rax
+    call        rsa_encode_pss
+    test        eax, eax
+    jnz         .zeroed                     ; the salt does not fit
+    call        rsa_sign_finish
+    jmp         .done
+.zeroed:
+    mov         rdi, [rbp + RS_OUT]
+    mov         rcx, [rbp + RV_KBYTES]
+    xor         eax, eax
+    rep         stosb
+.refused:
+    mov         eax, -1
+.done:
+    RS_LEAVE
     ret
 .end:

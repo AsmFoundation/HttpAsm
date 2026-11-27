@@ -191,6 +191,47 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: RSA signing.** RSASSA-PKCS1-v1_5 and RSASSA-PSS with SHA-256 under Project
+Wycheproof's signing keys (rsa_pkcs1_*_sig_gen: e = 65537, balanced primes; the 2048-bit one
+is the verification's key) at 2048, 3072 and 4096 bits, beside OpenSSL 3.0.13's EVP_PKEY_sign
+(the key from EVP_PKEY_fromdata with n, e, d and the five CRT numbers, the key and the context
+made once; OpenSSL blinds and checks each result under e, ours checks without blinding). PSS
+draws a 32-octet salt each call (ours with `httpasm_random`, OpenSSL from its DRBG): a TLS 1.3
+server's CertificateVerify. 5 rounds; the ratio is the paired estimate:
+
+| Case | v3 (mulx, adcx/adox, AVX2) | v1 (mul, SSE2) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| PKCS#1 v1.5, 2048 | 618 us | 1.44 ms | 701 us | 1.13x OpenSSL [1.10-1.16] |
+| PKCS#1 v1.5, 3072 | 2.10 ms | 4.48 ms | 2.11 ms | parity [0.98-1.02] |
+| PKCS#1 v1.5, 4096 | 4.77 ms | 10.89 ms | 4.85 ms | parity [0.94-1.00] |
+| PSS, 2048 | 613 us | 1.41 ms | 697 us | 1.12x OpenSSL [1.11-1.14] |
+| PSS, 3072 | 2.17 ms | 4.53 ms | 2.17 ms | parity [0.97-1.08] |
+| PSS, 4096 | 4.84 ms | 11.10 ms | 4.92 ms | parity [0.97-1.01] |
+| key init, 2048 / 3072 / 4096 | 0.60 / 2.01 / 4.55 ms | 1.36 / 4.34 / 10.42 ms | | |
+
+The tiers suite: v3 2.30x v1 at 2048 bits [2.29-2.39]. The first version (the verification's
+generic square and product in the exponentiation) signed in 743 us at 2048 bits, 0.92x
+OpenSSL's 686, and its v3 was 1.91x v1. Where the time goes at 2048 bits: two 1024-bit
+exponentiations (k = 16), each 1,051 squares, 201 products and 171 reads of the 64-entry table;
+the init's time is its test signature. What moved it, each step measured (scratchpad rsa/k16:
+the routines against copies of the generic ones, Python's numbers checking 6,000 results,
+cycles at k = 16 from a chain of dependent imuls):
+- a square and a product of their own at k = 16, in straight lines where the generic ones call
+  a routine per row and loop per 8-limb group: 705 -> 587 cycles a square, 795 -> 716 a
+  product. That is the floor: 376 multiply-accumulates a square and 512 a product at about 1.4
+  cycles each (the verification's probes below), so what was left to take was the calls,
+  the loops and the setup per row;
+- "almost Montgomery" results below R instead of below p, n subtracted once when t's top limb
+  is set, one pass masked by mulx instead of a subtraction, a borrow and a select: 587 -> 573
+  and 716 -> 709;
+- the table read sixteen limbs a pass (four ymm) instead of eight: 340 -> 300 cycles at k = 16,
+  and a few percent at 3072 and 4096 bits, which read through the same routine.
+Tried and not kept: the product in CIOS order with both rows straight (731 cycles against 709);
+two table entries a step (no faster). OpenSSL 3.0.13 at these sizes runs x86_64-mont5's
+bn_power5 (five squares and a product in one call, mulx with adcx/adox, 5-bit windows); at 3072
+and 4096 bits both sides sit at the same multiply-accumulate floor, where the generic routines'
+overhead is a small part of products of 24 and 32 limbs, hence parity there.
+
 **2026-11-27: RSA verification.** RSASSA-PKCS1-v1_5 with SHA-256 under Project Wycheproof's
 keys (e = 65537) at 2048, 3072 and 4096 bits, beside OpenSSL 3.0.13's EVP_PKEY_verify: with
 the key kept (ours prepared before the loop; OpenSSL's key and context made once, its

@@ -170,7 +170,9 @@ fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp2
 #   library takes (BER and malformed paddings, wrong hashes, the missing NULL, small and edge-case
 #   signatures), and RSASSA-PSS: MGF1 with the same hash at the salt lengths TLS 1.3 and the
 #   certificates use, the misc file's every hash pair, and SHA-1 and MGF1-SHA1 ones that must fail
-#   here (this library verifies PSS with SHA-256, -384 or -512 and MGF1 on the same hash only).
+#   here (this library verifies PSS with SHA-256, -384 or -512 and MGF1 on the same hash only);
+#   and the signing side: rsa_pkcs1_*_sig_gen, private keys (PKCS#8) with the exact PKCS#1 v1.5
+#   signatures they make at 1024 to 4096 bits.
 for pin in \
   rsa_signature_2048_sha224_test.json:81b9da6e58f8a55ccc02b96f64a1d84d93100b9767dddbc906cee52d4c7daeac \
   rsa_signature_2048_sha256_test.json:94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393 \
@@ -195,7 +197,12 @@ for pin in \
   rsa_pss_4096_sha512_mgf1_64_test.json:c93ceaa56a190c9fd4707441c5c6a75839f108202d88aec891697f9623042547 \
   rsa_pss_misc_test.json:1fac515f67fea8ccbf44ea08fde2de00cd76169f774a54ce2994c9963c31e84f \
   rsa_pss_2048_sha1_mgf1_20_test.json:96d13ecdc356a24aec01dcbef7c5a15458b78373283113c294a60f8ddf717b29 \
-  rsa_pss_2048_sha256_mgf1sha1_20_test.json:8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307; do
+  rsa_pss_2048_sha256_mgf1sha1_20_test.json:8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307 \
+  rsa_pkcs1_1024_sig_gen_test.json:d29bb1d43016e8932937554291e997dc509455373b0d3cfe89ebffaee80ec9cd \
+  rsa_pkcs1_1536_sig_gen_test.json:251da3f00f11cba07f8e89c94363e25ea16ef4b35aaa270063e4f763c283a8bd \
+  rsa_pkcs1_2048_sig_gen_test.json:587b3d27d3429f2118cb02818da4d08eb3f36f50c747939eb550fae4337ccbf0 \
+  rsa_pkcs1_3072_sig_gen_test.json:45153219d486fd135d35aa968a957a0c015c7829e8dc59bea5f87e6c30912677 \
+  rsa_pkcs1_4096_sig_gen_test.json:f13eadbec6c45291cb33e6b2fa0a0c2b862d0bd2eaec29f930d3b78067cd48c7; do
   fetch "wycheproof/${pin%%:*}" "$wycheproof/${pin%%:*}" "${pin##*:}"
 done
 

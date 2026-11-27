@@ -239,9 +239,11 @@ static void add_p256(void)
     }
 }
 
-/* add_rsa: the tiers case of RSA: a 2048-bit PKCS#1 v1.5 verification (Wycheproof's, e = 65537), the
- * key prepared before the loop, at every tier: v1's mul against v3's mulx with adcx/adox (the
- * product, the square and the reduction; the v2 tier runs v1's code, v4 v3's). */
+/* add_rsa: the tiers cases of RSA at 2048 bits, Wycheproof's keys (e = 65537), each prepared before
+ * the loop, at every tier: a PKCS#1 v1.5 verification and a PKCS#1 v1.5 signature (the CRT's
+ * two 1024-bit exponentiations: v3's own k = 16 square and product and its AVX2 gather against
+ * v1's mul and SSE2). v1's mul against v3's mulx with adcx/adox (the product, the square and the
+ * reduction; the v2 tier runs v1's code, v4 v3's). */
 static void add_rsa(void)
 {
     bench_case c;
@@ -254,6 +256,11 @@ static void add_rsa(void)
     c.octets = 0;
     c.ours = bench_rsa_verify;
     c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+    c.name = "rsa_sign";
+    c.data = (const uint8_t *)bench_rsa_private_input(0);
+    c.length = sizeof(bench_rsa_private_vector);
+    c.ours = bench_rsa_sign_pkcs1;
     bench_add(&c);
 }
 

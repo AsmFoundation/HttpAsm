@@ -75,7 +75,10 @@
     X(httpasm_p256_sign)            \
     X(httpasm_p256_verify)          \
     X(httpasm_rsa_public_key_init)  \
-    X(httpasm_rsa_verify_pkcs1)
+    X(httpasm_rsa_verify_pkcs1)     \
+    X(httpasm_rsa_private_key_init) \
+    X(httpasm_rsa_sign_pkcs1)       \
+    X(httpasm_rsa_sign_pss)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -297,6 +300,47 @@ void bench_rsa_init_verify(const bench_build *b, const bench_case *c, long calls
 
 /* bench_rsa_init: httpasm_rsa_public_key_init alone (n loaded, n0, R^2 mod n by long division). */
 void bench_rsa_init(const bench_build *b, const bench_case *c, long calls);
+
+/* An RSA signing key's input (bench_rsa_private_input, suite_rivals.c): a private key of `octets`
+ * octets (n, e = 65537, d, and the CRT's p, q, dp, dq, q^-1 mod p of `half` octets each) with a
+ * SHA-256 digest to sign, from Project Wycheproof's rsa_pkcs1_*_sig_gen vectors (balanced primes:
+ * the keys a CA issues). d is OpenSSL's alone: httpasm_rsa_private_key_init signs by the CRT
+ * numbers and takes no d. A case's data points at one; its length is the structure's size. */
+typedef struct bench_rsa_private_vector {
+    size_t octets;
+    size_t half;
+    uint8_t n[512];
+    uint8_t e[3];
+    uint8_t d[512];
+    uint8_t p[256];
+    uint8_t q[256];
+    uint8_t dp[256];
+    uint8_t dq[256];
+    uint8_t qinv[256];
+    uint8_t digest[32];
+} bench_rsa_private_vector;
+
+/* bench_rsa_private_input: the 2048-, 3072- or 4096-bit signing key (which = 0, 1, 2), decoded
+ * from the hex on first use (a key that does not decode ends the process: the embedded hex is
+ * wrong); NULL for any other `which`. */
+const bench_rsa_private_vector *bench_rsa_private_input(size_t which);
+
+/* bench_rsa_sign_pkcs1: httpasm_rsa_sign_pkcs1 of the vector's digest, the key prepared once
+ * before the loop (a server's certificate key, kept for its life). Deterministic: every call makes
+ * the same signature. */
+void bench_rsa_sign_pkcs1(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_rsa_sign_pss: a TLS 1.3 server's CertificateVerify under an RSA certificate (RFC 8446
+ * 4.2.3 leaves it RSASSA-PSS alone): a 32-octet salt drawn with httpasm_random, then
+ * httpasm_rsa_sign_pss of the vector's digest with SHA-256, each call; the key prepared once. */
+void bench_rsa_sign_pss(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_rsa_private_init: httpasm_rsa_private_key_init alone: the public part prepared (R^2 mod n
+ * by long division), the numbers checked (n = p q, dp, dq and q^-1 below their primes), each
+ * prime's n0, R^2 (constant time) and R^3, q^-1 into Montgomery form, and a test signature of 2
+ * checked under e (a whole CRT exponentiation: most of the time). A server's work once per key it
+ * loads. */
+void bench_rsa_private_init(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */

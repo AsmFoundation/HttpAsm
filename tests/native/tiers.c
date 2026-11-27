@@ -2066,6 +2066,157 @@ static int rsa_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_rsa_private_key_init, httpasm_rsa_sign_*: RSA signing by versions (rsa.asm) ----
+ * v3 runs the CRT's products, squares, reductions and table reads with mulx, adcx/adox and AVX2;
+ * v1 and v2 with mul and SSE2. Two keys (made once with OpenSSL; their numbers below, n, e, p, q,
+ * dp, dq, q^-1): a 1024-bit one (k = 8: the generic square and product) and a 2048-bit one (k =
+ * 16: v3's exponentiation runs its own square and product, whose results stay below R, not below
+ * the prime). Each prepares to the same octets at every tier, each of its seven numbers against
+ * the guard page in turn; then each round's PKCS#1 v1.5 and PSS signatures (SHA-256, a random
+ * digest, a random salt of 0 to 64 octets) are equal at every tier, verify under the key's public
+ * part and leave the octets after them untouched; the digest or the salt sits against the guard. */
+static const char *const rsa_private_hex_1024[7] = {
+    "c0101f8934307c57c9481985b2c13a4635b129c5e056d1a92223c1cfd779dfebf35416f4c8958c30dc47f0fb0bc09a53"
+    "003ccda0bc20780d1385fb37a395d1d2cd31fb4cfddbd5d3c92a8dc280c064afb4949654d14c378077254b88fb05f50b"
+    "0e7b1aa23725f33950ce06ddb946301ba3517e329a86fc1f834f90c395c4bdfb",
+    "010001",
+    "fcfbb4ac50e3f6fcdae2f17ba12b173a6181d29cd0a7cdc057388f6e9f3dbfea3abaa140bd8b162968e7bf4a5f521284"
+    "232f373385a16adb5a3b41bc0777a3f3",
+    "c25a717767c752d84290507bf0a549277f92fdc6b9fba9e668ceb6a500feea564f9d234f930d43fd7f25ce488f7b8c23"
+    "83073343c650342a6e8bc348950c67d9",
+    "6f1f54fe37cddaa8b8b0e4e7ac249460658233f403c7219e71f17b375925338e7c5b8c0736fac8324a4d397e3e9e7b59"
+    "a566d0f585a6209cd7669dfa2cc185b7",
+    "223b39d6f52167570dca4b52b91cf3989060bc6fff1bf35dd0c1efeb7a146c03cdbbf89730685abc5063c14488791342"
+    "c1f647b23d40ad1f781f07c345f54c69",
+    "e0bdd098c4795787e564eac34f8cfbc0005861c7a642ab493c90299f50c706efbc241e61d9ab09cb0c427ccbc612b3ca"
+    "be48f67395a08504a38f44c720999132"
+};
+
+static const char *const rsa_private_hex_2048[7] = {
+    "e421764c563244426247031d997d47d08c5003303181239b41bdac0d338f0c4344084ca53d8038b43ea65b01b7db1c48"
+    "b9461a5dcf2f4836bf060d007378322e8aa96a3ac6f61283630276041fe946d796b0a6bf8ab895e8b5ff28d1934bc99c"
+    "278e30e895da211ae2b3b15db045df3f9cd71595ae15471a3d47b18fa0828d00d7048487ed756ca97600450e8695aa83"
+    "0e59f9acaa65e0f016d4be59b90a473f5dcf00e0ffe8a4b42681aa56f72cda8d16ff5d42c6b46c748fa3830fe372d9bc"
+    "6cb2af81ce698298d5d7c38958c43863b29dbcb7c0f1529ad9a49f6b5362437d16a52a5c8c12af81624a1d941db818cf"
+    "cf5e8d8bda19556398ae08e502f82763",
+    "010001",
+    "feb0f65ae82f63e64d084f356bd5223b8250065bbeace771710a93b3e60e438491a72d884d8e4a391f7e1bcc7b6d40ff"
+    "96b2c61a8fc9a8532f150b3a21d8e21a6047655fb8749fd6cc42ef76d408cd5612ee569084b26546a01709bf4cb1b065"
+    "0278dc823802270db5796931440d8876249675808b6fa6bdebe5935e5cdecf79",
+    "e54d8f6ea255db59d5a3f12c36df5be764b15878b7b0493dd7c3e8ec10c5594917490411d3aaf331093202992dd3ac06"
+    "3904de6e14eaa020612fe2671cf4b9da7fd5c78417bf1a2a0e3a7f0852ca0de0455320d305b33385e348b9ce7e132ad0"
+    "343b96577c6a683865bb8447dd247b7d671d6cc28ad358e73cba3c0ff8a2eabb",
+    "aef726e6a0a71dbbf2a388b6ac5388e6d4c8e0f559f232350e7133b2dc9263f3c893ce85dab1ab6fbea0c5bc1df69a36"
+    "7b7269018a52009ed4b3623917538550955fb6d6a1430d2364c37efa65037efc6898ef42ecc619290185921ea7335278"
+    "b1d011bc2b79df165ddb0056e5e75e1dbb58d973eb5652781a7c6656e6f9f211",
+    "28826d4684535aaf2239165053595e6920b6dc04679f333143bf0e9535d9478ecc185029be15436574546b75184d7ee4"
+    "928a33a98af470598811e79383e0103d73bc16c55554a390ae76d31e6b51dae5b6199b80ec4ede5956eff03374be7a1f"
+    "d23a7cb2f3fdf06f96396c832da45654af34d993fce69d9c2c74524c1806e025",
+    "8d0b3783e80edb1e0516632d8944f1f0dff3434c190790ff41d3880eb48dd0eb88266f38c1b52c44925e78f7972da9ae"
+    "780c5ffd85987253d62c094dfdd76397435a8d37a0efb8fb89f7d884a0db3705b9c6c22a950bc5dec7ed5ce3fdb394f5"
+    "d0df1034b35da43c04b5f9ea809609020a1b48862715914a7dac2b6ee69a368d"
+};
+
+/* rsa_sign_tiers: the check above on the key of `hex` (n, e, p, q, dp, dq, q^-1) whose modulus has
+ * `octets` octets (128 or 256), `randoms` rounds. Returns 0, 1 on a difference, 2 when the hex does
+ * not decode. */
+static int rsa_sign_tiers(const char *const hex[7], size_t octets_n, long randoms)
+{
+    static uint8_t octets[7][256];
+    static httpasm_rsa_private_key keys[TIERS];
+    size_t lengths[7];
+    for (int i = 0; i < 7; i++) {
+        lengths[i] = hex_octets(hex[i], octets[i]);
+        if (lengths[i] == 0) {
+            fprintf(stderr, "rsa_sign_tiers: the embedded key does not decode\n");
+            return 2;
+        }
+    }
+    for (size_t t = 0; t < TIERS; t++) {
+        httpasm_cpu_limit(caps[t]);
+        for (int at = 0; at < 7; at++) {
+            const uint8_t *place[7];
+            for (int i = 0; i < 7; i++)
+                place[i] = octets[i];
+            uint8_t *guarded = page_end - lengths[at];
+            memcpy(guarded, octets[at], lengths[at]);
+            place[at] = guarded;
+            httpasm_rsa_private_numbers numbers = {
+                place[0], lengths[0], place[1], lengths[1], place[2], lengths[2], place[3], lengths[3],
+                place[4], lengths[4], place[5], lengths[5], place[6], lengths[6],
+            };
+            httpasm_rsa_private_key key;
+            if (httpasm_rsa_private_key_init(&key, &numbers) != 0) {
+                fprintf(stderr, "httpasm_rsa_private_key_init at %s refused the key (number %d against the guard)\n", cap_names[t], at);
+                return 1;
+            }
+            if (at == 0)
+                keys[t] = key;
+            else if (memcmp(&key, &keys[t], sizeof key) != 0) {
+                fprintf(stderr, "httpasm_rsa_private_key_init at %s: number %d against the guard prepares another key\n", cap_names[t], at);
+                return 1;
+            }
+        }
+        if (memcmp(&keys[t], &keys[0], sizeof keys[0]) != 0) {
+            fprintf(stderr, "httpasm_rsa_private_key_init at %s differs from v1\n", cap_names[t]);
+            return 1;
+        }
+    }
+
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        uint8_t digest[32], salt[64], expected[2][256];
+        size_t salt_length = (size_t)(rng() % 65);
+        for (size_t k = 0; k < 32; k++)
+            digest[k] = (uint8_t)rng();
+        for (size_t k = 0; k < sizeof salt; k++)
+            salt[k] = (uint8_t)rng();
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            const uint8_t *d = digest, *s = salt;
+            if (i % 2 == 0) {
+                uint8_t *at = page_end - 32;
+                memcpy(at, digest, 32);
+                d = at;
+            } else if (salt_length > 0) {
+                uint8_t *at = page_end - salt_length;
+                memcpy(at, salt, salt_length);
+                s = at;
+            }
+            uint8_t out[2][256 + 16];
+            memset(out, 0xC3, sizeof out);
+            int signed_pkcs1 = httpasm_rsa_sign_pkcs1(&keys[0], HTTPASM_HASH_SHA256, d, out[0], octets_n);
+            int signed_pss = httpasm_rsa_sign_pss(&keys[0], HTTPASM_HASH_SHA256, d, s, salt_length, out[1], octets_n);
+            for (size_t k = octets_n; k < octets_n + 16; k++) {
+                if (out[0][k] != 0xC3 || out[1][k] != 0xC3) {
+                    fprintf(stderr, "httpasm_rsa_sign_* at %s wrote past the signature (%zu bits)\n", cap_names[t], octets_n * 8);
+                    return 1;
+                }
+            }
+            const httpasm_rsa_public_key *public_key = (const httpasm_rsa_public_key *)&keys[0];
+            if (signed_pkcs1 != 0 || signed_pss != 0 || httpasm_rsa_verify_pkcs1(public_key, HTTPASM_HASH_SHA256, d, out[0], octets_n) != 0
+                || httpasm_rsa_verify_pss(public_key, HTTPASM_HASH_SHA256, d, salt_length, out[1], octets_n) != 0) {
+                fprintf(stderr, "httpasm_rsa_sign_* at %s: signed %d/%d, or its signature does not verify (%zu bits, salt %zu)\n",
+                        cap_names[t], signed_pkcs1, signed_pss, octets_n * 8, salt_length);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected[0], out[0], octets_n);
+                memcpy(expected[1], out[1], octets_n);
+            } else if (memcmp(out[0], expected[0], octets_n) != 0 || memcmp(out[1], expected[1], octets_n) != 0) {
+                fprintf(stderr, "httpasm_rsa_sign_* at %s (features %#llx) differs from v1 (%zu bits, salt %zu)\n", cap_names[t],
+                        (unsigned long long)features, octets_n * 8, salt_length);
+                dump("digest", digest, 32);
+                return 1;
+            }
+        }
+        checked++;
+    }
+    printf("httpasm_rsa_sign_*: %zu-bit key: %ld rounds of both signatures at every tier, every one equal to v1's and verified; the key alike at every tier\n",
+           octets_n * 8, checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -2335,6 +2486,10 @@ int main(int argc, char **argv)
         failed = p256_tiers(randoms / 1000);
     if (!failed)
         failed = rsa_tiers(randoms / 1000);
+    if (!failed)
+        failed = rsa_sign_tiers(rsa_private_hex_1024, 128, randoms / 1000);
+    if (!failed)
+        failed = rsa_sign_tiers(rsa_private_hex_2048, 256, randoms / 4000);   /* (v1 signs it in 1.4 ms) */
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

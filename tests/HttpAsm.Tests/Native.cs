@@ -323,6 +323,35 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_rsa_verify_pss")]
     internal static partial int RsaVerifyPss(RsaPublicKey* key, int hash, byte* digest, nuint saltLength, byte* signature, nuint signatureLength);
 
+    /// <summary>int httpasm_rsa_private_key_init(key, numbers).</summary>
+    /// <param name="key">Receives the key; all zeros when refused.</param>
+    /// <param name="numbers">An RSAPrivateKey's numbers (n, e, p, q, dp, dq, qinv).</param>
+    /// <returns>0, or -1 for a refused public part, a prime even, 1 or over 4096 bits, p q not n, dp, dq or qinv out of range, or a test signature that fails.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_private_key_init")]
+    internal static partial int RsaPrivateKeyInit(RsaPrivateKey* key, RsaPrivateNumbers* numbers);
+
+    /// <summary>int httpasm_rsa_sign_pkcs1(key, hash, digest, signature, signature_length).</summary>
+    /// <param name="key">A key from <see cref="RsaPrivateKeyInit"/>.</param>
+    /// <param name="hash">HTTPASM_HASH_*: 1 SHA-1 to 5 SHA-512.</param>
+    /// <param name="digest">The digest, that hash's length.</param>
+    /// <param name="signature">Receives the signature.</param>
+    /// <param name="signatureLength">The modulus' octets (any other: -1, nothing written).</param>
+    /// <returns>0, or -1 (the signature zeroed when its length was right).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_sign_pkcs1")]
+    internal static partial int RsaSignPkcs1(RsaPrivateKey* key, int hash, byte* digest, byte* signature, nuint signatureLength);
+
+    /// <summary>int httpasm_rsa_sign_pss(key, hash, digest, salt, salt_length, signature, signature_length).</summary>
+    /// <param name="key">A key from <see cref="RsaPrivateKeyInit"/>.</param>
+    /// <param name="hash">3 SHA-256, 4 SHA-384 or 5 SHA-512 (MGF1 with the same hash).</param>
+    /// <param name="digest">The digest.</param>
+    /// <param name="salt">The salt (null when saltLength is 0).</param>
+    /// <param name="saltLength">Its length.</param>
+    /// <param name="signature">Receives the signature.</param>
+    /// <param name="signatureLength">The modulus' octets.</param>
+    /// <returns>0, or -1 (the signature zeroed when its length was right).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_sign_pss")]
+    internal static partial int RsaSignPss(RsaPrivateKey* key, int hash, byte* digest, byte* salt, nuint saltLength, byte* signature, nuint signatureLength);
+
     /// <summary>int httpasm_random(void *buffer, size_t length).</summary>
     /// <param name="buffer">Receives the random octets (anything when length is 0).</param>
     /// <param name="length">How many.</param>

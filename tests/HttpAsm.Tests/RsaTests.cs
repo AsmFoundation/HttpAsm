@@ -1,3 +1,4 @@
+using System.Formats.Asn1;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
@@ -649,6 +650,383 @@ public sealed unsafe class RsaTests
     }
 
     // -------------------------------------------------------------------------------------------
+    // Signing
+    // -------------------------------------------------------------------------------------------
+
+    /// <summary>The private key's and its numbers' layouts, as the library reports them (struct sizes 17 and 18).</summary>
+    [Fact]
+    public void HasThePrivateKeysLayout()
+    {
+        Platform.RequireLinuxX64();
+        Assert.Equal(6720, sizeof(RsaPrivateKey));
+        Assert.Equal((uint)sizeof(RsaPrivateKey), Native.StructSize(17));
+        Assert.Equal(112, sizeof(RsaPrivateNumbers));
+        Assert.Equal((uint)sizeof(RsaPrivateNumbers), Native.StructSize(18));
+    }
+
+    /// <summary>
+    /// Project Wycheproof's RSASSA-PKCS1-v1_5 generation tests: every group's private key (PKCS#8,
+    /// read here with AsnReader: .NET's own import refuses the e = 3 keys, whose primes are 2:1 in
+    /// size - 681 and 343 bits in a 1024-bit key - and which make the short signatures and the
+    /// ones close to n) signs every message's digest to exactly the file's signature (PKCS#1 v1.5 is
+    /// deterministic), the "acceptable" ones - small moduli and weak hashes, which a caller may
+    /// refuse - alike, and each signature verifies under the key's own public part.
+    /// </summary>
+    /// <param name="file">The file under wycheproof/.</param>
+    /// <param name="tests">Its test count.</param>
+    [Theory]
+    [InlineData("rsa_pkcs1_1024_sig_gen_test.json", 33)]
+    [InlineData("rsa_pkcs1_1536_sig_gen_test.json", 32)]
+    [InlineData("rsa_pkcs1_2048_sig_gen_test.json", 43)]
+    [InlineData("rsa_pkcs1_3072_sig_gen_test.json", 26)]
+    [InlineData("rsa_pkcs1_4096_sig_gen_test.json", 24)]
+    public void SignsAsWycheproofsVectorsDo(string file, int tests)
+    {
+        Platform.RequireLinuxX64();
+        int count = 0;
+        foreach ((JsonElement group, JsonElement test) in Vectors.WycheproofTests(Vectors.Path("wycheproof/" + file)))
+        {
+            string id = $"tcId {test.GetProperty("tcId").GetInt32()}: {test.GetProperty("comment").GetString()}";
+            BigInteger[] numbers = Pkcs8RsaNumbers(Hex(group.GetProperty("privateKeyPkcs8").GetString()!));
+            (int result, RsaPrivateKey key) = PrivateInit(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5], numbers[6]);
+            Assert.True(result == 0, id);
+            string hash = group.GetProperty("sha").GetString()!;
+            byte[] digest = Digest(hash, Hex(test.GetProperty("msg").GetString()!));
+            byte[] expected = Hex(test.GetProperty("sig").GetString()!);
+            (int signed, byte[] signature) = SignPkcs1(ref key, HashId(hash), digest, expected.Length);
+            Assert.True(signed == 0, id);
+            Assert.True(Convert.ToHexString(expected) == Convert.ToHexString(signature), id);
+            Assert.True(VerifyPkcs1(ref key.Public, HashId(hash), digest, signature) == 0, id);
+            count++;
+        }
+
+        Assert.Equal(tests, count);
+    }
+
+    /// <summary>
+    /// FIPS 186-3's SigGen15 and SigGenPSS answer files (the .txt ones: they carry each key's d
+    /// and every PSS signature's SaltVal, which the .rsp ones leave out), signed here: each key's
+    /// primes recovered from n, e and d (SP 800-56B's probabilistic recovery: the files give no
+    /// p or q), then the 80 PKCS#1 v1.5 signatures (2048 and 3072 bits, SHA-224 to SHA-512) equal
+    /// the file's octet for octet, and so do the 60 PSS ones with SHA-256, SHA-384 and SHA-512
+    /// under the file's salts; the 20 PSS ones with SHA-224 are refused with the signature zeroed.
+    /// </summary>
+    [Fact]
+    public void SignsAsNistsSigGenRecordsDo()
+    {
+        Platform.RequireLinuxX64();
+        foreach (bool pss in new[] { false, true })
+        {
+            string file = pss ? "cavp/rsa/SigGenPSS_186-3.txt" : "cavp/rsa/SigGen15_186-3.txt";
+            string? modulus = null, exponent = null, privateExponent = null;
+            RsaPrivateKey key = default;
+            int count = 0, signedExactly = 0;
+            foreach (Dictionary<string, string> record in Vectors.CavpRecords(Vectors.Path(file)))
+            {
+                if (record.TryGetValue("d", out string? d))
+                {
+                    privateExponent = d;
+                }
+
+                if (TrackKey(record, ref modulus, ref exponent))
+                {
+                    // a key's record (n, or e with d): the key is prepared once its d has come
+                    if (record.ContainsKey("d"))
+                    {
+                        BigInteger n = Unsigned(Hex(modulus!)), e = Unsigned(Hex(exponent!)), dd = Unsigned(Hex(privateExponent!));
+                        (BigInteger p, BigInteger q) = RecoverPrimes(n, e, dd);
+                        int result;
+                        (result, key) = PrivateInit(n, e, p, q, dd % (p - 1), dd % (q - 1), ModInverse(q, p));
+                        Assert.True(result == 0, $"{file} {record["mod"]}: the key");
+                    }
+
+                    continue;
+                }
+
+                string hash = Dashed(record["SHAAlg"]);
+                byte[] digest = Digest(hash, Hex(record["Msg"]));
+                byte[] expected = Hex(record["S"]);
+                string what = $"{file} {record["mod"]} {hash} #{count}";
+                (int signed, byte[] signature) = pss
+                    ? SignPss(ref key, HashId(hash), digest, Hex(record["SaltVal"]), expected.Length, fill: 0xA5)
+                    : SignPkcs1(ref key, HashId(hash), digest, expected.Length);
+                if (pss && !PssHashes.Contains(hash))
+                {
+                    Assert.True(signed == -1 && signature.All(o => o == 0), what + ": refused, zeroed");
+                }
+                else
+                {
+                    Assert.True(signed == 0, what);
+                    Assert.True(Convert.ToHexString(expected) == Convert.ToHexString(signature), what);
+                    signedExactly++;
+                }
+
+                count++;
+            }
+
+            Assert.Equal(80, count);
+            Assert.Equal(pss ? 60 : 80, signedExactly);
+        }
+    }
+
+    /// <summary>
+    /// .NET's RSA (the platform's OpenSSL) on fresh keys of 1024, 1032, 2048, 2056, 3072 and 4096
+    /// bits: our PKCS#1 v1.5 signatures with SHA-1, SHA-256, SHA-384 and SHA-512 equal .NET's octet
+    /// for octet; our PSS signatures with random salts of the hash's length (TLS 1.3's) verify under
+    /// .NET and under our own verification, and equal the model's encoding signed with d.
+    /// </summary>
+    [Fact]
+    [Requirement("RFC8017-8-p3")]
+    public void SignsAsDotNetDoes()
+    {
+        Platform.RequireLinuxX64();
+        var random = new Random(2056);
+        foreach (int bits in new[] { 1024, 1032, 2048, 2056, 3072, 4096 })
+        {
+            using var rsa = RSA.Create(bits);
+            RSAParameters parameters = rsa.ExportParameters(includePrivateParameters: true);
+            (int result, RsaPrivateKey key) = PrivateInit(parameters);
+            Assert.Equal(0, result);
+            var model = new ModelKey(Unsigned(parameters.Modulus!), Unsigned(parameters.Exponent!), Unsigned(parameters.D!));
+            foreach (string hash in new[] { "SHA-1", "SHA-256", "SHA-384", "SHA-512" })
+            {
+                HashAlgorithmName name = new(hash.Replace("-", "", StringComparison.Ordinal));
+                byte[] digest = Digest(hash, RandomBytes(random, 1 + random.Next(100)));
+                (int signed, byte[] signature) = SignPkcs1(ref key, HashId(hash), digest, model.Octets);
+                Assert.Equal(0, signed);
+                Assert.Equal(Convert.ToHexString(rsa.SignHash(digest, name, RSASignaturePadding.Pkcs1)), Convert.ToHexString(signature));
+                if (hash == "SHA-1" || model.Octets - 1 < 2 * digest.Length + 2)
+                {
+                    continue;                   // no PSS with SHA-1; nor a salt of hLen past emLen
+                }
+
+                byte[] salt = RandomBytes(random, digest.Length);
+                (signed, signature) = SignPss(ref key, HashId(hash), digest, salt, model.Octets);
+                Assert.Equal(0, signed);
+                Assert.True(rsa.VerifyHash(digest, signature, name, RSASignaturePadding.Pss), $"{bits} {hash}: ours under .NET");
+                Assert.Equal(0, VerifyPss(ref key.Public, HashId(hash), digest, (nuint)salt.Length, signature));
+                Assert.Equal(Convert.ToHexString(model.Sign(EncodePss(hash, digest, salt, model.Bits - 1))), Convert.ToHexString(signature));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keys from chosen primes at sizes .NET does not make: 1025 bits (2^512 + 145 and 2^512 + 727)
+    /// and 2049 bits (2^1024 + 643 and 2^1024 + 1081: one limb past 1024 bits, so both primes run
+    /// on 24 limbs; PSS's encoded message is an octet short of the signature), with e = 3 and
+    /// 65537 (each prime has gcd(3 * 65537, p - 1) = 1, found offline by Miller-Rabin). PKCS#1
+    /// v1.5 with all five hashes and PSS with SHA-256, SHA-384 and SHA-512 at salts of 0, 1, the
+    /// hash's length and the largest that fits are equal to the BigInteger model's (RSASP1 with d)
+    /// and verify.
+    /// </summary>
+    [Fact]
+    public void SignsAsTheModelDoesAtOddSizes()
+    {
+        Platform.RequireLinuxX64();
+        var random = new Random(1025);
+        Dictionary<string, byte[]> prefixes = Rfc8017Prefixes();
+        foreach ((BigInteger p, BigInteger q) in new[]
+        {
+            ((BigInteger.One << 512) + 145, (BigInteger.One << 512) + 727),
+            ((BigInteger.One << 1024) + 643, (BigInteger.One << 1024) + 1081),
+        })
+        {
+            foreach (BigInteger e in new BigInteger[] { 3, 65537 })
+            {
+                BigInteger n = p * q, lcm = (p - 1) * (q - 1) / BigInteger.GreatestCommonDivisor(p - 1, q - 1);
+                BigInteger d = ModInverse(e, lcm);
+                (int result, RsaPrivateKey key) = PrivateInit(n, e, p, q, d % (p - 1), d % (q - 1), ModInverse(q, p));
+                Assert.Equal(0, result);
+                var model = new ModelKey(n, e, d);
+                Assert.Equal(model.Bits <= 1088 ? 16u : 24u, key.Limbs);
+                foreach (string hash in Pkcs1Hashes)
+                {
+                    byte[] digest = Digest(hash, RandomBytes(random, 30));
+                    (int signed, byte[] signature) = SignPkcs1(ref key, HashId(hash), digest, model.Octets);
+                    Assert.Equal(0, signed);
+                    Assert.Equal(Convert.ToHexString(model.Sign(EncodePkcs1(prefixes[hash], digest, model.Octets))), Convert.ToHexString(signature));
+                    Assert.Equal(0, VerifyPkcs1(ref key.Public, HashId(hash), digest, signature));
+                }
+
+                int emLength = (model.Bits - 1 + 7) / 8;
+                foreach (string hash in PssHashes)
+                {
+                    byte[] digest = Digest(hash, RandomBytes(random, 30));
+                    int largest = emLength - digest.Length - 2;
+                    foreach (int saltLength in new[] { 0, 1, digest.Length, largest }.Where(l => l <= largest).Distinct())
+                    {
+                        byte[] salt = RandomBytes(random, saltLength);
+                        (int signed, byte[] signature) = SignPss(ref key, HashId(hash), digest, saltLength == 0 ? null : salt, model.Octets);
+                        string what = $"{model.Bits} e {e} {hash} salt {saltLength}";
+                        Assert.True(signed == 0, what);
+                        Assert.True(Convert.ToHexString(model.Sign(EncodePss(hash, digest, salt, model.Bits - 1))) == Convert.ToHexString(signature), what);
+                        Assert.True(VerifyPss(ref key.Public, HashId(hash), digest, (nuint)saltLength, signature) == 0, what);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The private keys the init must refuse, each leaving zeros over a pattern that filled the key
+    /// first, each of its checks in turn: the public part refused (n even); p or q even, 0 or 1
+    /// (no primes: 0 has no bits at all), or of 4097 bits (more than 64 limbs); p q not n, and p q
+    /// equal to n's low limbs with a limb of n above them (n = p q + 2^2048, a valid public key
+    /// itself); dp, dq or qinv longer than the primes' limbs (2^1024 + 1: 17 limbs where the
+    /// primes take 16); dp = p, dq = q, qinv = p (out of range); dp, dq or qinv one bit off, and p
+    /// and q swapped (qinv then wrong), all caught by the init's test signature. Signing under a
+    /// refused key fails with nothing written, a signature of length 0 too. (Primes of unequal
+    /// sizes are taken: SignsAsWycheproofsVectorsDo signs with 2:1 ones.)
+    /// </summary>
+    [Fact]
+    public void RefusesInconsistentPrivateKeys()
+    {
+        Platform.RequireLinuxX64();
+        using var rsa = RSA.Create(2048);
+        RSAParameters g = rsa.ExportParameters(includePrivateParameters: true);
+        BigInteger n = Unsigned(g.Modulus!), e = Unsigned(g.Exponent!), p = Unsigned(g.P!), q = Unsigned(g.Q!);
+        BigInteger dp = Unsigned(g.DP!), dq = Unsigned(g.DQ!), qinv = Unsigned(g.InverseQ!);
+        BigInteger large = (BigInteger.One << 4096) + 1, wide = (BigInteger.One << 1024) + 1;
+        (BigInteger[] Numbers, string What)[] cases =
+        [
+            ([n - 1, e, p, q, dp, dq, qinv], "n even"),
+            ([n, e, p - 1, q, dp, dq, qinv], "p even"),
+            ([n, e, p, q - 1, dp, dq, qinv], "q even"),
+            ([n, e, 0, q, dp, dq, qinv], "p = 0"),
+            ([n, e, 1, n, dp, dq, qinv], "p = 1 (q = n)"),
+            ([n, e, n, 1, dp, dq, qinv], "q = 1 (p = n)"),
+            ([n, e, large, q, dp, dq, qinv], "p of 4097 bits"),
+            ([n, e, p, large, dp, dq, qinv], "q of 4097 bits"),
+            ([n, e, p + 2, q, dp, dq, qinv], "p q not n"),
+            ([n + (BigInteger.One << 2048), e, p, q, dp, dq, qinv], "a limb of n above p q"),
+            ([n, e, p, q, wide, dq, qinv], "dp past the primes' limbs"),
+            ([n, e, p, q, dp, wide, qinv], "dq past the primes' limbs"),
+            ([n, e, p, q, dp, dq, wide], "qinv past the primes' limbs"),
+            ([n, e, p, q, p, dq, qinv], "dp = p"),
+            ([n, e, p, q, dp, q, qinv], "dq = q"),
+            ([n, e, p, q, dp, dq, p], "qinv = p"),
+            ([n, e, p, q, dp ^ 2, dq, qinv], "dp one bit off"),
+            ([n, e, p, q, dp, dq ^ 2, qinv], "dq one bit off"),
+            ([n, e, p, q, dp, dq, qinv ^ 2], "qinv one bit off"),
+            ([n, e, q, p, dq, dp, qinv], "p and q swapped (qinv is q's)"),
+        ];
+        foreach ((BigInteger[] numbers, string what) in cases)
+        {
+            RsaPrivateKey key;
+            new Span<byte>(&key, sizeof(RsaPrivateKey)).Fill(0xA5);
+            int result = PrivateInitInto(&key, numbers);
+            Assert.True(result == -1, what);
+            Assert.True(new ReadOnlySpan<byte>(&key, sizeof(RsaPrivateKey)).IndexOfAnyExcept((byte)0) < 0, what + ": the key not all zeros");
+            byte[] digest = SHA256.HashData("refused"u8);
+            foreach (int length in new[] { 0, 256 })
+            {
+                byte[] untouched = new byte[length];
+                Array.Fill(untouched, (byte)0xA5);
+                (int signed, byte[] signature) = SignPkcs1(ref key, 3, digest, length, fill: 0xA5);
+                Assert.True(signed == -1 && signature.SequenceEqual(untouched), what);
+                (signed, signature) = SignPss(ref key, 3, digest, digest, length, fill: 0xA5);
+                Assert.True(signed == -1 && signature.SequenceEqual(untouched), what);
+            }
+        }
+
+        (int accepted, RsaPrivateKey good) = PrivateInit(g);
+        Assert.Equal(0, accepted);
+        Assert.Equal(16u, good.Limbs);
+    }
+
+    /// <summary>
+    /// Signing calls outside the rules under a good key: a signature length one short or one long
+    /// (-1, nothing written: the buffer's size is not known); hash identifiers 0, 6, -1,
+    /// int.MinValue and int.MaxValue for both functions, and SHA-1's and SHA-224's for PSS (-1, the
+    /// signature zeroed); a salt that does not fit, emLen - hLen - 1 octets, a length of 2^64 - 1
+    /// whose sum with hLen wraps, and one of 2^64 - 33 whose sum with hLen does not but whose sum
+    /// with hLen + 2 does (RFC 8017 9.1.1 step 3's two additions: -1, zeroed, the salt not read);
+    /// an empty salt passed as null works.
+    /// </summary>
+    [Fact]
+    public void RefusesSigningOutsideTheRules()
+    {
+        Platform.RequireLinuxX64();
+        using var rsa = RSA.Create(2048);
+        (int result, RsaPrivateKey key) = PrivateInit(rsa.ExportParameters(includePrivateParameters: true));
+        Assert.Equal(0, result);
+        byte[] digest = SHA256.HashData("outside the rules"u8);
+        foreach (int length in new[] { 255, 257 })
+        {
+            byte[] untouched = Enumerable.Repeat((byte)0xA5, length).ToArray();
+            (int signed, byte[] signature) = SignPkcs1(ref key, 3, digest, length, fill: 0xA5);
+            Assert.True(signed == -1 && signature.SequenceEqual(untouched));
+            (signed, signature) = SignPss(ref key, 3, digest, digest, length, fill: 0xA5);
+            Assert.True(signed == -1 && signature.SequenceEqual(untouched));
+        }
+
+        foreach (int hash in new[] { 0, 6, -1, int.MinValue, int.MaxValue })
+        {
+            (int signed, byte[] signature) = SignPkcs1(ref key, hash, digest, 256, fill: 0xA5);
+            Assert.True(signed == -1 && signature.All(o => o == 0), $"PKCS#1 hash {hash}");
+            (signed, signature) = SignPss(ref key, hash, digest, digest, 256, fill: 0xA5);
+            Assert.True(signed == -1 && signature.All(o => o == 0), $"PSS hash {hash}");
+        }
+
+        foreach (int hash in new[] { 1, 2 })
+        {
+            (int signed, byte[] signature) = SignPss(ref key, hash, digest[..(hash == 1 ? 20 : 28)], digest, 256, fill: 0xA5);
+            Assert.True(signed == -1 && signature.All(o => o == 0), $"PSS hash {hash}");
+        }
+
+        (int tooLong, byte[] zeroed) = SignPss(ref key, 3, digest, new byte[256 - 32 - 1], 256, fill: 0xA5);
+        Assert.True(tooLong == -1 && zeroed.All(o => o == 0));
+        foreach (nuint saltLength in new[] { nuint.MaxValue, nuint.MaxValue - 32 })
+        {
+            byte[] wraps = new byte[256];
+            Array.Fill(wraps, (byte)0xA5);
+            fixed (byte* d = digest)
+            fixed (byte* s = wraps)
+            {
+                // the salt pointer is the digest's 32 octets: a length this large must be refused
+                // before anything reads the salt
+                Assert.Equal(-1, Native.RsaSignPss(&key, 3, d, d, saltLength, s, 256));
+            }
+
+            Assert.True(wraps.All(o => o == 0), $"salt length {saltLength}");
+        }
+
+        (int empty, byte[] withoutSalt) = SignPss(ref key, 3, digest, null, 256);
+        Assert.Equal(0, empty);
+        Assert.Equal(0, VerifyPss(ref key.Public, 3, digest, 0, withoutSalt));
+    }
+
+    /// <summary>
+    /// The fault check: one bit flipped in the key after its init - in dp, dq, q^-1 R, or p's
+    /// R^3 - makes one half of the CRT wrong, so s^e mod n is not m: the signature comes back -1
+    /// and zeroed instead of a value that would hand out a prime (gcd(s^e - m, n) is p or q: Boneh,
+    /// DeMillo and Lipton's attack). Each fault is then mended and the key signs again.
+    /// </summary>
+    [Fact]
+    public void RefusesAFaultyCrtResult()
+    {
+        Platform.RequireLinuxX64();
+        using var rsa = RSA.Create(2048);
+        (int result, RsaPrivateKey key) = PrivateInit(rsa.ExportParameters(includePrivateParameters: true));
+        Assert.Equal(0, result);
+        byte[] digest = SHA256.HashData("a fault"u8);
+        (int signed, byte[] good) = SignPkcs1(ref key, 3, digest, 256);
+        Assert.Equal(0, signed);
+        ulong*[] limbs = [&key.Dp[3], &key.Dq[0], &key.QinvR[7], &key.RrrP[15]];
+        foreach (ulong* limb in limbs)
+        {
+            *limb ^= 1UL << 40;
+            (signed, byte[] faulty) = SignPkcs1(ref key, 3, digest, 256, fill: 0xA5);
+            Assert.True(signed == -1 && faulty.All(o => o == 0));
+            (signed, faulty) = SignPss(ref key, 3, digest, digest, 256, fill: 0xA5);
+            Assert.True(signed == -1 && faulty.All(o => o == 0));
+            *limb ^= 1UL << 40;
+            (signed, byte[] again) = SignPkcs1(ref key, 3, digest, 256);
+            Assert.True(signed == 0 && again.SequenceEqual(good));
+        }
+    }
+
+    // -------------------------------------------------------------------------------------------
     // The C ABI
     // -------------------------------------------------------------------------------------------
 
@@ -697,6 +1075,109 @@ public sealed unsafe class RsaTests
         fixed (byte* s = signature)
         {
             return Native.RsaVerifyPss(k, hash, d, saltLength, s, (nuint)signature.Length);
+        }
+    }
+
+    /// <summary>httpasm_rsa_private_key_init on a .NET key's private parameters (n, e, p, q, dp, dq, q^-1).</summary>
+    /// <param name="parameters">The parameters, exported with the private ones.</param>
+    /// <returns>The result (0 or -1) and the key the function wrote.</returns>
+    private static (int Result, RsaPrivateKey Key) PrivateInit(RSAParameters parameters) =>
+        PrivateInit(Unsigned(parameters.Modulus!), Unsigned(parameters.Exponent!), Unsigned(parameters.P!), Unsigned(parameters.Q!),
+            Unsigned(parameters.DP!), Unsigned(parameters.DQ!), Unsigned(parameters.InverseQ!));
+
+    /// <summary>httpasm_rsa_private_key_init on numbers given as BigIntegers.</summary>
+    /// <param name="n">The modulus.</param>
+    /// <param name="e">The public exponent.</param>
+    /// <param name="p">The prime p.</param>
+    /// <param name="q">The prime q.</param>
+    /// <param name="dp">d mod (p - 1).</param>
+    /// <param name="dq">d mod (q - 1).</param>
+    /// <param name="qinv">q^-1 mod p.</param>
+    /// <returns>The result and the key.</returns>
+    private static (int Result, RsaPrivateKey Key) PrivateInit(BigInteger n, BigInteger e, BigInteger p, BigInteger q, BigInteger dp, BigInteger dq, BigInteger qinv)
+    {
+        RsaPrivateKey key;
+        int result = PrivateInitInto(&key, [n, e, p, q, dp, dq, qinv]);
+        return (result, key);
+    }
+
+    /// <summary>httpasm_rsa_private_key_init into a key the caller holds (so a test can fill it first).</summary>
+    /// <param name="key">The key to write.</param>
+    /// <param name="numbers">n, e, p, q, dp, dq and q^-1, in that order.</param>
+    /// <returns>0 or -1.</returns>
+    private static int PrivateInitInto(RsaPrivateKey* key, BigInteger[] numbers)
+    {
+        byte[][] octets = [.. numbers.Select(Octets)];
+        fixed (byte* n = octets[0], e = octets[1], p = octets[2], q = octets[3], dp = octets[4], dq = octets[5], qinv = octets[6])
+        {
+            var given = new RsaPrivateNumbers
+            {
+                N = n, NLength = (nuint)octets[0].Length, E = e, ELength = (nuint)octets[1].Length,
+                P = p, PLength = (nuint)octets[2].Length, Q = q, QLength = (nuint)octets[3].Length,
+                Dp = dp, DpLength = (nuint)octets[4].Length, Dq = dq, DqLength = (nuint)octets[5].Length,
+                Qinv = qinv, QinvLength = (nuint)octets[6].Length,
+            };
+            return Native.RsaPrivateKeyInit(key, &given);
+        }
+    }
+
+    /// <summary>
+    /// An RSA private key's numbers from PKCS#8 DER (RFC 5208's PrivateKeyInfo around RFC 8017
+    /// A.1.2's RSAPrivateKey: version, n, e, d, p, q, dp, dq, q^-1), by AsnReader's DER rules.
+    /// </summary>
+    /// <param name="der">The PrivateKeyInfo.</param>
+    /// <returns>n, e, p, q, dp, dq and q^-1, in that order (as PrivateInit takes them).</returns>
+    /// <exception cref="AsnContentException">The DER is not that structure.</exception>
+    private static BigInteger[] Pkcs8RsaNumbers(byte[] der)
+    {
+        AsnReader info = new AsnReader(der, AsnEncodingRules.DER).ReadSequence();
+        info.ReadInteger();                 // the version
+        info.ReadSequence();                // the algorithm: rsaEncryption, NULL
+        AsnReader key = new AsnReader(info.ReadOctetString(), AsnEncodingRules.DER).ReadSequence();
+        key.ReadInteger();                  // the version (0: two primes)
+        BigInteger n = key.ReadInteger(), e = key.ReadInteger();
+        key.ReadInteger();                  // d (the CRT numbers make it unneeded)
+        BigInteger p = key.ReadInteger(), q = key.ReadInteger(), dp = key.ReadInteger(), dq = key.ReadInteger(), qinv = key.ReadInteger();
+        return [n, e, p, q, dp, dq, qinv];
+    }
+
+    /// <summary>httpasm_rsa_sign_pkcs1 under the caller's key, into a new buffer.</summary>
+    /// <param name="key">The key.</param>
+    /// <param name="hash">HTTPASM_HASH_* (or any int).</param>
+    /// <param name="digest">The digest: the hash's length when the identifier names one.</param>
+    /// <param name="length">The signature buffer's length (the modulus' octets, or any other to test the refusal).</param>
+    /// <param name="fill">The buffer's octets before the call (to see what the function writes).</param>
+    /// <returns>The result and the buffer.</returns>
+    private static (int Result, byte[] Signature) SignPkcs1(ref RsaPrivateKey key, int hash, byte[] digest, int length, byte fill = 0)
+    {
+        byte[] signature = new byte[length];
+        Array.Fill(signature, fill);
+        fixed (RsaPrivateKey* k = &key)
+        fixed (byte* d = digest)
+        fixed (byte* s = signature)
+        {
+            return (Native.RsaSignPkcs1(k, hash, d, s, (nuint)length), signature);
+        }
+    }
+
+    /// <summary>httpasm_rsa_sign_pss under the caller's key, into a new buffer.</summary>
+    /// <param name="key">The key.</param>
+    /// <param name="hash">HTTPASM_HASH_* (or any int).</param>
+    /// <param name="digest">The digest.</param>
+    /// <param name="salt">The salt, or null for an empty one passed as a null pointer.</param>
+    /// <param name="length">The signature buffer's length.</param>
+    /// <param name="fill">The buffer's octets before the call.</param>
+    /// <returns>The result and the buffer.</returns>
+    private static (int Result, byte[] Signature) SignPss(ref RsaPrivateKey key, int hash, byte[] digest, byte[]? salt, int length, byte fill = 0)
+    {
+        byte[] signature = new byte[length];
+        Array.Fill(signature, fill);
+        fixed (RsaPrivateKey* k = &key)
+        fixed (byte* d = digest)
+        fixed (byte* a = salt)
+        fixed (byte* s = signature)
+        {
+            return (Native.RsaSignPss(k, hash, d, a, (nuint)(salt?.Length ?? 0), s, (nuint)length), signature);
         }
     }
 
@@ -1004,6 +1485,53 @@ public sealed unsafe class RsaTests
         }
 
         return t.Sign < 0 ? t + m : t;
+    }
+
+    /// <summary>
+    /// n's two primes from n, e and d (NIST SP 800-56B Rev. 2, Appendix C.2: d e - 1 = 2^t r with r
+    /// odd is a multiple of lambda(n), so for most g some y = g^(r 2^j) is a square root of 1 other
+    /// than 1 and n - 1, and gcd(y - 1, n) is a prime). The bases g = 2, 3, 4, ... are tried in
+    /// turn: deterministic, and each fails with probability at most 1/2, so a handful suffice.
+    /// </summary>
+    /// <param name="n">The modulus, a product of two distinct odd primes.</param>
+    /// <param name="e">The public exponent.</param>
+    /// <param name="d">The private exponent (any one with d e = 1 mod lambda(n)).</param>
+    /// <returns>The primes, the larger first (the init takes either order; the caller computes q^-1 mod p for the order returned).</returns>
+    /// <exception cref="InvalidDataException">d e - 1 is odd (d is not a private exponent of n), or no base of the first 100 splits n.</exception>
+    private static (BigInteger P, BigInteger Q) RecoverPrimes(BigInteger n, BigInteger e, BigInteger d)
+    {
+        BigInteger k = d * e - 1;
+        if (!k.IsEven)
+        {
+            throw new InvalidDataException("d e - 1 is odd: not a private exponent");
+        }
+
+        int t = 0;
+        BigInteger r = k;
+        while (r.IsEven)
+        {
+            r >>= 1;
+            t++;
+        }
+
+        for (BigInteger g = 2; g < 102; g++)
+        {
+            BigInteger y = BigInteger.ModPow(g, r, n);
+            for (int j = 0; j < t && !y.IsOne && y != n - 1; j++)
+            {
+                BigInteger x = BigInteger.ModPow(y, 2, n);
+                if (x.IsOne)
+                {
+                    // y is a square root of 1 other than +-1: y - 1 shares exactly one prime with n
+                    BigInteger p = BigInteger.GreatestCommonDivisor(y - 1, n), q = n / p;
+                    return p > q ? (p, q) : (q, p);
+                }
+
+                y = x;
+            }
+        }
+
+        throw new InvalidDataException("no base split n");
     }
 
     /// <summary>The least s with s^3 at least x (Newton's method from above, then one step up if needed).</summary>
