@@ -1,8 +1,10 @@
 ; =============================================================================
-; crypto/hmac.asm - HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and SHA-384:
-; the MACs and the key derivations TLS 1.3's key schedule is made of (RFC 9846 7.1:
+; crypto/hmac.asm - HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256, SHA-384 and
+; SHA-512: the MACs and the key derivations TLS 1.3's key schedule is made of (RFC 9846 7.1:
 ; HKDF-Extract, and HKDF-Expand under HKDF-Expand-Label), SHA-256's for TLS_AES_128_GCM_SHA256
-; and TLS_CHACHA20_POLY1305_SHA256, SHA-384's for TLS_AES_256_GCM_SHA384.
+; and TLS_CHACHA20_POLY1305_SHA256, SHA-384's for TLS_AES_256_GCM_SHA384; and SHA-512's, which no
+; TLS 1.3 cipher suite uses, for RFC 6979's deterministic nonces at P-521 (crypto/p521.asm's
+; HMAC_DRBG: RFC 6979's own k when the digest is SHA-512's, ecdsa_secp521r1_sha512's).
 ;
 ; HMAC(K, m) = H((K0 ^ opad) || H((K0 ^ ipad) || m)), K0 the key padded with zeros to the block,
 ; or its digest padded when it is longer than a block (FIPS 198-1 section 4 steps 1-3). The
@@ -11,7 +13,7 @@
 ; Everything here runs on the C ABI's hashes (crypto/sha256.asm, crypto/sha512.asm), whose
 ; compressions pick their versions per call; this file adds no version of its own.
 ;
-; One source for both hashes: HMAC_FUNCTIONS (below) writes the six functions of one hash from
+; One source for the three hashes: HMAC_FUNCTIONS (below) writes the six functions of one hash from
 ; its parameters (names, block and digest sizes, the context's size). Every count it repeats by
 ; is a literal of its invocation, never an equ: the coverage build preprocesses with nasm -E,
 ; which cannot evaluate an equ in %rep (tests/coverage/instrument.cs).
@@ -22,6 +24,10 @@
 ; =============================================================================
 default rel
 %include "httpasm_core.inc"
+
+extern httpasm_sha512_init                  ; crypto/sha512.asm: SHA-512's start, end and one-shot
+extern httpasm_sha512_final                 ; hash, for HMAC_FUNCTIONS sha512 (httpasm_core.inc
+extern httpasm_sha512                       ; declares SHA-384's and the update both share)
 
 section .rodata
 align 16
@@ -323,3 +329,7 @@ HMAC_FUNCTIONS sha256, httpasm_sha256_init, httpasm_sha256_update, httpasm_sha25
 
 ; SHA-384: 128-octet blocks, 48-octet digests, a 416-octet context (26 x 16).
 HMAC_FUNCTIONS sha384, httpasm_sha384_init, httpasm_sha512_update, httpasm_sha384_final, httpasm_sha384, 128, 48, httpasm_hmac_sha384_ctx, 8, 26, 3
+
+; SHA-512: SHA-384's blocks and context (the same httpasm_sha512_ctx, started by its own init),
+; 64-octet digests: HKDF-Expand's limit is 255 * 64 = 16320 octets.
+HMAC_FUNCTIONS sha512, httpasm_sha512_init, httpasm_sha512_update, httpasm_sha512_final, httpasm_sha512, 128, 64, httpasm_hmac_sha512_ctx, 8, 26, 4

@@ -876,6 +876,17 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      Against OpenSSL 3.0.13's `HMAC()` with `EVP_sha384()`: 2.39x on 64 octets (941.7 against
      2,251 ns: four SHA-512 compressions), 1.50x on 1 KiB; HKDF-Expand of 48 octets from a
      48-octet secret 985 ns, 1.17x v1.
+   - **HMAC-SHA512 and HKDF-SHA512** (2026-11-27), RFC 6979's HMAC at P-521 (its HMAC_DRBG
+     runs on the digest's hash: ecdsa_secp521r1_sha512's nonces are HMAC-SHA512's): the macro's
+     third instance (`crypto/hmac.asm`; SHA-512's start, final and one-shot hash declared there,
+     as `crypto/ed25519.asm` and `crypto/rsa.asm` declare them). `httpasm_hmac_sha512_ctx` has
+     SHA-384's layout (two `httpasm_sha512_ctx`, 416 octets, struct size 22); HKDF-Expand refuses
+     past 255 * 64 = 16,320 octets. No TLS 1.3 cipher suite uses either; both are in the C ABI for
+     a caller's protocol. Proven by RFC 4231's seven SHA-512 examples, NIST's 375 [L=64] MACs
+     (keys of 100 to 142 octets around the 128-octet block, tags of 32 to 64), Wycheproof's 174
+     HMAC and 83 HKDF tests (pinned at 65ca494), .NET's HMACSHA512 and HKDF to the limit, and the
+     three HMACs told apart under one key, at every tier. Against OpenSSL 3.0.13's `HMAC()` with
+     `EVP_sha512()` (41 rounds): 2.41x on 64 octets (961 against 2,315 ns), 1.51x on 1 KiB.
    - **The AES block cipher** (2026-11-27), `crypto/aes.asm`: AES-128 and AES-256 encryption
      (no AES-192: no TLS 1.3 or QUIC suite uses it; no decryption: GCM, CTR and QUIC's header
      protection never decrypt with the block cipher). Two versions: AES-NI (`aeskeygenassist`
@@ -1514,7 +1525,7 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      (1.62x), a key share 241 against 390 (1.62x); v3 and v1 equal (mul and mulx cost the same
      here). Since Ed448 (below), the public key comes from its fixed base: 38.4 us (4.9x
      OpenSSL), a key share 165 us (2.4x).
-   - **Ed448** (2026-11-28), `crypto/ed448.asm` over `include/crypto/fe448.inc` (X448's field,
+   - **Ed448** (2026-11-27), `crypto/ed448.asm` over `include/crypto/fe448.inc` (X448's field,
      moved there to be shared): `httpasm_ed448_public_key`, `httpasm_ed448_private_key_init` (a
      176-octet prepared key: s, the prefix, A, all from the seed; struct size 21),
      `httpasm_ed448_sign` and `httpasm_ed448_verify` (RFC 8032 5.2: pure Ed448, SHAKE256 with

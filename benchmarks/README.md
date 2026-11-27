@@ -191,7 +191,19 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
-**2026-11-28: Ed448, and X448's public key from its fixed base.** Ed448's public key from a seed,
+**2026-11-27: HMAC-SHA512.** `rivals/hmac_sha512/*` (41 rounds, every A/A control within 1.6%)
+beside OpenSSL 3.0.13's `HMAC()` with `EVP_sha512()`, under a 64-octet key (RFC 6979's K at
+P-521, whose nonces it draws):
+
+| Case | HttpAsm best | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| HMAC-SHA512, 64 octets | 961.0 ns | 1,122 ns | 2,315 ns | 2.41x OpenSSL |
+| HMAC-SHA512, 1 KiB | 2,649 ns | 3,263 ns | 4,005 ns | 1.51x OpenSSL |
+
+HMAC-SHA384's times (below): the same four SHA-512 compressions for a short message; only the
+starting values and the digest's length differ.
+
+**2026-11-27: Ed448, and X448's public key from its fixed base.** Ed448's public key from a seed,
 a signature of Ed25519's 130-octet CertificateVerify content (pure Ed448, empty context, as TLS
 1.3 signs) under a key prepared before the loop, and its verification; beside OpenSSL 3.0.13
 through EVP_PKEY_ED448 (the key from raw octets; EVP_DigestSign and EVP_DigestVerify, contexts

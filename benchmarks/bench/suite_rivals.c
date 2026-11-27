@@ -2732,6 +2732,61 @@ static bench_rival hmac384_rivals[] = {
     { openssl_name, openssl_hmac_sha384 },
 };
 
+/* The SHA-512 MAC case's key: 64 octets, RFC 6979's K at P-521 (HMAC_DRBG over HMAC-SHA512). */
+static const uint8_t mac_key64[64] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
+                                       0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
+                                       0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
+                                       0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa };
+
+/* bench_hmac_sha512: httpasm_hmac_sha512 of the case's message under mac_key64 (bench.h). */
+void bench_hmac_sha512(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t mac[64];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_hmac_sha512(mac_key64, sizeof mac_key64, c->data, c->length, mac);
+        total += mac[0];
+    }
+    bench_sink = total;
+}
+
+/* OpenSSL's EVP_sha512(), for its HMAC() over SHA-512; found by openssl_load_hmac512. */
+static const void *openssl_sha512_md;
+
+/* openssl_load_hmac512: EVP_sha512 beside the HMAC that openssl_load_hmac found. Returns 0, or
+ * -1 (the SHA-512 MAC case then runs without this rival). */
+static int openssl_load_hmac512(void)
+{
+    if (openssl_load_hmac() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    openssl_md_fn md = crypto ? (openssl_md_fn)dlsym(crypto, "EVP_sha512") : NULL;
+    if (md == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks EVP_sha512\n");
+        return -1;
+    }
+    openssl_sha512_md = md();
+    return 0;
+}
+
+/* openssl_hmac_sha512: OpenSSL's HMAC-SHA512 of the case's message under mac_key64, `calls` times. */
+static void openssl_hmac_sha512(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char mac[64];
+    unsigned int length = 0;
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_hmac_call(openssl_sha512_md, mac_key64, (int)sizeof mac_key64, c->data, c->length, mac, &length);
+        total += mac[0];
+    }
+    bench_sink = total;
+}
+
+static bench_rival hmac512_rivals[] = {
+    { openssl_name, openssl_hmac_sha512 },
+};
+
 /* The hash cases' message lengths and their labels. */
 static const size_t sha_lengths[] = { 64, 1024, 16384 };
 static const char *const sha_labels[] = { "64 octets", "1 KiB", "16 KiB" };
@@ -3207,6 +3262,10 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < 2; i++)
         add("hmac_sha384", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha384, hmac384 ? hmac384_rivals : NULL,
             hmac384 ? sizeof hmac384_rivals / sizeof hmac384_rivals[0] : 0);
+    int hmac512 = openssl_load_hmac512() == 0;
+    for (size_t i = 0; i < 2; i++)
+        add("hmac_sha512", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha512, hmac512 ? hmac512_rivals : NULL,
+            hmac512 ? sizeof hmac512_rivals / sizeof hmac512_rivals[0] : 0);
     const uint8_t *hpack_block;
     size_t hpack_length;
     if (bench_hpack_block(&hpack_block, &hpack_length) != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {

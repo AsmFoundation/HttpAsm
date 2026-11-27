@@ -35,8 +35,9 @@ public sealed unsafe partial class Ed448Tests
     private static readonly (BigInteger X, BigInteger Y, BigInteger Z, BigInteger T) Neutral = (0, 1, 1, 0);
 
     /// <summary>
-    /// The prepared key's layout, as the library reports it (struct size 21, the last id: 22
-    /// answers 0, as any id past the registry does).
+    /// The prepared key's layout, as the library reports it (struct size 21; the registry's end,
+    /// the first id that answers 0, is checked by <see cref="HmacSha512Tests"/>, whose context
+    /// took id 22).
     /// </summary>
     [Fact]
     public void HasThePrivateKeysLayout()
@@ -44,7 +45,6 @@ public sealed unsafe partial class Ed448Tests
         Platform.RequireLinuxX64();
         Assert.Equal(176, sizeof(Ed448PrivateKey));
         Assert.Equal((uint)sizeof(Ed448PrivateKey), Native.StructSize(21));
-        Assert.Equal(0u, Native.StructSize(22));
     }
 
     /// <summary>

@@ -64,6 +64,7 @@
     X(httpasm_shake128)             \
     X(httpasm_hmac_sha384)          \
     X(httpasm_hkdf_sha384_expand)   \
+    X(httpasm_hmac_sha512)          \
     X(httpasm_aes_init)             \
     X(httpasm_aes_encrypt_block)    \
     X(httpasm_aes_gcm_init)         \
@@ -476,6 +477,11 @@ void bench_rsa_private_init(const bench_build *b, const bench_case *c, long call
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */
 void bench_hmac_sha384(const bench_build *b, const bench_case *c, long calls);
 void bench_hkdf384_expand(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_hmac_sha512: httpasm_hmac_sha512 of the case's message under a fixed 64-octet key (RFC
+ * 6979's K at P-521 is 64 octets: each candidate nonce there costs two such MACs of a 64-octet V),
+ * `calls` times (suite_rivals.c). */
+void bench_hmac_sha512(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
  * nothing, built by the first build's encoder on the first call and shared by every suite

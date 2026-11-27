@@ -253,8 +253,8 @@ uint32_t httpasm_abi_version(void);
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
- * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key; 0 for any
- * other value. */
+ * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
+ * 22 httpasm_hmac_sha512_ctx; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -1010,6 +1010,38 @@ void httpasm_hkdf_sha384_extract(const uint8_t *salt, size_t salt_length, const 
 /* HKDF-Expand over SHA-384 (RFC 5869 2.3). Returns 0, or -1 when length exceeds
  * 255 * 48 = 12240 octets (nothing is written then). */
 int httpasm_hkdf_sha384_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
+                               size_t info_length, uint8_t *okm, size_t length);
+
+/* A running HMAC-SHA512 (416 octets): httpasm_hmac_sha384_ctx's layout over SHA-512's hashes. No
+ * TLS 1.3 cipher suite uses it; RFC 6979's deterministic nonces at P-521 do (httpasm_p521_sign's
+ * HMAC_DRBG), and so may a protocol of the caller's. A context is finished by the final of the
+ * HMAC that started it. */
+typedef struct httpasm_hmac_sha512_ctx {
+    httpasm_sha512_ctx inner;
+    httpasm_sha512_ctx outer;
+} httpasm_hmac_sha512_ctx;
+
+/* Starts an HMAC-SHA512 under key[0..n) (any length: a key longer than 128 octets is hashed
+ * first). */
+void httpasm_hmac_sha512_init(httpasm_hmac_sha512_ctx *h, const uint8_t *key, size_t n);
+
+/* Feeds n octets of the message. */
+void httpasm_hmac_sha512_update(httpasm_hmac_sha512_ctx *h, const uint8_t *data, size_t n);
+
+/* Writes the 64-octet MAC and wipes h. Compare MACs with a constant-time comparison. */
+void httpasm_hmac_sha512_final(httpasm_hmac_sha512_ctx *h, uint8_t mac[HTTPASM_SHA512_DIGEST]);
+
+/* The MAC of data[0..n) under the key, at once. */
+void httpasm_hmac_sha512(const uint8_t *key, size_t key_length, const uint8_t *data, size_t n,
+                         uint8_t mac[HTTPASM_SHA512_DIGEST]);
+
+/* HKDF-Extract: prk = HMAC-SHA512(salt, ikm). An empty salt is 64 zeros (RFC 5869 2.2). */
+void httpasm_hkdf_sha512_extract(const uint8_t *salt, size_t salt_length, const uint8_t *ikm,
+                                 size_t ikm_length, uint8_t prk[HTTPASM_SHA512_DIGEST]);
+
+/* HKDF-Expand over SHA-512 (RFC 5869 2.3). Returns 0, or -1 when length exceeds
+ * 255 * 64 = 16320 octets (nothing is written then). */
+int httpasm_hkdf_sha512_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
                                size_t info_length, uint8_t *okm, size_t length);
 
 /* ------------------------------------------------------------------------------------------

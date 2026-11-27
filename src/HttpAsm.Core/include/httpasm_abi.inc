@@ -476,6 +476,17 @@ struc httpasm_hmac_sha384_ctx
 endstruc
 
 ; -----------------------------------------------------------------------------
+; httpasm_hmac_sha512_ctx: a running HMAC-SHA512, 416 octets: httpasm_hmac_sha384_ctx's layout,
+; each hash a httpasm_sha512_ctx started by httpasm_sha512_init (a context must be finished by
+; the functions of the HMAC that started it: the two differ only in their hashes' starting
+; values and the final's length).
+; -----------------------------------------------------------------------------
+struc httpasm_hmac_sha512_ctx
+    .inner:             resb httpasm_sha512_ctx_size    ; fed the message (update)
+    .outer:             resb httpasm_sha512_ctx_size    ; fed the inner digest (final)
+endstruc
+
+; -----------------------------------------------------------------------------
 ; httpasm_hpack_output: where httpasm_hpack_decode puts one header block's fields (48 octets).
 ; Strings from the static table point at the library's constant text; every other name and
 ; value is copied into space, so the fields stay valid however the dynamic table changes

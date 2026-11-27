@@ -712,6 +712,55 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_hkdf_sha384_expand")]
     internal static partial int HkdfSha384Expand(byte* prk, nuint prkLength, byte* info, nuint infoLength, byte* okm, nuint length);
 
+    /// <summary>void httpasm_hmac_sha512_init(httpasm_hmac_sha512_ctx *h, const uint8_t *key, size_t n).</summary>
+    /// <param name="h">The context to start.</param>
+    /// <param name="key">The key (anything when n is 0).</param>
+    /// <param name="n">Its length (any: past 128 octets it is hashed first).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hmac_sha512_init")]
+    internal static partial void HmacSha512Init(HmacSha512Context* h, byte* key, nuint n);
+
+    /// <summary>void httpasm_hmac_sha512_update(httpasm_hmac_sha512_ctx *h, const uint8_t *data, size_t n).</summary>
+    /// <param name="h">The running MAC.</param>
+    /// <param name="data">The message's next octets.</param>
+    /// <param name="n">How many.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hmac_sha512_update")]
+    internal static partial void HmacSha512Update(HmacSha512Context* h, byte* data, nuint n);
+
+    /// <summary>void httpasm_hmac_sha512_final(httpasm_hmac_sha512_ctx *h, uint8_t mac[64]): wipes h.</summary>
+    /// <param name="h">The running MAC; all zeros afterwards.</param>
+    /// <param name="mac">Receives the 64-octet MAC.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hmac_sha512_final")]
+    internal static partial void HmacSha512Final(HmacSha512Context* h, byte* mac);
+
+    /// <summary>void httpasm_hmac_sha512(key, key_length, data, n, mac[64]).</summary>
+    /// <param name="key">The key.</param>
+    /// <param name="keyLength">Its length.</param>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="mac">Receives the 64-octet MAC.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hmac_sha512")]
+    internal static partial void HmacSha512(byte* key, nuint keyLength, byte* data, nuint n, byte* mac);
+
+    /// <summary>void httpasm_hkdf_sha512_extract(salt, salt_length, ikm, ikm_length, prk[64]).</summary>
+    /// <param name="salt">The salt (anything when its length is 0).</param>
+    /// <param name="saltLength">Its length.</param>
+    /// <param name="ikm">The input keying material.</param>
+    /// <param name="ikmLength">Its length.</param>
+    /// <param name="prk">Receives the 64-octet pseudorandom key.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_hkdf_sha512_extract")]
+    internal static partial void HkdfSha512Extract(byte* salt, nuint saltLength, byte* ikm, nuint ikmLength, byte* prk);
+
+    /// <summary>int httpasm_hkdf_sha512_expand(prk, prk_length, info, info_length, okm, length).</summary>
+    /// <param name="prk">The pseudorandom key.</param>
+    /// <param name="prkLength">Its length.</param>
+    /// <param name="info">The context (anything when its length is 0).</param>
+    /// <param name="infoLength">Its length.</param>
+    /// <param name="okm">Receives the output keying material.</param>
+    /// <param name="length">How many octets of it.</param>
+    /// <returns>0, or -1 when length exceeds 16320 (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_hkdf_sha512_expand")]
+    internal static partial int HkdfSha512Expand(byte* prk, nuint prkLength, byte* info, nuint infoLength, byte* okm, nuint length);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>
