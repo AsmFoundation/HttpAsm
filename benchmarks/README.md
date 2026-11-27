@@ -191,6 +191,13 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: AES-GCM, the AES-NI version interleaved.** `tiers/aes_128_gcm_seal` at v2 (the
+path of CPUs without VAES) after its GHASH moved into the AES rounds (one block after each of
+rounds 1-8) and its tail became one batched step, 11 rounds: 1 KiB 261.9 ns (was 316.9; OpenSSL
+409.8), 16 KiB 3,350 ns, 4.89 octets/ns (was 4,358; OpenSSL 3,186, 5.14). By length
+(scratchpad gcmlen.c, v2): 0 octets 195 cycles, 64 octets 276, 255 octets 376 (was 506), 1 KiB
+771 (was 921). The VAES version stays the faster one where it can run (16 KiB 1,717 ns).
+
 **2026-11-27: AES-GCM with VAES and VPCLMULQDQ.** The same cases with the third version (v3: two
 blocks an instruction, the GHASH of sixteen blocks interleaved with their AES rounds), 15 rounds,
 the host at 5-8% other load:

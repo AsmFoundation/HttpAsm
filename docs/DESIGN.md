@@ -932,8 +932,14 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      AVX-SSE transition); a VEX copy (`gcm_copy_vx`) brought them to 227-279. Measured against
      OpenSSL 3.0.13's EVP: 2.91x on 64 octets (76.7 against 223.0 ns), 2.69x on 1 KiB, 1.85x on
      16 KiB (9.51 against 5.15 octets/ns); AES-256-GCM 2.65x and 1.84x; the VAES version 2.06x
-     and 2.50x the AES-NI one. Next: the same interleaving for the AES-NI version (CPUs without
-     VAES: before Ice Lake, Zen 1-2).
+     and 2.50x the AES-NI one. Then the same interleaving for the AES-NI version (the path of
+     CPUs without VAES: Intel's before Ice Lake, AMD's Zen 1 and 2): eight blocks a step, one
+     GHASH block after each of AES rounds 1-8, the seal lagging a step, and the batched tail
+     (one step through a zeroed buffer, one aggregated GHASH of up to eight blocks): 16 KiB 1.30x
+     faster than before (3,350 against 4,358 ns, 4.89 octets/ns: level with OpenSSL's 5.14,
+     whose AVX code is of the same kind), 1 KiB 1.21x (262 ns, 1.56x OpenSSL), 255 octets 173 to
+     127 ns. Its legacy SSE forms need copies a VEX form would not: a VEX xmm version for CPUs
+     with AVX but no VAES is the next lever there.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
