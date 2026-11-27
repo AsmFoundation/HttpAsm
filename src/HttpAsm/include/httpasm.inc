@@ -68,6 +68,21 @@ extern httpasm_sha512_final         ; void (httpasm_sha512_ctx *h, uint8_t diges
 extern httpasm_sha384_final         ; void (httpasm_sha512_ctx *h, uint8_t digest[48]): wipes h
 extern httpasm_sha512               ; void (const uint8_t *data, size_t n, uint8_t digest[64])
 extern httpasm_sha384               ; void (const uint8_t *data, size_t n, uint8_t digest[48])
+extern httpasm_sha3_224_init        ; void (httpasm_sha3_ctx *h): rate 144
+extern httpasm_sha3_256_init        ; void (httpasm_sha3_ctx *h): rate 136
+extern httpasm_sha3_384_init        ; void (httpasm_sha3_ctx *h): rate 104
+extern httpasm_sha3_512_init        ; void (httpasm_sha3_ctx *h): rate 72
+extern httpasm_shake128_init        ; void (httpasm_sha3_ctx *h): rate 168
+extern httpasm_shake256_init        ; void (httpasm_sha3_ctx *h): rate 136
+extern httpasm_sha3_update          ; void (httpasm_sha3_ctx *h, const uint8_t *data, size_t n)
+extern httpasm_sha3_final           ; void (httpasm_sha3_ctx *h, uint8_t *digest): (200 - rate) / 2 octets; wipes h
+extern httpasm_shake_squeeze        ; void (httpasm_sha3_ctx *h, uint8_t *out, size_t n): the stream goes on
+extern httpasm_sha3_224             ; void (data, n, digest[28])
+extern httpasm_sha3_256             ; void (data, n, digest[32])
+extern httpasm_sha3_384             ; void (data, n, digest[48])
+extern httpasm_sha3_512             ; void (data, n, digest[64])
+extern httpasm_shake128             ; void (data, n, out, out_n)
+extern httpasm_shake256             ; void (data, n, out, out_n)
 extern httpasm_hmac_sha256_init     ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha256_update   ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_hmac_sha256_final    ; void (httpasm_hmac_sha256_ctx *h, uint8_t mac[32]): wipes h

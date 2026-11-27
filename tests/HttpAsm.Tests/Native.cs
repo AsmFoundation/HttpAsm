@@ -95,6 +95,100 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_sha512")]
     internal static partial void Sha512(byte* data, nuint n, byte* digest);
 
+    /// <summary>void httpasm_sha3_224_init(httpasm_sha3_ctx *h): a SHA3-224 hash (rate 144).</summary>
+    /// <param name="h">Receives the new context (all 216 octets written).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_224_init")]
+    internal static partial void Sha3_224Init(Sha3Context* h);
+
+    /// <summary>void httpasm_sha3_256_init(httpasm_sha3_ctx *h): a SHA3-256 hash (rate 136).</summary>
+    /// <param name="h">Receives the new context.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_256_init")]
+    internal static partial void Sha3_256Init(Sha3Context* h);
+
+    /// <summary>void httpasm_sha3_384_init(httpasm_sha3_ctx *h): a SHA3-384 hash (rate 104).</summary>
+    /// <param name="h">Receives the new context.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_384_init")]
+    internal static partial void Sha3_384Init(Sha3Context* h);
+
+    /// <summary>void httpasm_sha3_512_init(httpasm_sha3_ctx *h): a SHA3-512 hash (rate 72).</summary>
+    /// <param name="h">Receives the new context.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_512_init")]
+    internal static partial void Sha3_512Init(Sha3Context* h);
+
+    /// <summary>void httpasm_shake128_init(httpasm_sha3_ctx *h): a SHAKE128 XOF (rate 168).</summary>
+    /// <param name="h">Receives the new context.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_shake128_init")]
+    internal static partial void Shake128Init(Sha3Context* h);
+
+    /// <summary>void httpasm_shake256_init(httpasm_sha3_ctx *h): a SHAKE256 XOF (rate 136).</summary>
+    /// <param name="h">Receives the new context.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_shake256_init")]
+    internal static partial void Shake256Init(Sha3Context* h);
+
+    /// <summary>void httpasm_sha3_update(httpasm_sha3_ctx *h, const uint8_t *data, size_t n): any of the six.</summary>
+    /// <param name="h">The running context.</param>
+    /// <param name="data">The next octets.</param>
+    /// <param name="n">How many (0 allowed).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_update")]
+    internal static partial void Sha3Update(Sha3Context* h, byte* data, nuint n);
+
+    /// <summary>void httpasm_sha3_final(httpasm_sha3_ctx *h, uint8_t *digest): (200 - rate) / 2 octets, then wipes h.</summary>
+    /// <param name="h">The running context; all zeros afterwards.</param>
+    /// <param name="digest">Receives the digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_final")]
+    internal static partial void Sha3Final(Sha3Context* h, byte* digest);
+
+    /// <summary>void httpasm_shake_squeeze(httpasm_sha3_ctx *h, uint8_t *out, size_t n): the stream's next n octets.</summary>
+    /// <param name="h">The running context (not wiped).</param>
+    /// <param name="output">Receives the octets.</param>
+    /// <param name="n">How many (0 allowed).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_shake_squeeze")]
+    internal static partial void ShakeSqueeze(Sha3Context* h, byte* output, nuint n);
+
+    /// <summary>void httpasm_sha3_224(data, n, digest[28]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_224")]
+    internal static partial void Sha3_224(byte* data, nuint n, byte* digest);
+
+    /// <summary>void httpasm_sha3_256(data, n, digest[32]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_256")]
+    internal static partial void Sha3_256(byte* data, nuint n, byte* digest);
+
+    /// <summary>void httpasm_sha3_384(data, n, digest[48]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_384")]
+    internal static partial void Sha3_384(byte* data, nuint n, byte* digest);
+
+    /// <summary>void httpasm_sha3_512(data, n, digest[64]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha3_512")]
+    internal static partial void Sha3_512(byte* data, nuint n, byte* digest);
+
+    /// <summary>void httpasm_shake128(data, n, out, out_n).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="output">Receives out_n octets.</param>
+    /// <param name="outputLength">How many (0 allowed).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_shake128")]
+    internal static partial void Shake128(byte* data, nuint n, byte* output, nuint outputLength);
+
+    /// <summary>void httpasm_shake256(data, n, out, out_n).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="output">Receives out_n octets.</param>
+    /// <param name="outputLength">How many (0 allowed).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_shake256")]
+    internal static partial void Shake256(byte* data, nuint n, byte* output, nuint outputLength);
+
     /// <summary>void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[48]).</summary>
     /// <param name="data">The message.</param>
     /// <param name="n">Its length.</param>

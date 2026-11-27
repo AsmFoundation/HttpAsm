@@ -394,6 +394,24 @@ struc httpasm_sha512_ctx
     .reserved:          resd 1
 endstruc
 
+; -----------------------------------------------------------------------------
+; httpasm_sha3_ctx: a running SHA3-224/256/384/512, SHAKE128 or SHAKE256 (FIPS 202), 216 octets
+; (crypto/sha3.asm; struct size id 20). The sponge's whole state: the Keccak lanes, into which a
+; partial block's octets are XORed at once (no buffer), and where it stands.
+; -----------------------------------------------------------------------------
+struc httpasm_sha3_ctx
+    .state:             resq 25     ; lane (x, y) at 8 (x + 5 y), little-endian
+    .rate:              resd 1      ; octets a block: 144, 136, 104, 72; SHAKE128 168, SHAKE256 136
+    .position:          resd 1      ; octets absorbed into the current block, or squeezed from it
+    .suffix:            resb 1      ; the domain bits with pad10*1's first 1: 0x06 SHA-3, 0x1F SHAKE
+    .squeezing:         resb 1      ; 1 once padded (no more input)
+    .reserved:          resb 6
+endstruc
+HTTPASM_SHA3_224_DIGEST         equ 28
+HTTPASM_SHA3_256_DIGEST         equ 32
+HTTPASM_SHA3_384_DIGEST         equ 48
+HTTPASM_SHA3_512_DIGEST         equ 64
+
 HTTPASM_SHA512_DIGEST           equ 64      ; octets of a SHA-512 digest
 HTTPASM_SHA384_DIGEST           equ 48      ; octets of a SHA-384 digest
 HTTPASM_SHA512_BLOCK            equ 128     ; octets of a block (both; HMAC's key padding)

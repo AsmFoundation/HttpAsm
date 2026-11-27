@@ -141,6 +141,24 @@ if [ ! -f "$tools/cavp/ecdsa/SigVer.rsp" ] || [ "$tools/cavp/186-4ecdsatestvecto
   unzip -q -o -j "$tools/cavp/186-4ecdsatestvectors.zip" -d "$tools/cavp/ecdsa"
   touch "$tools/cavp/ecdsa/SigVer.rsp"
 fi
+#   sha-3bytetestvectors.zip and shakebytetestvectors.zip: FIPS 202's byte-oriented files (SHA3VS),
+#   unpacked flat into cavp/sha3/ and cavp/shake/; Sha3Tests reads SHA3-224 to SHA3-512's
+#   ShortMsg, LongMsg and Monte, and SHAKE128 and SHAKE256's ShortMsg, LongMsg, VariableOut and
+#   Monte.
+fetch cavp/sha-3bytetestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/sha3/sha-3bytetestvectors.zip \
+  cd07701af2e47f5cc889d642528b4bf11f8b6eb55797c7307a96828ed8d8fc8c
+if [ ! -f "$tools/cavp/sha3/SHA3_512Monte.rsp" ] || [ "$tools/cavp/sha-3bytetestvectors.zip" -nt "$tools/cavp/sha3/SHA3_512Monte.rsp" ]; then
+  unzip -q -o -j "$tools/cavp/sha-3bytetestvectors.zip" -d "$tools/cavp/sha3"
+  touch "$tools/cavp/sha3/SHA3_512Monte.rsp"
+fi
+fetch cavp/shakebytetestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/sha3/shakebytetestvectors.zip \
+  debfebc3157b3ceea002b84ca38476420389a3bf7e97dc5f53ea4689a16de4c7
+if [ ! -f "$tools/cavp/shake/SHAKE256Monte.rsp" ] || [ "$tools/cavp/shakebytetestvectors.zip" -nt "$tools/cavp/shake/SHAKE256Monte.rsp" ]; then
+  unzip -q -o -j "$tools/cavp/shakebytetestvectors.zip" -d "$tools/cavp/shake"
+  touch "$tools/cavp/shake/SHAKE256Monte.rsp"
+fi
 #   186-3rsatestvectors.zip: FIPS 186-3's RSA files, unpacked flat into cavp/rsa/; RsaTests reads
 #   the PKCS#1 v1.5 and PSS ones: SigVer15 and SigVerPSS (valid and invalid signatures, 1024 to
 #   3072 bits, SHA-1 to SHA-512), SigGen15 and SigGenPSS (signatures to verify, 2048 and 3072).

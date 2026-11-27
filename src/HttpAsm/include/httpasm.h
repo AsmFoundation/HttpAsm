@@ -253,7 +253,7 @@ uint32_t httpasm_abi_version(void);
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
- * 19 httpasm_ed25519_private_key; 0 for any other value. */
+ * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -364,6 +364,53 @@ void httpasm_sha384_final(httpasm_sha512_ctx *h, uint8_t digest[HTTPASM_SHA384_D
 /* The digests of n octets at once. */
 void httpasm_sha512(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA512_DIGEST]);
 void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA384_DIGEST]);
+
+/* SHA-3 and SHAKE (FIPS 202): ML-KEM's hashes (SHA3-256, SHA3-512) and XOFs (SHAKE128,
+ * SHAKE256), for TLS 1.3's post-quantum hybrids. Keccak-f[1600] with rorx and andn (v3) or
+ * plain rotates (v1). */
+#define HTTPASM_SHA3_224_DIGEST 28
+#define HTTPASM_SHA3_256_DIGEST 32
+#define HTTPASM_SHA3_384_DIGEST 48
+#define HTTPASM_SHA3_512_DIGEST 64
+
+/* A running SHA3-224/256/384/512 or SHAKE128/256 (216 octets): the sponge's state, into which
+ * input octets are XORed at once (no buffer), and where it stands. A copy forks it. */
+typedef struct httpasm_sha3_ctx {
+    uint64_t state[25];             /* the Keccak lanes */
+    uint32_t rate;                  /* octets a block */
+    uint32_t position;              /* octets absorbed into, or squeezed from, the current block */
+    uint8_t suffix;                 /* 0x06 for SHA-3, 0x1F for SHAKE */
+    uint8_t squeezing;              /* 1 once the input is padded */
+    uint8_t reserved[6];
+} httpasm_sha3_ctx;
+
+/* Starts (or starts over) a hash or an XOF of the kind named. */
+void httpasm_sha3_224_init(httpasm_sha3_ctx *h);
+void httpasm_sha3_256_init(httpasm_sha3_ctx *h);
+void httpasm_sha3_384_init(httpasm_sha3_ctx *h);
+void httpasm_sha3_512_init(httpasm_sha3_ctx *h);
+void httpasm_shake128_init(httpasm_sha3_ctx *h);
+void httpasm_shake256_init(httpasm_sha3_ctx *h);
+
+/* Feeds n octets (n may be 0) to any of them, before its final or first squeeze. */
+void httpasm_sha3_update(httpasm_sha3_ctx *h, const uint8_t *data, size_t n);
+
+/* Writes the digest of everything fed - 28, 32, 48 or 64 octets, by the init that started h (a
+ * SHAKE context gives its first 16 or 32 octets) - then wipes h to zeros. */
+void httpasm_sha3_final(httpasm_sha3_ctx *h, uint8_t *digest);
+
+/* Writes the next n octets of a SHAKE's output: the first call ends the input, later calls go
+ * on with the same stream (pieces of any sizes give what one call would). h is not wiped, as
+ * more may follow: zero it when done if the input was secret. */
+void httpasm_shake_squeeze(httpasm_sha3_ctx *h, uint8_t *out, size_t n);
+
+/* All at once: the SHA-3 digests, and out_n octets of SHAKE128 or SHAKE256 (out_n may be 0). */
+void httpasm_sha3_224(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA3_224_DIGEST]);
+void httpasm_sha3_256(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA3_256_DIGEST]);
+void httpasm_sha3_384(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA3_384_DIGEST]);
+void httpasm_sha3_512(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA3_512_DIGEST]);
+void httpasm_shake128(const uint8_t *data, size_t n, uint8_t *out, size_t out_n);
+void httpasm_shake256(const uint8_t *data, size_t n, uint8_t *out, size_t out_n);
 
 /* ------------------------------------------------------------------------------------------
  * The block cipher: AES-128 and AES-256 encryption (FIPS 197), the base of AES-GCM and of

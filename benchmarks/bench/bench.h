@@ -60,6 +60,8 @@
     X(httpasm_hkdf_sha256_expand)   \
     X(httpasm_sha512)               \
     X(httpasm_sha384)               \
+    X(httpasm_sha3_256)             \
+    X(httpasm_shake128)             \
     X(httpasm_hmac_sha384)          \
     X(httpasm_hkdf_sha384_expand)   \
     X(httpasm_aes_init)             \
@@ -223,6 +225,11 @@ void bench_sha256(const bench_build *b, const bench_case *c, long calls);
  * times (suite_rivals.c). Batches for any suite, as bench_sha256. SHA-384 is SHA-512's
  * compression with another start and a shorter digest: its case shows the final's cost only. */
 void bench_sha512(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_sha3_256: httpasm_sha3_256 of the case's message; bench_shake128: 32 octets of
+ * httpasm_shake128 of it (ML-KEM's XOF absorbing, then one squeeze). `calls` times each. */
+void bench_sha3_256(const bench_build *b, const bench_case *c, long calls);
+void bench_shake128(const bench_build *b, const bench_case *c, long calls);
 void bench_sha384(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha256: httpasm_hmac_sha256 of the case's message under a fixed 32-octet key (a TLS

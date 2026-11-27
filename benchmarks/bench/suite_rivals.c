@@ -382,6 +382,114 @@ static int openssl_load_sha512(void)
     return 0;
 }
 
+/* bench_sha3_256: see bench.h. */
+void bench_sha3_256(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t digest[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_sha3_256(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* bench_shake128: see bench.h. */
+void bench_shake128(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_shake128(c->data, c->length, out, sizeof out);
+        total += out[0];
+    }
+    bench_sink = total;
+}
+
+/* OpenSSL's SHA-3 (3.0.13: keccak1600-x86_64, its scalar code, on this CPU) has no one-call
+ * function like SHA512: EVP with the algorithm fetched once (EVP_MD_fetch) and one EVP_MD_CTX
+ * reused, so each call is EVP_DigestInit_ex, EVP_DigestUpdate and EVP_DigestFinal_ex (or
+ * EVP_DigestFinalXOF): what a careful caller does, without the per-call fetch EVP_Digest makes. */
+typedef void *(*openssl_md_fetch_fn)(void *libctx, const char *name, const char *properties);
+typedef void *(*openssl_md_ctx_new_fn0)(void);
+typedef int (*openssl_digest_init_ex_fn)(void *ctx, const void *md, void *engine);
+typedef int (*openssl_digest_update_fn)(void *ctx, const void *data, size_t n);
+typedef int (*openssl_digest_final_ex_fn)(void *ctx, unsigned char *md, unsigned int *size);
+typedef int (*openssl_digest_final_xof_fn)(void *ctx, unsigned char *md, size_t size);
+static openssl_digest_init_ex_fn openssl_sha3_init;
+static openssl_digest_update_fn openssl_sha3_update;
+static openssl_digest_final_ex_fn openssl_sha3_final;
+static openssl_digest_final_xof_fn openssl_sha3_final_xof;
+static void *openssl_sha3_ctx, *openssl_sha3_256_md, *openssl_shake128_md;
+
+/* openssl_load_sha3: the EVP calls, SHA3-256 and SHAKE128 fetched, one context made (kept for
+ * the process). Returns 0, or -1 (the cases then run without this rival). */
+static int openssl_load_sha3(void)
+{
+    if (openssl_load() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    if (crypto == NULL)
+        return -1;
+    openssl_md_fetch_fn fetch = (openssl_md_fetch_fn)dlsym(crypto, "EVP_MD_fetch");
+    openssl_md_ctx_new_fn0 ctx_new = (openssl_md_ctx_new_fn0)dlsym(crypto, "EVP_MD_CTX_new");
+    openssl_sha3_init = (openssl_digest_init_ex_fn)dlsym(crypto, "EVP_DigestInit_ex");
+    openssl_sha3_update = (openssl_digest_update_fn)dlsym(crypto, "EVP_DigestUpdate");
+    openssl_sha3_final = (openssl_digest_final_ex_fn)dlsym(crypto, "EVP_DigestFinal_ex");
+    openssl_sha3_final_xof = (openssl_digest_final_xof_fn)dlsym(crypto, "EVP_DigestFinalXOF");
+    if (!fetch || !ctx_new || !openssl_sha3_init || !openssl_sha3_update || !openssl_sha3_final || !openssl_sha3_final_xof) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP digest functions\n");
+        return -1;
+    }
+    openssl_sha3_256_md = fetch(NULL, "SHA3-256", NULL);
+    openssl_shake128_md = fetch(NULL, "SHAKE128", NULL);
+    openssl_sha3_ctx = ctx_new();
+    if (!openssl_sha3_256_md || !openssl_shake128_md || !openssl_sha3_ctx) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 did not fetch SHA3-256 and SHAKE128\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_sha3_256: OpenSSL's SHA3-256 of the case's message, `calls` times. */
+static void openssl_sha3_256(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char digest[32];
+    unsigned int size = 0;
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_sha3_init(openssl_sha3_ctx, openssl_sha3_256_md, NULL);
+        openssl_sha3_update(openssl_sha3_ctx, c->data, c->length);
+        openssl_sha3_final(openssl_sha3_ctx, digest, &size);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* openssl_shake128: 32 octets of OpenSSL's SHAKE128 of the case's message, `calls` times. */
+static void openssl_shake128(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_sha3_init(openssl_sha3_ctx, openssl_shake128_md, NULL);
+        openssl_sha3_update(openssl_sha3_ctx, c->data, c->length);
+        openssl_sha3_final_xof(openssl_sha3_ctx, out, sizeof out);
+        total += out[0];
+    }
+    bench_sink = total;
+}
+
+static bench_rival sha3_256_rivals[] = {
+    { openssl_name, openssl_sha3_256 },
+};
+
+static bench_rival shake128_rivals[] = {
+    { openssl_name, openssl_shake128 },
+};
+
 /* openssl_sha512: OpenSSL's SHA512 of the case's message, `calls` times. */
 static void openssl_sha512(const bench_build *b, const bench_case *c, long calls)
 {
@@ -2278,6 +2386,11 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
         add("sha256", sha_labels[i], sha, sha_lengths[i], bench_sha256, openssl ? sha256_rivals : NULL,
             openssl ? sizeof sha256_rivals / sizeof sha256_rivals[0] : 0);
+    int sha3 = openssl_load_sha3() == 0;
+    for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++) {
+        add("sha3_256", sha_labels[i], sha, sha_lengths[i], bench_sha3_256, sha3 ? sha3_256_rivals : NULL, sha3 ? 1 : 0);
+        add("shake128", sha_labels[i], sha, sha_lengths[i], bench_shake128, sha3 ? shake128_rivals : NULL, sha3 ? 1 : 0);
+    }
     int sha512 = openssl_load_sha512() == 0;
     for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
         add("sha512", sha_labels[i], sha, sha_lengths[i], bench_sha512, sha512 ? sha512_rivals : NULL,

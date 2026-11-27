@@ -113,6 +113,27 @@ static void add_sha512(void)
     }
 }
 
+/* add_sha3: the tiers cases of httpasm_sha3_256 on 64 octets (one permutation), 1 KiB and 16 KiB
+ * of bench_sha_input: the Keccak permutation's v1 (rol, not + and) against v3 (rorx, andn). */
+static void add_sha3(void)
+{
+    static const size_t lengths[] = { 64, 1024, 16384 };
+    static const char *const labels[] = { "64 octets", "1 KiB", "16 KiB" };
+    for (size_t i = 0; i < sizeof lengths / sizeof lengths[0]; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = "sha3_256";
+        c.input = labels[i];
+        c.data = bench_sha_input();
+        c.length = lengths[i];
+        c.octets = lengths[i];
+        c.ours = bench_sha3_256;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_hkdf_expand: the tiers case of httpasm_hkdf_sha256_expand as TLS 1.3's key schedule calls
  * it: 32 octets (one HMAC block) from a 32-octet PRK, with a 20-octet info (an HkdfLabel's size
  * for "tls13 key" and an empty context). Its time is two key compressions and two message ones,
@@ -372,6 +393,7 @@ void bench_suite_tiers(void)
     add_hpack_decode();
     add_sha256();
     add_sha512();
+    add_sha3();
     add_hkdf_expand();
     add_hkdf384_expand();
     add_aes_block();

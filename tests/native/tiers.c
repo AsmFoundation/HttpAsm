@@ -1458,6 +1458,98 @@ static int sha512_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_sha3_*, httpasm_shake*: by versions (crypto/sha3.asm) -----------------------------
+ * The Keccak permutation has v1 (rol, not + and) and v3 (rorx, andn); every tier must give v1's
+ * output, at once and in pieces. */
+
+/* sha3_pieces: the running form of one kind (0-3 SHA3-224..512, 4 SHAKE128, 5 SHAKE256): the
+ * message in random pieces (empty ones too), then the final or, for SHAKE, out_n octets
+ * squeezed in random pieces. */
+static void sha3_pieces(const uint8_t *message, size_t n, int kind, uint8_t *out, size_t out_n)
+{
+    static void (*const init[6])(httpasm_sha3_ctx *) = { httpasm_sha3_224_init, httpasm_sha3_256_init, httpasm_sha3_384_init,
+                                                          httpasm_sha3_512_init, httpasm_shake128_init, httpasm_shake256_init };
+    httpasm_sha3_ctx h;
+    init[kind](&h);
+    size_t at = 0;
+    while (at < n) {
+        size_t piece = rng() % 4 == 0 ? 0 : 1 + rng() % 300;
+        if (piece > n - at)
+            piece = n - at;
+        httpasm_sha3_update(&h, message + at, piece);
+        at += piece;
+    }
+    if (kind < 4) {
+        httpasm_sha3_final(&h, out);
+        return;
+    }
+    size_t got = 0;
+    while (got < out_n) {
+        size_t piece = rng() % 4 == 0 ? 0 : 1 + rng() % 200;
+        if (piece > out_n - got)
+            piece = out_n - got;
+        httpasm_shake_squeeze(&h, out + got, piece);
+        got += piece;
+    }
+}
+
+/* sha3_once: the one-shot form of one kind, out_n octets for SHAKE. */
+static void sha3_once(const uint8_t *message, size_t n, int kind, uint8_t *out, size_t out_n)
+{
+    switch (kind) {
+    case 0: httpasm_sha3_224(message, n, out); break;
+    case 1: httpasm_sha3_256(message, n, out); break;
+    case 2: httpasm_sha3_384(message, n, out); break;
+    case 3: httpasm_sha3_512(message, n, out); break;
+    case 4: httpasm_shake128(message, n, out, out_n); break;
+    default: httpasm_shake256(message, n, out, out_n); break;
+    }
+}
+
+/* sha3_tiers: every length 0-400 (the padding at every place of every rate's block) and `randoms`
+ * random ones to 20,000 octets, each message's last octet the page's last, for all six kinds (SHAKE
+ * with 1 to 500 octets out), at every tier, at once and in pieces, the output followed by a
+ * canary. Returns 0 when every output equals v1's, 1 at the first that does not. */
+static int sha3_tiers(long randoms)
+{
+    static const char *const names[6] = { "sha3_224", "sha3_256", "sha3_384", "sha3_512", "shake128", "shake256" };
+    static const size_t digest[4] = { 28, 32, 48, 64 };
+    long checked = 0;
+    for (long i = -401; i < randoms; i++) {
+        size_t n = i < 0 ? (size_t)(i + 401) : (size_t)(rng() % (rng() % 8 == 0 ? 20000 : 1200));
+        if (n > PAGE)
+            n = PAGE;                       /* the message stays in the readable page */
+        uint8_t *message = page_end - n;
+        for (size_t k = 0; k < n; k++)
+            message[k] = (uint8_t)rng();
+        for (int kind = 0; kind < 6; kind++) {
+            size_t out_n = kind < 4 ? digest[kind] : 1 + (size_t)(rng() % 500);
+            uint8_t expected[512], once[512 + 16], pieces[512];
+            httpasm_cpu_limit(caps[0]);
+            sha3_once(message, n, kind, expected, out_n);
+            for (size_t t = 1; t < TIERS; t++) {
+                uint64_t features = httpasm_cpu_limit(caps[t]);
+                memset(once, 0xC3, sizeof once);
+                sha3_once(message, n, kind, once, out_n);
+                sha3_pieces(message, n, kind, pieces, out_n);
+                int canary = 1;
+                for (size_t k = out_n; k < out_n + 16; k++)
+                    canary &= once[k] == 0xC3;
+                if (!canary || memcmp(once, expected, out_n) != 0 || memcmp(pieces, expected, out_n) != 0) {
+                    fprintf(stderr, "httpasm_%s at %s (features %#llx) differs from v1 on %zu octets, %zu out (%s)\n", names[kind],
+                            cap_names[t], (unsigned long long)features, n, out_n,
+                            !canary ? "wrote past its output" : memcmp(once, expected, out_n) != 0 ? "at once" : "in pieces");
+                    dump("message", message, n < 128 ? n : 128);
+                    return 1;
+                }
+                checked++;
+            }
+        }
+    }
+    printf("httpasm_sha3/shake: %ld outputs at tiers above v1, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_aes_*: the block cipher by versions (crypto/aes.asm) -----------------------------
  * v1 is the constant-time bitsliced cipher with its own key schedule (SubWord by the bitsliced
  * S-box), AES-NI the other (aeskeygenassist for the schedule). A key holds both versions' round
@@ -2693,6 +2785,8 @@ int main(int argc, char **argv)
         failed = sha256_tiers(randoms / 40);
     if (!failed)
         failed = sha512_tiers(randoms / 40);
+    if (!failed)
+        failed = sha3_tiers(randoms / 40);
     if (!failed)
         failed = aes_tiers(randoms / 40);
     if (!failed)

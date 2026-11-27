@@ -42,7 +42,6 @@ public sealed unsafe partial class Ed25519Tests
         Platform.RequireLinuxX64();
         Assert.Equal(96, sizeof(Ed25519PrivateKey));
         Assert.Equal((uint)sizeof(Ed25519PrivateKey), Native.StructSize(19));
-        Assert.Equal(0u, Native.StructSize(20));
     }
 
     /// <summary>

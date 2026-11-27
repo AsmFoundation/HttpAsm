@@ -1304,6 +1304,35 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      1.5 us more from a verification. X25519's public key now comes from this fixed base too
      (its entry: 8.92 us against the ladder's 32.5). Next: the field itself (four coordinates at
      once in AVX2 lanes, as curve25519-dalek's backend does, for verification's doublings).
+   - **SHA-3 and SHAKE** (2026-11-27), `crypto/sha3.asm`: SHA3-224, SHA3-256, SHA3-384,
+     SHA3-512, SHAKE128 and SHAKE256 (FIPS 202), ML-KEM's hashes and XOFs: one running context
+     (`httpasm_sha3_ctx`, 216 octets, struct size 20) started by the kind's init, the shared
+     `httpasm_sha3_update`, `httpasm_sha3_final` (wipes) and `httpasm_shake_squeeze` (the stream
+     goes on across calls), and the one-shot forms; `ha_keccak_f1600_v` and `ha_keccak_absorb_v`
+     hidden for ML-KEM. *The permutation*, Keccak-f[1600] in two versions chosen once a call:
+     v3 rorx (rotations without copies or flags) and andn (chi's ~b & c), v1 rol and not + and.
+     Each round: theta's column parities in five registers, D in five more, then each output
+     row's five lanes read straight from their places before pi (pi's inverse gives them),
+     rotated, through chi, stored, iota on lane (0, 0): 14 registers, nothing spilled; the state
+     alternates between its home and a 200-octet stack copy (wiped after), one round each way.
+     *No constant is typed in:* the round constants come from FIPS 202 Algorithm 5's LFSR and
+     rho's offsets from section 3.2.2's walk, computed by NASM's preprocessor (equal to FIPS
+     202's tables, checked when written; every vector depends on them). *The sponge:* the input
+     is XORed into the state at once (a partial block's octets wait in the state, no buffer),
+     the padding is the suffix (0x06 SHA-3, 0x1F SHAKE) and 0x80. *Proven by* NIST's
+     byte-oriented SHA3VS files (sha-3bytetestvectors.zip and shakebytetestvectors.zip, pinned
+     in `tests/tools.sh`): every ShortMsg and LongMsg record of all six (the padding at every
+     place of every rate's block), SHAKE's VariableOut (1,126 and 1,246 output lengths), and the
+     Monte Carlo tests (the SHAKE one: each message the last output's first 128 bits, zero-padded
+     when shorter, its length drawn from the last output's final 16 bits); .NET's SHA3_256,
+     SHA3_384, SHA3_512, Shake128 and Shake256 on every length to 700 octets and long ones, fed and
+     squeezed in random pieces; forks by copy, wipes on final; `tests/native/tiers` (97,218
+     outputs above v1, inputs against the guard page, outputs behind canaries). *Measured*
+     against OpenSSL 3.0.13's EVP (keccak1600-x86_64; algorithm fetched once, context reused),
+     41 rounds: SHA3-256 1.41x on 64 octets (305 ns against 421), 1.13x on 1 KiB, 1.09x on 16
+     KiB; SHAKE128 1.47x, 1.12x, 1.08x; v3 1.23-1.25x v1. The permutation takes about 774 cycles
+     (32 a round, against about 26 for its 130 ALU operations on five ports). Next: four states
+     at once in AVX2 lanes for ML-KEM's independent SHAKE128 streams.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

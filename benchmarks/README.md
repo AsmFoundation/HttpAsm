@@ -191,6 +191,29 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: SHA-3 and SHAKE.** `httpasm_sha3_256` and 32 octets of `httpasm_shake128` of the
+hash cases' input (64 octets, 1 KiB, 16 KiB), beside OpenSSL 3.0.13's EVP (keccak1600-x86_64,
+its scalar code, here): SHA3-256 and SHAKE128 fetched once (EVP_MD_fetch) and one EVP_MD_CTX
+reused, so each call is EVP_DigestInit_ex, EVP_DigestUpdate and EVP_DigestFinal_ex (or
+EVP_DigestFinalXOF). 41 rounds; the ratio is the paired estimate:
+
+| Case | v3 (rorx, andn) | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| SHA3-256, 64 octets | 305 ns | 374 ns | 421 ns | 1.41x OpenSSL |
+| SHA3-256, 1 KiB | 2.34 us | 2.93 us | 2.69 us | 1.13x OpenSSL |
+| SHA3-256, 16 KiB | 35.5 us | 44.4 us | 38.6 us | 1.09x OpenSSL |
+| SHAKE128 (32 out), 64 octets | 303 ns | 375 ns | 453 ns | 1.47x OpenSSL |
+| SHAKE128 (32 out), 1 KiB | 2.10 us | 2.60 us | 2.37 us | 1.12x OpenSSL |
+| SHAKE128 (32 out), 16 KiB | 29.5 us | 36.3 us | 31.6 us | 1.08x OpenSSL |
+
+The tiers suite: v3 1.23x to 1.25x v1 at every size. In bulk a block costs about 294 ns (the
+permutation 262, the XOR of the rate's octets the rest) against OpenSSL's 320. The permutation
+alone (scratchpad sha3/kf.asm, 200,000 calls) takes about 774 cycles: 32 a round, where its 130
+ALU operations on five ports would allow about 26. Not tried here: AVX2 for one state (three
+vector ports for the same operations, and rotations of three instructions without AVX-512's
+vprolq), AVX-512 (vprolq, vpternlogq: no CPU here measures it). Next: four states at once in
+AVX2 lanes, for ML-KEM's matrix sampling (independent SHAKE128 streams).
+
 **2026-11-27: Ed25519.** Three cases (bench_ed25519_*): a public key from a seed (SHA-512 and
 the fixed base), a signature under a key prepared before the loop, and a verification of a valid
 signature, the message a TLS 1.3 server CertificateVerify's signed content (130 octets: 64

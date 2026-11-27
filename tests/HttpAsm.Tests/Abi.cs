@@ -483,6 +483,33 @@ internal unsafe struct Sha512Context
     public uint Reserved;
 }
 
+/// <summary>
+/// httpasm_sha3_ctx (httpasm.h): a running SHA3-224/256/384/512, SHAKE128 or SHAKE256, 216 octets:
+/// the sponge's lanes (a partial block's octets are XORed in at once) and where it stands. Its
+/// octets are its whole state, so a copy forks it; a final wipes it.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Sha3Context
+{
+    /// <summary>The Keccak lanes, lane (x, y) at index x + 5 y.</summary>
+    public fixed ulong State[25];
+
+    /// <summary>Octets a block: 144, 136, 104, 72 (SHA3-224 to SHA3-512), 168 (SHAKE128), 136 (SHAKE256).</summary>
+    public uint Rate;
+
+    /// <summary>Octets absorbed into the current block, or squeezed from it.</summary>
+    public uint Position;
+
+    /// <summary>The domain bits and pad10*1's first 1: 0x06 for SHA-3, 0x1F for SHAKE.</summary>
+    public byte Suffix;
+
+    /// <summary>1 once the input is padded (squeezing).</summary>
+    public byte Squeezing;
+
+    /// <summary>Unused.</summary>
+    public fixed byte Reserved[6];
+}
+
 /// <summary>httpasm_client_response (httpasm.h): 96 octets.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct ClientResponse
