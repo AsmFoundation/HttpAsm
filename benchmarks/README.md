@@ -191,6 +191,23 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: AES-GCM with VAES and VPCLMULQDQ.** The same cases with the third version (v3: two
+blocks an instruction, the GHASH of sixteen blocks interleaved with their AES rounds), 15 rounds,
+the host at 5-8% other load:
+
+| Case | VAES + VPCLMULQDQ | AES-NI + PCLMULQDQ | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| AES-128-GCM, 64 octets | 76.7 ns | 88.3 ns | 223.0 ns | 2.91x OpenSSL |
+| AES-128-GCM, 1 KiB | 148.8 ns | 316.9 ns | 400.2 ns | 2.69x OpenSSL |
+| AES-128-GCM, 16 KiB | 1,723 ns (9.51 octets/ns) | 4,358 ns (3.76) | 3,180 ns (5.15) | 1.85x OpenSSL |
+| AES-256-GCM, 1 KiB | 165.3 ns | 355 ns | 437.6 ns | 2.65x OpenSSL |
+| AES-256-GCM, 16 KiB | 2,011 ns (8.15) | 5,078 ns | 3,699 ns (4.43) | 1.84x OpenSSL |
+
+`tiers/aes_128_gcm_seal`: v3 is 2.06x v2 on 1 KiB and 2.50x on 16 KiB. On 16 KiB a 256-octet
+step takes about 79 cycles where its 88 AES instructions alone need 44: the interleaving leaves
+room. Short records by length (scratchpad gcmlen.c): 0 octets 155 cycles (E_K(J0), the AAD and
+lengths blocks, the tag), 16-255 octets 227-279 after the VEX copy (1,520 before it).
+
 **2026-11-27: AES-GCM, AES-NI with PCLMULQDQ and v1.** `httpasm_aes_gcm_seal` as TLS 1.3 calls it
 (the key made once, a new nonce and a 5-octet AAD per record) beside OpenSSL 3.0.13's EVP driven
 the same way (the key set once; per record `EVP_EncryptInit_ex` with the IV, the AAD, the text,

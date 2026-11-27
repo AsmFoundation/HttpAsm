@@ -8,6 +8,9 @@
 ; modulo x^128 + x^7 + x^2 + x + 1, the bits of each block in the field's reflected order (6.3).
 ;
 ; Versions, chosen per call:
+;   VAES + VPCLMULQDQ (v3 with VAES, VCLMUL, AESNI and CLMUL): two blocks an instruction in YMM
+;            registers, sixteen blocks a step, the GHASH of sixteen blocks interleaved with the
+;            AES rounds (see the section's own comment below).
 ;   AES-NI + PCLMULQDQ (HTTPASM_CPU_AESNI | CLMUL | V2: pshufb):
 ;            counter mode eight blocks at a time; GHASH eight blocks at a time, each multiplied
 ;            by its own power of H (H^8 .. H^1) without reducing, summed, and reduced once. The
@@ -36,6 +39,7 @@ align 16
 gcm_bswap:      db 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0    ; pshufb: reverse 16 octets
 gcm_poly:       dq 0x0000000000000001, 0xC200000000000000   ; the twist's reduction: x^-1's terms
 gcm_one:        dd 1, 0, 0, 0                               ; +1 to a counter in reversed form
+gcm_two:        dd 2, 0, 0, 0, 2, 0, 0, 0                   ; +2 to both lanes' counters (VAES)
 
 section .text
 
@@ -1053,6 +1057,468 @@ gcm_crypt_ni:
     ret
 
 ; =============================================================================
+; VAES + VPCLMULQDQ (v3): two blocks an instruction in YMM registers.
+;
+; The main loop takes 256 octets (sixteen blocks, eight register pairs) a step: counter mode on
+; all sixteen while GHASH works through sixteen ciphertext blocks, one register pair after each
+; of the first eight AES rounds, so the AES units (ports 0 and 1) and the carry-less multiplier
+; (port 5) work at once; the sixteen products are summed unreduced (block i times H^(16-i))
+; and reduced once. seal hashes the previous step's output (none before the first step, the
+; last step's after the loop); open hashes the step's own input before it is written over.
+; What is left (under 256 octets) takes one more counter-mode step through a zeroed stack buffer
+; and one aggregated GHASH: no block-at-a-time tail. Round keys and powers are read from the key
+; itself (VEX memory operands need no alignment). Registers in the loop: ymm0-ymm7 the blocks,
+; ymm8 the round key, ymm9-ymm11 GHASH's low, high and middle sums, ymm12 and ymm14 GHASH's
+; temporaries (xmm14 the accumulator between steps, its upper lane zero), ymm13 the
+; byte-reversing mask in both lanes, ymm15 the next two counters, reversed.
+; =============================================================================
+
+GCM_RK      equ httpasm_aes_gcm_key.aes + httpasm_aes_key.round_keys
+GCM_ROUNDS  equ httpasm_aes_gcm_key.aes + httpasm_aes_key.rounds
+
+; -----------------------------------------------------------------------------
+; GCM_REDUCE_VX Xhi, Xi, T1, T2: GCM_REDUCE in VEX form (the same two phases: Xi's per-qword
+; shifts by 57, 62 and 63 folded in, then s ^ s >> 1 ^ s >> 2 ^ s >> 7 with Xhi). Out: Xi.
+; Clobbers Xhi, T1, T2.
+; -----------------------------------------------------------------------------
+%macro GCM_REDUCE_VX 4
+    vpsllq      %3, %2, 57
+    vpsllq      %4, %2, 62
+    vpxor       %3, %3, %4
+    vpsllq      %4, %2, 63
+    vpxor       %3, %3, %4                  ; Xi << 57 ^ Xi << 62 ^ Xi << 63, per qword
+    vpslldq     %4, %3, 8
+    vpsrldq     %3, %3, 8
+    vpxor       %2, %2, %4
+    vpxor       %1, %1, %3
+    vpsrlq      %3, %2, 1                   ; 2nd phase, s = Xi
+    vpsrlq      %4, %2, 2
+    vpxor       %3, %3, %4
+    vpsrlq      %4, %2, 7
+    vpxor       %3, %3, %4
+    vpxor       %1, %1, %2
+    vpxor       %2, %1, %3                  ; Xhi ^ s ^ s >> 1 ^ s >> 2 ^ s >> 7
+%endmacro
+
+; -----------------------------------------------------------------------------
+; GCM_VX_BLOCK x: one block (xmm) through AES with the key's round keys (VEX, unaligned).
+; Clobbers eax and the flags.
+; -----------------------------------------------------------------------------
+%macro GCM_VX_BLOCK 1
+    vpxor       %1, %1, [rbx + GCM_RK]
+%assign r 1
+%rep 9
+    vaesenc     %1, %1, [rbx + GCM_RK + 16 * r]
+  %assign r r + 1
+%endrep
+    cmp         dword [rbx + GCM_ROUNDS], 10
+    je          %%last
+%rep 4
+    vaesenc     %1, %1, [rbx + GCM_RK + 16 * r]
+  %assign r r + 1
+%endrep
+%%last:
+    mov         eax, [rbx + GCM_ROUNDS]
+    shl         eax, 4
+    vaesenclast %1, %1, [rbx + GCM_RK + rax]
+%endmacro
+
+; -----------------------------------------------------------------------------
+; GCM_VX_STEP p, j: GHASH's register pair j (blocks 2j and 2j + 1 at p + 32 j) multiplied by
+; its powers (H^(16-2j) in the low lane, H^(15-2j) in the high: the key's table at 32 j), the
+; three products added to ymm9-ymm11; for j = 0 the accumulator (xmm14) is added to the first
+; block first. Clobbers ymm12, ymm14.
+; -----------------------------------------------------------------------------
+%macro GCM_VX_STEP 2
+    vmovdqu     ymm12, [%1 + 32 * %2]
+    vpshufb     ymm12, ymm12, ymm13
+  %if %2 == 0
+    vpxor       ymm12, ymm12, ymm14
+  %endif
+    vpshufd     ymm14, ymm12, 0x4E
+    vpxor       ymm14, ymm14, ymm12         ; each block's halves xored
+    vpclmulqdq  ymm14, ymm14, [rbx + httpasm_aes_gcm_key.hkara + 32 * %2], 0x00
+    vpxor       ymm11, ymm11, ymm14         ; middle
+    vpclmulqdq  ymm14, ymm12, [rbx + httpasm_aes_gcm_key.htable + 32 * %2], 0x00
+    vpxor       ymm9, ymm9, ymm14           ; low
+    vpclmulqdq  ymm12, ymm12, [rbx + httpasm_aes_gcm_key.htable + 32 * %2], 0x11
+    vpxor       ymm10, ymm10, ymm12         ; high
+%endmacro
+
+; -----------------------------------------------------------------------------
+; GCM_VX_REDUCE: the sums ymm9-ymm11 of a step's sixteen products folded (lane into lane),
+; Karatsuba's middle split, and reduced into the accumulator xmm14 (upper lane zero).
+; Clobbers ymm9-ymm12.
+; -----------------------------------------------------------------------------
+%macro GCM_VX_REDUCE 0
+    vextracti128 xmm12, ymm9, 1
+    vpxor       xmm9, xmm9, xmm12
+    vextracti128 xmm12, ymm10, 1
+    vpxor       xmm10, xmm10, xmm12
+    vextracti128 xmm12, ymm11, 1
+    vpxor       xmm11, xmm11, xmm12
+    vpxor       xmm11, xmm11, xmm9
+    vpxor       xmm11, xmm11, xmm10
+    vpslldq     xmm12, xmm11, 8
+    vpsrldq     xmm11, xmm11, 8
+    vpxor       xmm9, xmm9, xmm12
+    vpxor       xmm10, xmm10, xmm11
+    GCM_REDUCE_VX xmm10, xmm9, xmm11, xmm12
+    vmovdqa     xmm14, xmm9
+%endmacro
+
+; -----------------------------------------------------------------------------
+; GCM_VX_ITER ghash, p, in, out: one step of sixteen blocks: counter mode (the next sixteen
+; counters from ymm15) xored with in[0..256) into out[0..256) (out may be in: every input is
+; read before the stores, and so is everything GHASH reads); with ghash = 1, GHASH of the
+; sixteen blocks at p, one pair after each of AES rounds 1-8. Clobbers rax, ymm0-ymm12, ymm14
+; (xmm14 is the new accumulator when ghash = 1, untouched otherwise) and the flags.
+; -----------------------------------------------------------------------------
+%macro GCM_VX_ITER 4
+  %if %1
+    vpxor       ymm9, ymm9, ymm9
+    vpxor       ymm10, ymm10, ymm10
+    vpxor       ymm11, ymm11, ymm11
+  %endif
+%assign j 0
+%rep 8
+    vpshufb     ymm%[j], ymm15, ymm13
+    vpaddd      ymm15, ymm15, [rel gcm_two]
+  %assign j j + 1
+%endrep
+    vbroadcasti128 ymm8, [rbx + GCM_RK]
+%assign j 0
+%rep 8
+    vpxor       ymm%[j], ymm%[j], ymm8
+  %assign j j + 1
+%endrep
+%assign r 1
+%rep 8
+    vbroadcasti128 ymm8, [rbx + GCM_RK + 16 * r]
+  %assign j 0
+  %rep 8
+    vaesenc     ymm%[j], ymm%[j], ymm8
+    %assign j j + 1
+  %endrep
+  %if %1
+    %assign s r - 1
+    GCM_VX_STEP %2, s
+  %endif
+  %assign r r + 1
+%endrep
+    vbroadcasti128 ymm8, [rbx + GCM_RK + 16 * 9]
+%assign j 0
+%rep 8
+    vaesenc     ymm%[j], ymm%[j], ymm8
+  %assign j j + 1
+%endrep
+    cmp         dword [rbx + GCM_ROUNDS], 10
+    je          %%last
+%assign r 10
+%rep 4
+    vbroadcasti128 ymm8, [rbx + GCM_RK + 16 * r]
+  %assign j 0
+  %rep 8
+    vaesenc     ymm%[j], ymm%[j], ymm8
+    %assign j j + 1
+  %endrep
+  %assign r r + 1
+%endrep
+%%last:
+    mov         eax, [rbx + GCM_ROUNDS]
+    shl         eax, 4
+    vbroadcasti128 ymm8, [rbx + GCM_RK + rax]
+%assign j 0
+%rep 8
+    vaesenclast ymm%[j], ymm%[j], ymm8
+  %assign j j + 1
+%endrep
+  %if %1
+    GCM_VX_REDUCE
+  %endif
+%assign j 0
+%rep 8
+    vpxor       ymm%[j], ymm%[j], [%3 + 32 * j]
+    vmovdqu     [%4 + 32 * j], ymm%[j]
+  %assign j j + 1
+%endrep
+%endmacro
+
+; -----------------------------------------------------------------------------
+; gcm_copy_vx: ha_copy_short (crypto/sha256.asm) in VEX form: rcx octets (any count) from rsi to
+; rdi by moves sized to the count. The VAES driver must not run a legacy SSE instruction while
+; the YMM registers' upper halves are live: on this core each such instruction paid the AVX-SSE
+; transition, and a 16-to-255-octet tail cost about 1,300 cycles more than a 1-octet one
+; (measured: 1,520 cycles for a 16-octet seal against 254 for 1 octet).
+;   Keeps rcx and every register but rax, rdx, xmm0. The two may not overlap.
+; -----------------------------------------------------------------------------
+align 16
+gcm_copy_vx:
+    cmp     rcx, 16
+    jae     .sixteen
+    cmp     rcx, 8
+    jae     .eight
+    cmp     rcx, 4
+    jae     .four
+    test    rcx, rcx
+    jz      .out
+    movzx   eax, byte [rsi]
+    movzx   edx, byte [rsi + rcx - 1]
+    mov     [rdi], al
+    mov     [rdi + rcx - 1], dl             ; 1-3 octets: the first, the last, and
+    cmp     rcx, 3
+    jb      .out
+    movzx   eax, byte [rsi + 1]
+    mov     [rdi + 1], al                   ; the middle one of three
+.out:
+    ret
+.four:                                      ; 4-7: two dwords, overlapping
+    mov     eax, [rsi]
+    mov     edx, [rsi + rcx - 4]
+    mov     [rdi], eax
+    mov     [rdi + rcx - 4], edx
+    ret
+.eight:                                     ; 8-15: two qwords, overlapping
+    mov     rax, [rsi]
+    mov     rdx, [rsi + rcx - 8]
+    mov     [rdi], rax
+    mov     [rdi + rcx - 8], rdx
+    ret
+.sixteen:                                   ; 16 and up: 16 octets a step, the last overlapping
+    xor     edx, edx
+.step:
+    vmovdqu xmm0, [rsi + rdx]
+    vmovdqu [rdi + rdx], xmm0
+    add     rdx, 16
+    lea     rax, [rdx + 16]
+    cmp     rax, rcx
+    jbe     .step
+    vmovdqu xmm0, [rsi + rcx - 16]
+    vmovdqu [rdi + rcx - 16], xmm0
+    ret
+
+; -----------------------------------------------------------------------------
+; gcm_ghash_vx: the accumulator xmm14 through rdx whole blocks at rsi, sixteen at most per
+; reduction (block i of a batch of k times H^(k-i)), VEX xmm operations.
+;   In: rbx = the key, rsi = the blocks, rdx = how many (0 does nothing), xmm13 = the
+;   byte-reversing mask, xmm14 = the accumulator. Out: xmm14.
+;   Clobbers rax, rcx, rdx, rsi, xmm0-xmm2, xmm9-xmm12 and the flags.
+; -----------------------------------------------------------------------------
+align 16
+gcm_ghash_vx:
+.batch:
+    test    rdx, rdx
+    jz      .done
+    mov     ecx, 16
+    cmp     rdx, rcx
+    cmovb   ecx, edx                        ; k = min(blocks, 16)
+    sub     rdx, rcx
+    mov     eax, 16
+    sub     eax, ecx
+    shl     eax, 4                          ; H^k's place in the tables
+    vpxor   xmm9, xmm9, xmm9
+    vpxor   xmm10, xmm10, xmm10
+    vpxor   xmm11, xmm11, xmm11
+    vmovdqu xmm0, [rsi]
+    vpshufb xmm0, xmm0, xmm13
+    vpxor   xmm0, xmm0, xmm14               ; the accumulator into the batch's first block
+    jmp     .multiply
+.next:
+    vmovdqu xmm0, [rsi]
+    vpshufb xmm0, xmm0, xmm13
+.multiply:
+    vpshufd xmm1, xmm0, 0x4E
+    vpxor   xmm1, xmm1, xmm0
+    vpclmulqdq xmm2, xmm0, [rbx + httpasm_aes_gcm_key.htable + rax], 0x00
+    vpxor   xmm9, xmm9, xmm2
+    vpclmulqdq xmm2, xmm0, [rbx + httpasm_aes_gcm_key.htable + rax], 0x11
+    vpxor   xmm10, xmm10, xmm2
+    vpclmulqdq xmm1, xmm1, [rbx + httpasm_aes_gcm_key.hkara + rax], 0x00
+    vpxor   xmm11, xmm11, xmm1
+    add     rsi, 16
+    add     eax, 16
+    dec     ecx
+    jnz     .next
+    vpxor   xmm11, xmm11, xmm9
+    vpxor   xmm11, xmm11, xmm10
+    vpslldq xmm12, xmm11, 8
+    vpsrldq xmm11, xmm11, 8
+    vpxor   xmm9, xmm9, xmm12
+    vpxor   xmm10, xmm10, xmm11
+    GCM_REDUCE_VX xmm10, xmm9, xmm11, xmm12
+    vmovdqa xmm14, xmm9
+    jmp     .batch
+.done:
+    ret
+
+; -----------------------------------------------------------------------------
+; gcm_crypt_vaes: one seal or open with VAES and VPCLMULQDQ; the tag into [request + GR_TAG].
+;   In: rdi = the key, rsi = the request. Keeps rbx, rbp, r12-r15. The frame is wiped and
+;   vzeroall clears every YMM register (keystream, round keys, H) before returning.
+; -----------------------------------------------------------------------------
+CX_TAIL     equ 0                           ; the last octets (under 256), padded with zeros
+CX_PART     equ CX_TAIL + 256               ; the AAD's last octets, then the lengths block
+CX_EJ0      equ CX_PART + 16
+CX_END      equ CX_EJ0 + 16
+CX_FRAME    equ CX_END + 8                  ; six pushes + the frame: rsp 16-byte aligned
+
+align 16
+gcm_crypt_vaes:
+    push    rbx
+    push    rbp
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+    sub     rsp, CX_FRAME
+    mov     rbx, rdi
+    mov     rbp, rsi
+    vbroadcasti128 ymm13, [rel gcm_bswap]
+    vpxor   xmm14, xmm14, xmm14
+    ; J0 = nonce || 1, E_K(J0), and the first two counters J0 + 1, J0 + 2 (reversed).
+    mov     rax, [rbp + GR_NONCE]
+    vmovq   xmm0, [rax]
+    vpinsrd xmm0, xmm0, [rax + 8], 2
+    mov     ecx, 0x01000000
+    vpinsrd xmm0, xmm0, ecx, 3
+    vpshufb xmm15, xmm0, xmm13
+    GCM_VX_BLOCK xmm0
+    vmovdqu [rsp + CX_EJ0], xmm0
+    vpaddd  xmm15, xmm15, [rel gcm_one]
+    vpaddd  xmm1, xmm15, [rel gcm_one]
+    vinserti128 ymm15, ymm15, xmm1, 1
+    ; The AAD: whole blocks, then its last octets padded.
+    mov     rsi, [rbp + GR_AAD]
+    mov     rdx, [rbp + GR_AADLEN]
+    shr     rdx, 4
+    call    gcm_ghash_vx
+    mov     rcx, [rbp + GR_AADLEN]
+    and     ecx, 15
+    jz      .aad_done
+    vpxor   xmm0, xmm0, xmm0
+    vmovdqu [rsp + CX_PART], xmm0
+    lea     rdi, [rsp + CX_PART]
+    mov     rsi, [rbp + GR_AADLEN]
+    and     rsi, -16
+    add     rsi, [rbp + GR_AAD]
+    call    gcm_copy_vx
+    lea     rsi, [rsp + CX_PART]
+    mov     edx, 1
+    call    gcm_ghash_vx
+.aad_done:
+    xor     r12d, r12d
+    mov     r13, [rbp + GR_LEN]
+    mov     r14, [rbp + GR_IN]
+    mov     r15, [rbp + GR_OUT]
+    cmp     r13, 256
+    jb      .tail
+    cmp     byte [rbp + GR_OPEN], 0
+    jne     .open_steps
+    ; seal: the first step has nothing written to hash yet.
+    GCM_VX_ITER 0, none, r14, r15
+    add     r12, 256
+    sub     r13, 256
+.seal_steps:
+    cmp     r13, 256
+    jb      .seal_pending
+    lea     r10, [r15 + r12 - 256]          ; the step before's ciphertext
+    lea     rsi, [r14 + r12]
+    lea     rdi, [r15 + r12]
+    GCM_VX_ITER 1, r10, rsi, rdi
+    add     r12, 256
+    sub     r13, 256
+    jmp     .seal_steps
+.seal_pending:
+    lea     rsi, [r15 + r12 - 256]          ; the last step's ciphertext
+    mov     edx, 16
+    call    gcm_ghash_vx
+    jmp     .tail
+.open_steps:
+    cmp     r13, 256
+    jb      .tail
+    lea     r10, [r14 + r12]                ; open: the step's own ciphertext, read first
+    lea     rdi, [r15 + r12]
+    GCM_VX_ITER 1, r10, r10, rdi
+    add     r12, 256
+    sub     r13, 256
+    jmp     .open_steps
+.tail:
+    test    r13, r13
+    jz      .lengths
+    ; Under 256 octets left: through the zeroed buffer, one counter-mode step, one GHASH.
+    vpxor   xmm0, xmm0, xmm0
+%assign j 0
+%rep 8
+    vmovdqu [rsp + CX_TAIL + 32 * j], ymm0
+  %assign j j + 1
+%endrep
+    lea     rdi, [rsp + CX_TAIL]
+    lea     rsi, [r14 + r12]
+    mov     rcx, r13
+    call    gcm_copy_vx
+    cmp     byte [rbp + GR_OPEN], 0
+    je      .tail_crypt
+    lea     rsi, [rsp + CX_TAIL]            ; open: the ciphertext, padded with zeros
+    lea     rdx, [r13 + 15]
+    shr     rdx, 4
+    call    gcm_ghash_vx
+.tail_crypt:
+    lea     rsi, [rsp + CX_TAIL]
+    GCM_VX_ITER 0, none, rsi, rsi
+    lea     rdi, [r15 + r12]
+    lea     rsi, [rsp + CX_TAIL]
+    mov     rcx, r13
+    call    gcm_copy_vx
+    cmp     byte [rbp + GR_OPEN], 0
+    jne     .lengths
+    vpxor   xmm0, xmm0, xmm0                ; seal: the ciphertext's octets, padded with zeros
+%assign j 0
+%rep 8
+    vmovdqu [rsp + CX_TAIL + 32 * j], ymm0
+  %assign j j + 1
+%endrep
+    lea     rdi, [rsp + CX_TAIL]
+    lea     rsi, [r15 + r12]
+    mov     rcx, r13
+    call    gcm_copy_vx
+    lea     rsi, [rsp + CX_TAIL]
+    lea     rdx, [r13 + 15]
+    shr     rdx, 4
+    call    gcm_ghash_vx
+.lengths:
+    mov     rax, [rbp + GR_AADLEN]          ; the lengths block, in bits, big-endian
+    shl     rax, 3
+    bswap   rax
+    mov     [rsp + CX_PART], rax
+    mov     rax, [rbp + GR_LEN]
+    shl     rax, 3
+    bswap   rax
+    mov     [rsp + CX_PART + 8], rax
+    lea     rsi, [rsp + CX_PART]
+    mov     edx, 1
+    call    gcm_ghash_vx
+    vpshufb xmm14, xmm14, xmm13
+    vpxor   xmm14, xmm14, [rsp + CX_EJ0]
+    mov     rax, [rbp + GR_TAG]
+    vmovdqu [rax], xmm14
+    vpxor   xmm0, xmm0, xmm0                ; wipe the frame (16 octets a step, a loop: see
+    xor     eax, eax                        ; gcm_crypt_v1)
+.wipe:
+    vmovdqu [rsp + rax], xmm0
+    add     eax, 16
+    cmp     eax, CX_END
+    jb      .wipe
+    vzeroall
+    add     rsp, CX_FRAME
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rbp
+    pop     rbx
+    ret
+
+; =============================================================================
 ; The C ABI.
 ; =============================================================================
 
@@ -1121,8 +1587,12 @@ httpasm_aes_gcm_seal:
     mov     [rsp + GR_TAG], rax
     mov     byte [rsp + GR_OPEN], 0
     mov     rsi, rsp
+    HA_CPU_PICK HTTPASM_CPU_V3 | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL, .vaes
     HA_CPU_PICK HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_V2, .ni
     call    gcm_crypt_v1
+    jmp     .sealed
+.vaes:
+    call    gcm_crypt_vaes
     jmp     .sealed
 .ni:
     call    gcm_crypt_ni
@@ -1168,8 +1638,12 @@ httpasm_aes_gcm_open:
     mov     [rsp + GR_TAG], rax
     mov     byte [rsp + GR_OPEN], 1
     mov     rsi, rsp
+    HA_CPU_PICK HTTPASM_CPU_V3 | HTTPASM_CPU_VAES | HTTPASM_CPU_VCLMUL | HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL, .vaes
     HA_CPU_PICK HTTPASM_CPU_AESNI | HTTPASM_CPU_CLMUL | HTTPASM_CPU_V2, .ni
     call    gcm_crypt_v1
+    jmp     .compare
+.vaes:
+    call    gcm_crypt_vaes
     jmp     .compare
 .ni:
     call    gcm_crypt_ni

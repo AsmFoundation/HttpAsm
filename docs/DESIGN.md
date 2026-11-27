@@ -921,8 +921,19 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      key set once, a new IV and a 5-octet AAD per record): 2.6x faster on 64 octets, 1.29x on
      1 KiB, but 0.73x on 16 KiB (3.77 against 5.14 octets/ns): OpenSSL's code interleaves the
      AES rounds of the next blocks with the GHASH of the last ones, this version does one after
-     the other. Next: VAES with VPCLMULQDQ (two blocks an instruction, this CPU has both) with the
-     two interleaved, then the same interleaving for the AES-NI version.
+     the other. A third version followed the same day: VAES with VPCLMULQDQ (v3), sixteen
+     blocks a step in eight YMM pairs, the GHASH of sixteen blocks interleaved with the AES
+     rounds (one register pair after each of the first eight rounds; measured first: `vaesenc`
+     ymm 2 a cycle, `vpclmulqdq` ymm 1 a cycle on another port, the two together 2.7 a cycle),
+     seal hashing the previous step's output, open its own input; the last octets (under 256)
+     one more step through a zeroed buffer and one aggregated GHASH. Its first build was right
+     at every tier, and slow on 16-255-octet tails: 1,520 cycles against 254 for 1 octet,
+     because `ha_copy_short`'s legacy SSE `movdqu` ran with the YMM upper halves live (the
+     AVX-SSE transition); a VEX copy (`gcm_copy_vx`) brought them to 227-279. Measured against
+     OpenSSL 3.0.13's EVP: 2.91x on 64 octets (76.7 against 223.0 ns), 2.69x on 1 KiB, 1.85x on
+     16 KiB (9.51 against 5.15 octets/ns); AES-256-GCM 2.65x and 1.84x; the VAES version 2.06x
+     and 2.50x the AES-NI one. Next: the same interleaving for the AES-NI version (CPUs without
+     VAES: before Ice Lake, Zen 1-2).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
