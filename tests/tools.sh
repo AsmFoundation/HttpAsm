@@ -187,6 +187,10 @@ fetch wycheproof/hkdf_sha384_test.json "$wycheproof/hkdf_sha384_test.json" 69ff6
 fetch wycheproof/aes_gcm_test.json "$wycheproof/aes_gcm_test.json" 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
 fetch wycheproof/chacha20_poly1305_test.json "$wycheproof/chacha20_poly1305_test.json" fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
 fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
+#   X448 (X448Tests): 510 tests - twist points, the points of small order (11 zero secrets),
+#   non-canonical u, edge-case scalars and products; 12 are 57-octet public keys, which a
+#   56-octet ABI cannot be given (counted, skipped).
+fetch wycheproof/x448_test.json "$wycheproof/x448_test.json" 0f8f7199dbd47d1805cb9b13dfb29c207406bc786827bfd9ba7b73374b830fe5
 fetch wycheproof/ecdh_secp256r1_ecpoint_test.json "$wycheproof/ecdh_secp256r1_ecpoint_test.json" 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
 fetch wycheproof/ecdsa_secp256r1_sha256_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha256_p1363_test.json" c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
 fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha512_p1363_test.json" 95c41daca2101540641cc13ccab128d67ad665eaf8349896434e1e6a0c5c68fc

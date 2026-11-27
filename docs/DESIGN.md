@@ -1481,6 +1481,38 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      defaults too), 41 rounds: ffdhe2048 public key 270 us against 330 (1.21x), shared secret 288
      against 352 (1.23x); ffdhe3072 697 / 739 against 843 / 898 (1.21x); ffdhe4096 1.43 / 1.52 ms
      against 1.77 / 1.88 (1.24x); v3 2.3-2.5x v1.
+   - **X448** (2026-11-27), `crypto/x448.asm`: `httpasm_x448` (the shared secret; -1, the zeros
+     written, for a small-order point) and `httpasm_x448_public_key` (X448(k, 5); -1 for the one
+     clamped scalar whose key is zero: 4q, which X448's clamped range holds, unlike X25519's).
+     *The field*, at both versions: eight 56-bit limbs, Karatsuba over phi = 2^224 (phi^2 = phi
+     + 1 folds whole limbs): a product is 48 multiplications in OpenSSL's arch_64 column form
+     (from libdecaf), a square three 4-limb squares (30); sums and differences stay uncarried (a -
+     b is a + 2p - b); v3 multiplies with mulx, v1 with mul. Seven 64-bit limbs were weighed and
+     left: as many products, but 2^224 falls mid-limb (every reduction shifts by 32) and every
+     sum needs carries. A scratchpad model (x448/model.py) ran this arithmetic step for step
+     over RFC 7748's vectors and iterations, Wycheproof and random cases, checking every column
+     sum (below 2^120: a column's carry fits a qword) before the assembly, which then passed
+     everything on its first run. *Speed, measured on the way* (TSC ticks): a product chained to
+     the next took 105 ticks while the products' sums were vector loads of qword-stored outputs
+     (a load spanning several stores waits for them to reach the cache; 89 with qword loads, 113
+     with the outputs packed into vectors instead, which costs port 5 that mulx already fills),
+     so elements move as qwords only. Unchained, a product still costs ~89 ticks where its 48
+     multiplications alone take 51 (one mulx a cycle): llvm-mca's Golden Cove model puts the
+     product at 438 micro-operations, dispatch-bound; its sums, column ends and final carries
+     cost ~40 ticks (each part measured by leaving it out). The ladder computes its products in
+     pairs interleaved column by column (FE448_MUL2, FE448_SQR2: no pointer registers, frame
+     offsets), so one chain fills the other's waits: 81.6 ticks a product paired against 90.5
+     alone, the whole function 405k ticks to 372k. Constant time: cmov swaps, the scalar's qword
+     following the public bit number; z2^(p - 2) by a 453-squaring chain. *Proven by* X448Tests
+     (RFC 7748 5.2's vectors and its 1 and 1,000 iterations, 6.2's keys and secret, Wycheproof's
+     498 tests that fit 56 octets with its 11 zero secrets, a BigInteger ladder on 120 random
+     and non-canonical cases, the public key against the ladder at u = 5 on 324 scalars, small-
+     order points, the zero public key of 4q, inputs against guard pages, outputs exactly 56
+     octets, in place), `tests/native/tiers` (400 runs at every tier equal to v1's),
+     `tests/native/stack` (2,248 octets deep). *Measured* against OpenSSL 3.0.13 (EVP_PKEY_X448,
+     41 rounds): shared secret 124.6 us against 204.7 (1.64x), public key 115.7 against 187.0
+     (1.62x), a key share 241 against 390 (1.62x); v3 and v1 equal (mul and mulx cost the same
+     here). Next for it: the public key from Ed448's fixed base (as X25519's comes from Ed25519's).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

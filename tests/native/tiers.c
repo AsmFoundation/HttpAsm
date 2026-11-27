@@ -1906,6 +1906,101 @@ static int x25519_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_x448, httpasm_x448_public_key: by versions (crypto/x448.asm) ------------------
+ * v1 (mul) against v3 (mulx), both on eight 56-bit limbs with the ladder's products in pairs.
+ * Every tier must give v1's shared secret, return value and public key. Scalars and points end
+ * against the guard page (an over-read faults); outputs are followed by canaries. */
+
+/* x448_tiers: `randoms` random scalars and points (a fifth non-canonical, p to 2^448 - 1, and
+ * every so often a small-order point: u = 0, 1 or p - 1); and each scalar's public key, which must
+ * equal the tier's own general ladder at u = 5 (its own code path: a product by 5 in place of one
+ * product a step) and v1's. Returns 0 when every tier agrees with v1, 1 at the first difference. */
+static int x448_tiers(long randoms)
+{
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        uint8_t *scalar = page_end - 112, *point = page_end - 56;
+        for (size_t k = 0; k < 56; k++) {
+            scalar[k] = (uint8_t)rng();
+            point[k] = (uint8_t)rng();
+        }
+        if (i % 5 == 2) {                                   /* p + (0 .. 2^224 - 1): all ones but limb 28's octet */
+            for (size_t k = 28; k < 56; k++)
+                point[k] = 0xFF;
+            point[28] = 0xFE;
+        }
+        if (i % 40 == 3) {                                  /* u = 0, 1, p - 1: small order */
+            memset(point, 0, 56);
+            if (i % 120 == 43)
+                point[0] = 1;
+            if (i % 120 == 83) {
+                memset(point, 0xFF, 56);
+                point[0] = 0xFE;
+                point[28] = 0xFE;
+            }
+        }
+        uint8_t expected[56], expected_public[56], out[56 + 16];
+        int expected_result = 0, expected_public_result = 0;
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            memset(out, 0xC3, sizeof out);
+            int result = httpasm_x448(out, scalar, point);
+            for (size_t k = 56; k < sizeof out; k++) {
+                if (out[k] != 0xC3) {
+                    fprintf(stderr, "httpasm_x448 at %s wrote past its 56 octets\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (t == 0) {
+                memcpy(expected, out, 56);
+                expected_result = result;
+            } else if (memcmp(out, expected, 56) != 0 || result != expected_result) {
+                fprintf(stderr, "httpasm_x448 at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("scalar", scalar, 56);
+                dump("point", point, 56);
+                return 1;
+            }
+            int zero = 1;
+            for (size_t k = 0; k < 56; k++)
+                zero &= out[k] == 0;
+            if (result != (zero ? -1 : 0)) {
+                fprintf(stderr, "httpasm_x448 at %s returned %d for a %s result\n", cap_names[t], result, zero ? "zero" : "nonzero");
+                return 1;
+            }
+            {
+                /* every round, the public key against v1's and against this tier's own general
+                 * ladder at u = 5 */
+                static const uint8_t five[56] = { 5 };
+                uint8_t ladder[56];
+                memset(out, 0xC3, sizeof out);
+                int public_result = httpasm_x448_public_key(out, scalar);
+                for (size_t k = 56; k < sizeof out; k++) {
+                    if (out[k] != 0xC3) {
+                        fprintf(stderr, "httpasm_x448_public_key at %s wrote past its 56 octets\n", cap_names[t]);
+                        return 1;
+                    }
+                }
+                int ladder_result = httpasm_x448(ladder, scalar, five);
+                if (memcmp(out, ladder, 56) != 0 || public_result != ladder_result) {
+                    fprintf(stderr, "httpasm_x448_public_key at %s differs from the ladder at u = 5\n", cap_names[t]);
+                    dump("scalar", scalar, 56);
+                    return 1;
+                }
+                if (t == 0) {
+                    memcpy(expected_public, out, 56);
+                    expected_public_result = public_result;
+                } else if (memcmp(out, expected_public, 56) != 0 || public_result != expected_public_result) {
+                    fprintf(stderr, "httpasm_x448_public_key at %s differs from v1\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_x448: %ld scalar multiplications and public keys at every tier, every one equal to v1's (each public key to the ladder at u = 5)\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_p256_*: by versions (crypto/p256.asm) ---------------------------------------------
  * v1 (mul, SSE2 table scans) against v3 (mulx with adcx/adox, AVX2 scans, with ADX). Every tier
  * must give v1's public key, shared secret, signature and verdicts, return values included.
@@ -2987,6 +3082,8 @@ int main(int argc, char **argv)
         failed = chacha_tiers(randoms / 100);
     if (!failed)
         failed = x25519_tiers(randoms / 1000);
+    if (!failed)
+        failed = x448_tiers(randoms / 2000);
     if (!failed)
         failed = p256_tiers(randoms / 1000);
     if (!failed)

@@ -100,6 +100,8 @@ extern httpasm_chacha20_poly1305_seal ; int (key[32], nonce[12], aad, aad_length
 extern httpasm_chacha20_poly1305_open ; int (key[32], nonce[12], aad, aad_length, in, length, tag[16], out): 0, -1 (out zeroed)
 extern httpasm_x25519               ; int (out[32], scalar[32], point[32]): 0, -1 when out is all zeros (small-order point)
 extern httpasm_x25519_public_key    ; void (out[32], scalar[32]): X25519(scalar, 9)
+extern httpasm_x448                 ; int (out[56], scalar[56], point[56]): 0, -1 when out is all zeros (small-order point)
+extern httpasm_x448_public_key      ; int (out[56], scalar[56]): X448(scalar, 5); -1 for the one all-zero key (scalar 4q)
 extern httpasm_p256_public_key      ; int (public_key[65], private_key[32]): 0, -1 when the key is not in [1, n)
 extern httpasm_p256_ecdh            ; int (shared[32], private_key[32], peer_key[65]): 0, -1 (key or point refused; zeros)
 extern httpasm_p256_sign            ; int (signature[64], private_key[32], digest, length, entropy[32] or NULL): 0, -1

@@ -6,7 +6,8 @@
  * mapped below it (a stack clash: the class of CVE-2017-1000364). Every function with a frame
  * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
  * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-384's and P-256's,
- * Ed25519's and X25519's - at v1 and at the best tier:
+ * Ed25519's, X25519's and X448's (its ladder's frame, then its inverse's below it) - at v1 and at
+ * the best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
  *   - it runs again, in a forked child, on stacks too small for that depth (from 64 octets short
  *     down to 1 KiB, every 1000 octets: the guard page sits at every kind of place in the frame),
@@ -182,6 +183,9 @@ static void run_ed_sign(void) { httpasm_ed25519_sign(out, &ed_key, ed_message, s
 static void run_ed_verify(void) { result = httpasm_ed25519_verify(ed_public, ed_message, sizeof ed_message, ed_signature); out_n = 0; }
 static void run_x25519_public_key(void) { httpasm_x25519_public_key(out, x_scalar); out_n = 32; result = 0; }
 static void run_x25519(void) { result = httpasm_x25519(out, x_scalar, x_point); out_n = 32; }
+static uint8_t x448_scalar[56], x448_point[56];
+static void run_x448_public_key(void) { result = httpasm_x448_public_key(out, x448_scalar); out_n = 56; }
+static void run_x448(void) { result = httpasm_x448(out, x448_scalar, x448_point); out_n = 56; }
 static void run_rsa_public_key_init(void)
 {
     httpasm_rsa_public_key key;
@@ -242,6 +246,7 @@ static const stack_call calls[] = {
     { "ed25519 public_key", run_ed_public_key }, { "ed25519 private_key_init", run_ed_key_init },
     { "ed25519 sign", run_ed_sign }, { "ed25519 verify", run_ed_verify },
     { "x25519 public_key", run_x25519_public_key }, { "x25519", run_x25519 },
+    { "x448 public_key", run_x448_public_key }, { "x448", run_x448 },
     { "rsa public_key_init", run_rsa_public_key_init }, { "rsa verify_pkcs1", run_rsa_verify_pkcs1 },
     { "rsa verify_pss", run_rsa_verify_pss }, { "rsa private_key_init", run_rsa_private_key_init },
     { "rsa sign_pkcs1", run_rsa_sign_pkcs1 }, { "rsa sign_pss", run_rsa_sign_pss },
@@ -520,6 +525,15 @@ static int prepare(void)
     httpasm_ed25519_private_key_init(&ed_key, ed_seed);
     httpasm_ed25519_sign(ed_signature, &ed_key, ed_message, sizeof ed_message);
     httpasm_x25519_public_key(x_point, seed);
+    for (size_t k = 0; k < 56; k++)
+        x448_scalar[k] = (uint8_t)(0x6D ^ (7 * k));
+    uint8_t x448_other[56];
+    for (size_t k = 0; k < 56; k++)
+        x448_other[k] = (uint8_t)(0x91 + 3 * k);
+    if (httpasm_x448_public_key(x448_point, x448_other) != 0) {
+        fprintf(stderr, "stack: X448 refused its own key\n");
+        return 1;
+    }
     for (int i = 0; i < 7; i++) {
         rsa_lengths[i] = hex_octets(rsa_hex[i], rsa_octets[i]);
         if (rsa_lengths[i] == 0) {

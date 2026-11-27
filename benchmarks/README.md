@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: X448.** The shared secret of a random scalar and u-coordinate, the public key
+(X448(k, 5)), and a key share's whole work (the public key, then the shared secret). Beside
+OpenSSL 3.0.13 through EVP_PKEY_X448: its derive with the keys and context made once; its
+public key from EVP_PKEY_new_raw_private_key and EVP_PKEY_get_raw_public_key; a key share as a
+TLS stack drives it (the private key, the peer's key, a context, the derive). 41 rounds:
+
+| Case | v3 | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| shared secret | 124.6 us | 125.1 us | 204.7 us | 1.64x OpenSSL |
+| public key | 115.7 us | 115.4 us | 187.0 us | 1.62x OpenSSL |
+| key share | 241.1 us | 241.1 us | 389.6 us | 1.62x OpenSSL |
+
+The two versions differ in the multiplication only (mulx, or mul) and cost the same: a product
+here is dispatch-bound (its 48 multiplications take 51 TSC ticks alone, the whole product ~89),
+so mulx's freedom from flags and fixed registers buys nothing. The ladder's products run in
+pairs, interleaved (405k ticks a shared secret before, 372k after). docs/DESIGN.md has the
+measurements that chose the design.
+
 **2026-11-27: FFDHE.** RFC 7919's groups at 2048, 3072 and 4096 bits, exponents of the advised
 minimum length (225, 275, 325 bits: OpenSSL's defaults for these groups too): a public key 2^x mod
 p and a shared secret with a peer's key made before the loop. Beside OpenSSL 3.0.13's own

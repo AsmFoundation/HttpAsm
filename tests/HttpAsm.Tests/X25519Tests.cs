@@ -358,7 +358,8 @@ public sealed unsafe partial class X25519Tests
     /// <param name="to">The line that ends it.</param>
     /// <returns>The values in order.</returns>
     /// <exception cref="InvalidDataException">A heading was not found.</exception>
-    private static List<(string Label, byte[] Value)> RfcValues(string part, string from, string to)
+    /// <remarks>X448Tests reads its RFC 7748 vectors through this too (internal for that).</remarks>
+    internal static List<(string Label, byte[] Value)> RfcValues(string part, string from, string to)
     {
         string[] lines = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "specs", "rfc", "rfc7748.txt"));
         int heading = Array.FindIndex(lines, l => l.StartsWith(part, StringComparison.Ordinal));

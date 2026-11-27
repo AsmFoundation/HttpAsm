@@ -540,6 +540,30 @@ int httpasm_x25519(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM
 void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY]);
 
 /* ------------------------------------------------------------------------------------------
+ * X448 (RFC 7748), TLS 1.3's x448 group. The field in eight 56-bit limbs at both versions (mulx,
+ * or mul), Karatsuba over 2^224; the ladder computes its products in pairs, interleaved. Both
+ * constant time. Stack: 2,248 octets (tests/native/stack measures it).
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_X448_KEY 56             /* octets of a scalar, a u-coordinate, a shared secret */
+
+/* out = X448(scalar, point): the shared secret of a private scalar and a peer's public
+ * u-coordinate (values from p up are taken modulo p, as RFC 7748 requires; X448 masks no bit).
+ * Returns 0; or -1 when out is all zeros, which a point of small order gives: TLS 1.3 must abort
+ * then (RFC 9846 7.4.2), and the zeros are written all the same. The scalar is clamped here: any
+ * 56 random octets are a valid private key. out may be the scalar or the point (it is written
+ * last). */
+int httpasm_x448(uint8_t out[HTTPASM_X448_KEY], const uint8_t scalar[HTTPASM_X448_KEY],
+                 const uint8_t point[HTTPASM_X448_KEY]);
+
+/* out = X448(scalar, 5): the public key of a private scalar, by the ladder with the base point's
+ * u = 5 (a product by 5 in place of one product a step). Returns 0; or -1 when out is all zeros,
+ * which one clamped scalar gives: 4q, q the base point's prime order (X448's clamped range,
+ * unlike X25519's, holds a multiple of q; a random scalar never meets it, but such a key share
+ * would make every peer abort). */
+int httpasm_x448_public_key(uint8_t out[HTTPASM_X448_KEY], const uint8_t scalar[HTTPASM_X448_KEY]);
+
+/* ------------------------------------------------------------------------------------------
  * NIST P-256 (SP 800-186; TLS's secp256r1): ECDH for TLS 1.3's secp256r1 key share and
  * SecP256r1MLKEM768, ECDSA (FIPS 186-5) for ecdsa_secp256r1_sha256 and certificates. Versions:
  * mulx with adcx/adox and AVX2 table scans, and mul with SSE2; all constant time in the private

@@ -974,6 +974,110 @@ static bench_rival x25519_share_rivals[] = {
     { openssl_name, openssl_x25519_share },
 };
 
+/* ---- X448: the ladder alone, the public key, and a key share's whole X448 work. OpenSSL's
+ * rivals go through the same EVP_PKEY functions as X25519's (openssl_load_x25519 loads them),
+ * with EVP_PKEY_X448: its derive is curve448's own ladder (libdecaf's 56-bit limbs in C), its
+ * public key (from EVP_PKEY_new_raw_private_key) the precomputed fixed-base comb. */
+
+enum { OPENSSL_PKEY_X448 = 1035 };          /* EVP_PKEY_X448 (NID_X448) */
+
+/* bench_x448: see bench.h. */
+void bench_x448(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[56];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_x448(out, c->data, c->data + 56);
+    bench_sink = out[0];
+}
+
+/* bench_x448_public_key: see bench.h. */
+void bench_x448_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[56];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_x448_public_key(public_key, c->data);
+    bench_sink = public_key[0];
+}
+
+/* bench_x448_share: see bench.h. */
+void bench_x448_share(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[56], out[56];
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_x448_public_key(public_key, c->data);
+        b->api.httpasm_x448(out, c->data, c->data + 56);
+    }
+    bench_sink = out[0] + public_key[0];
+}
+
+/* openssl_x448: OpenSSL's derive alone: the keys and the context made once, EVP_PKEY_derive
+ * `calls` times (the ladder plus EVP's per-call cost). */
+static void openssl_x448(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *private_key = openssl_new_private(OPENSSL_PKEY_X448, NULL, c->data, 56);
+    void *peer = openssl_new_public(OPENSSL_PKEY_X448, NULL, c->data + 56, 56);
+    void *ctx = private_key && peer ? openssl_pkey_ctx_new(private_key, NULL) : NULL;
+    unsigned char out[56] = { 0 };
+    if (ctx != NULL && openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = 56;
+            openssl_derive(ctx, out, &length);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(private_key);
+    bench_sink = out[0];
+}
+
+/* openssl_x448_share: a key share as a TLS stack drives OpenSSL per handshake: the private key
+ * from raw octets (which computes its public key), the peer's key, a context, the derive. */
+static void openssl_x448_share(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[56] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *private_key = openssl_new_private(OPENSSL_PKEY_X448, NULL, c->data, 56);
+        void *peer = openssl_new_public(OPENSSL_PKEY_X448, NULL, c->data + 56, 56);
+        void *ctx = openssl_pkey_ctx_new(private_key, NULL);
+        size_t length = 56;
+        if (openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1)
+            openssl_derive(ctx, out, &length);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(peer);
+        openssl_pkey_free(private_key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_x448_public_key: the private key from raw octets (OpenSSL derives its public key then,
+ * by its fixed-base comb) and the public key taken, each call. */
+static void openssl_x448_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[56] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *private_key = openssl_new_private(OPENSSL_PKEY_X448, NULL, c->data, 56);
+        size_t length = sizeof out;
+        openssl_get_raw_public(private_key, out, &length);
+        openssl_pkey_free(private_key);
+    }
+    bench_sink = out[0];
+}
+
+static bench_rival x448_rivals[] = {
+    { openssl_name, openssl_x448 },
+};
+
+static bench_rival x448_public_key_rivals[] = {
+    { openssl_name, openssl_x448_public_key },
+};
+
+static bench_rival x448_share_rivals[] = {
+    { openssl_name, openssl_x448_share },
+};
+
 /* ---- P-256: ECDH, the public key, a key share, ECDSA's signature and verification. */
 
 /* The P-256 cases' input: a private key, RFC 6979 A.2.5's public key as the peer's, a digest,
@@ -2731,6 +2835,30 @@ void bench_suite_rivals(void)
         c.ours = x25519_cases[i].ours;
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = x25519 ? x25519_cases[i].rivals : NULL;
+        c.rival_count = x25519 ? 1 : 0;
+        bench_add(&c);
+    }
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } x448_cases[] = {
+        { "x448", "shared secret", bench_x448, x448_rivals },
+        { "x448_public_key", "public key", bench_x448_public_key, x448_public_key_rivals },
+        { "x448_key_share", "public key + shared secret", bench_x448_share, x448_share_rivals },
+    };
+    for (size_t i = 0; i < sizeof x448_cases / sizeof x448_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = x448_cases[i].name;
+        c.input = x448_cases[i].input;
+        c.data = sha;                       /* the scalar (56 octets), then the peer's u (any 56 are one) */
+        c.length = 112;
+        c.octets = 0;
+        c.ours = x448_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = x25519 ? x448_cases[i].rivals : NULL;   /* (openssl_load_x25519 loaded the EVP functions) */
         c.rival_count = x25519 ? 1 : 0;
         bench_add(&c);
     }

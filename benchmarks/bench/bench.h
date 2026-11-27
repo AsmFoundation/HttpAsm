@@ -71,6 +71,8 @@
     X(httpasm_chacha20_poly1305_seal) \
     X(httpasm_x25519)               \
     X(httpasm_x25519_public_key)    \
+    X(httpasm_x448)                 \
+    X(httpasm_x448_public_key)      \
     X(httpasm_random)               \
     X(httpasm_p256_public_key)      \
     X(httpasm_p256_ecdh)            \
@@ -278,6 +280,18 @@ void bench_x25519_public_key(const bench_build *b, const bench_case *c, long cal
 /* bench_x25519_share: a TLS 1.3 key share's X25519 work per handshake: the public key of the
  * case's scalar, then the shared secret with the peer's point (suite_rivals.c). */
 void bench_x25519_share(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_x448: httpasm_x448 of the case's first 56 octets (the scalar) and the next 56 (the
+ * peer's u-coordinate), `calls` times: the ladder alone (suite_rivals.c). */
+void bench_x448(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_x448_public_key: httpasm_x448_public_key of the case's first 56 octets (X448(k, 5): the
+ * ladder with a product by 5 in place of one product a step). */
+void bench_x448_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_x448_share: a TLS 1.3 key share's X448 work per handshake: the public key of the case's
+ * scalar, then the shared secret with the peer's point (suite_rivals.c). */
+void bench_x448_share(const bench_build *b, const bench_case *c, long calls);
 
 /* The P-256 cases' input (bench_p256_input, suite_rivals.c): a private key (32 octets), a
  * peer's public key (65: RFC 6979 A.2.5's), a digest (32) and entropy (32). */

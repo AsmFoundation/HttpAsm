@@ -352,6 +352,21 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_x25519_public_key")]
     internal static partial void X25519PublicKey(byte* output, byte* scalar);
 
+    /// <summary>int httpasm_x448(out[56], scalar[56], point[56]).</summary>
+    /// <param name="output">Receives X448(scalar, point); may be the scalar or the point.</param>
+    /// <param name="scalar">The private scalar (clamped by the function).</param>
+    /// <param name="point">The peer's u-coordinate (from p up taken modulo p).</param>
+    /// <returns>0, or -1 when the output is all zeros (a small-order point; zeros written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_x448")]
+    internal static partial int X448(byte* output, byte* scalar, byte* point);
+
+    /// <summary>int httpasm_x448_public_key(out[56], scalar[56]).</summary>
+    /// <param name="output">Receives X448(scalar, 5).</param>
+    /// <param name="scalar">The private scalar (clamped by the function).</param>
+    /// <returns>0, or -1 for the one all-zero public key (the clamped scalar 4q; zeros written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_x448_public_key")]
+    internal static partial int X448PublicKey(byte* output, byte* scalar);
+
     /// <summary>int httpasm_p256_public_key(public_key[65], private_key[32]).</summary>
     /// <param name="publicKey">Receives 04 || x || y of d G; all zeros when d is refused.</param>
     /// <param name="privateKey">d, 32 big-endian octets.</param>
