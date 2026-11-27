@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: the whole servers at phase H's end** ([results/2026-11-27-0349.md](results/2026-11-27-0349.md),
+7271315, 5 rounds of 10 s, the host quiet). Against M1's last run ([results/2026-11-23-1932.md](results/2026-11-23-1932.md),
+f75c380, the same machine and load generators):
+
+| Scenario | CPU µs/request, M1 -> now | requests/s against nginx, M1 -> now |
+|---|---:|---:|
+| h1 (wrk, 256 connections) | 4.13 -> 3.86 | 1.93x -> 1.78x |
+| h1-pipelined (16 in flight) | 0.55 -> 0.49 | 10.75x -> 10.24x |
+| h2 (64 connections, 32 streams) | 0.90 -> 0.81 | 7.96x -> 8.05x |
+
+M1's `httpasm` ran on io_uring, then the default; today's runs on epoll, the default since
+b932500, so the comparison is rough. In `h1` the A/A control (`httpasm-control`) sits 7% from
+`httpasm` this time: what the kernel's networking costs per request (most of 3.8 µs) moves more
+than any parser change can, and only the pipelined and HTTP/2 scenarios, where user space is a
+larger part of each request, show step 4 above that noise. The HTTP/1.1-only build is
+indistinguishable from the full one in both HTTP/1.1 scenarios (the isolation question,
+docs/DESIGN.md section 4, still answered).
+
 **2026-11-27: phase H step 4, HTTP/2's request rules.** SDE's profile of `httpasm_h2_request` on
 the browser request's 18 fields put 30% of its 5,133 instructions in `h2_name`, which checked
 each field name octet by octet, and 512 in the `:path`'s octet loop. From v2 both run through
