@@ -587,6 +587,8 @@ int httpasm_p256_verify(const uint8_t public_key[HTTPASM_P256_POINT], const uint
  * SecP384r1MLKEM1024, ECDSA (FIPS 186-5) for ecdsa_secp384r1_sha384 and the certificates of
  * P-384 roots and intermediates (a TLS client verifies their signatures in every such chain).
  * P-256's functions at 48-octet scalars; the same versions and the same constant-time rules.
+ * Stack: up to about 7 KiB (7,392 octets: a signature at the best tier, measured by
+ * tests/native/stack), touched a page at a time on the way down (no stack clash).
  * ------------------------------------------------------------------------------------------ */
 
 #define HTTPASM_P384_SCALAR    48       /* octets of a private key, a shared secret, r or s */
@@ -730,6 +732,11 @@ int httpasm_mlkem1024_decaps(uint8_t shared[HTTPASM_MLKEM_SHARED], const uint8_t
  * RSAEncryption and its kin) and RSASSA-PSS with MGF1 (TLS 1.3's rsa_pss_rsae_*, rsa_pss_pss_*),
  * for moduli of 1024 to 8192 bits. Every input is public: these run in variable time. Products
  * by mulx with adcx/adox, or by mul.
+ * Stack: verification needs up to about 13 KiB of the calling thread's stack (a key's setup,
+ * 12,944 octets measured by tests/native/stack; a verification 7,304), signing about 54 KiB (a
+ * private key's setup 54,992 octets, a signature 48,192: the table of powers and the CRT's
+ * values), each touched a page at a time on the way down, so a thread with too little faults on
+ * its guard page rather than writing past it; signing's frame is wiped before it returns.
  * ------------------------------------------------------------------------------------------ */
 
 #define HTTPASM_HASH_SHA1   1           /* PKCS#1 v1.5 verification only (legacy certificates) */

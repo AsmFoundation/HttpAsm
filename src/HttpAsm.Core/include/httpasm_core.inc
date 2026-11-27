@@ -100,4 +100,31 @@ extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", 
 %include "semantics/fields.inc"
 %include "semantics/authority.inc"
 
+; -----------------------------------------------------------------------------
+; HA_STACK_DOWN size, counter: rsp -= size, touching the stack every 4032 octets on the way down.
+; A frame of more than a page taken in one subtraction could step over a thread's guard page (one
+; page by default: glibc's pthreads) and write into whatever is mapped below it, when that thread's
+; stack is nearly spent (a stack clash: CVE-2017-1000364's class); touching each page in turn
+; makes such a thread fault on its guard instead. 4032 = 63 lines: under a page from the last
+; touch even after an alignment of rsp down by up to 63 octets just before. tests/native/stack
+; proves every function that uses it (on stacks too small, a fault inside the guard page and
+; nothing written below it).
+; For frames of more than 4032 octets only (the loop runs at least once: its test at the top so
+; both of its branch edges run for any count from 1); size may be an assembler expression (equ),
+; which a %rep could not take. counter is a 32-bit register the caller does not need (clobbered).
+; Clobbers the flags.
+; -----------------------------------------------------------------------------
+%macro HA_STACK_DOWN 2
+    mov         %2, (%1) / 4032
+%%probe:
+    test        %2, %2
+    jz          %%rest
+    sub         rsp, 4032
+    or          qword [rsp], 0
+    dec         %2
+    jmp         %%probe
+%%rest:
+    sub         rsp, (%1) % 4032
+%endmacro
+
 %endif

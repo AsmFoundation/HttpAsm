@@ -603,7 +603,7 @@ rsa_rr_div:
     push        r14
     push        r15
     mov         rax, rsp
-    sub         rsp, RR_FRAME
+    HA_STACK_DOWN RR_FRAME, r11d            ; (over a page: taken a page at a time)
     and         rsp, -16
     mov         [rsp + RR_OLDSP], rax
     mov         [rsp + RR_RR], rdi
@@ -776,6 +776,10 @@ RV_CNT      equ 6440                        ; MGF1's counter
 RV_OLDSP    equ 6448                        ; the caller's rsp
 RV_FRAME    equ 6464                        ; a multiple of 64
 
+; RV_ENTER: the pushes and the 64-aligned frame at rbp (RV_OLDSP keeps the caller's rsp), taken a
+; page at a time (HA_STACK_DOWN: the frame passes a page; no stack clash). Keeps rdi, rsi, rdx, rcx,
+; r8, r9 (the arguments) and r10 (httpasm_rsa_sign_pss's seventh, loaded before); clobbers rax,
+; r11, the flags.
 %macro RV_ENTER 0
     push        rbx
     push        rbp
@@ -785,7 +789,7 @@ RV_FRAME    equ 6464                        ; a multiple of 64
     push        r15
     mov         rax, rsp
     and         rsp, -64
-    sub         rsp, RV_FRAME
+    HA_STACK_DOWN RV_FRAME, r11d
     mov         rbp, rsp
     mov         [rbp + RV_OLDSP], rax
 %endmacro
@@ -1456,7 +1460,9 @@ RS_BELOW    equ 4096                        ; the callees' stack under the frame
                                             ; covers: the deepest, a square of 128 limbs (the
                                             ; fault check's), takes about 2.2 KiB
 
-; RS_ENTER: the pushes and a 64-aligned frame of RS_FRAME octets at rbp (RV_OLDSP keeps rsp).
+; RS_ENTER: the pushes and a 64-aligned frame of RS_FRAME octets at rbp (RV_OLDSP keeps rsp), taken
+; a page at a time (HA_STACK_DOWN: about 43 KiB; no stack clash). Keeps rdi, rsi, rdx, rcx, r8, r9
+; and r10 (httpasm_rsa_sign_pss's seventh argument, loaded before it); clobbers rax, r11, the flags.
 %macro RS_ENTER 0
     push        rbx
     push        rbp
@@ -1466,7 +1472,7 @@ RS_BELOW    equ 4096                        ; the callees' stack under the frame
     push        r15
     mov         rax, rsp
     and         rsp, -64
-    sub         rsp, RS_FRAME
+    HA_STACK_DOWN RS_FRAME, r11d
     mov         rbp, rsp
     mov         [rbp + RV_OLDSP], rax
 %endmacro

@@ -1437,6 +1437,24 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      encapsulation 8.60 against 11.99 (1.40x), decapsulation 11.12 against 15.40 (1.39x);
      ML-KEM-1024 14.19 / 13.39 / 16.63 against 15.70 / 17.16 / 22.06 (1.10x, 1.29x, 1.34x); v3
      3.5-5.2x v1.
+   - **Stack clash** (2026-11-27, hardening found while sizing ML-KEM's frames): a function that
+     takes more than a page of stack in one subtraction and then writes below it can step over a
+     thread's guard page (one page: glibc's pthreads default) into whatever is mapped below, when
+     that thread's stack is nearly spent (CVE-2017-1000364's class; compilers probe for it with
+     -fstack-clash-protection). A listing of every single subtraction from rsp in the .so found
+     four such frames besides ML-KEM's: P-384's (5,056 octets), RSA's verification and key
+     setup (6,464), its signing and private-key setup (43,968) and rsa_rr_div (4,184). Each now
+     takes its frame through `HA_STACK_DOWN` (httpasm_core.inc: a touch every 4032 octets on the
+     way down, a loop whose test sits at the top so its edges run for any count; ML-KEM's MK_ENTER
+     does the same by %rep), and no function of the library subtracts more than 4032 octets at
+     once. `tests/native/stack` proves it for 29 functions at v1 and at the best tier (ML-KEM,
+     P-256, P-384, Ed25519, X25519, RSA's six): the depth measured on a painted stack (RSA's
+     private-key setup goes 54,992 octets deep, its signing 48,192, ML-KEM-1024 at v3 27,232),
+     then on stacks too small by 64 octets to all but 1 KiB, each above a PROT_NONE guard and a
+     64 KiB shared sentinel in a forked child: 781 runs, every one faulting inside its guard with
+     the sentinel intact, and each function on its depth + 1 KiB leaving the main stack's outputs.
+     Its negative control is real: built from the sources before the fix, RSA's public-key setup
+     at v1 on a 3,872-octet stack did not fault and wrote into the sentinel below the guard.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

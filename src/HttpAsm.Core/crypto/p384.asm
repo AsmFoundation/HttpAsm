@@ -152,7 +152,9 @@ PF_FRAME    equ 5056                        ; a multiple of 64
 %endmacro
 
 ; P384_ENTER / P384_LEAVE: the six kept registers pushed, the 64-aligned frame at rbp (the
-; caller's rsp kept above PF_END, so the wipe leaves it); keeps rdi, rsi, rdx, rcx, r8, r9.
+; caller's rsp kept above PF_END, so the wipe leaves it); keeps rdi, rsi, rdx, rcx, r8, r9, r10.
+; The frame passes a page, so it is taken a page at a time (HA_STACK_DOWN, counting in r11: no
+; stack clash).
 %macro P384_ENTER 0
     push        rbx
     push        rbp
@@ -162,7 +164,7 @@ PF_FRAME    equ 5056                        ; a multiple of 64
     push        r15
     mov         rax, rsp
     and         rsp, -64
-    sub         rsp, PF_FRAME
+    HA_STACK_DOWN PF_FRAME, r11d
     mov         rbp, rsp
     mov         [rbp + PF_OLDSP], rax
 %endmacro
