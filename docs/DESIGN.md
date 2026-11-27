@@ -1007,8 +1007,13 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      0 still comes back 0) in place of the chain: 2.11 us against 3.76 at v3 and 4.03 at v1;
      `bench.sh ab` against 9ba6d8d, three processes: a shared secret 1.047-1.051x at v3 and
      1.055-1.057x at v1 (the tiers suite, proven at every tier), a key share 1.052-1.065x
-     (proven); 32.3 us a shared secret at v3, 37.8 at v1. Next lever: the public key from a
-     precomputed table of base-point multiples (edwards25519's fixed-base method, Ed25519's).
+     (proven); 32.3 us a shared secret at v3, 37.8 at v1. Then the public key from a
+     precomputed table of base-point multiples, as this entry planned: Ed25519's fixed base
+     (`ha_x25519_base_v` in `crypto/ed25519.asm`: k B on edwards25519 from its 43-window table,
+     constant time, then u = (Z + Y) / (Z - Y) by RFC 7748 4.1's birational map, which takes B to
+     u = 9), the ladder's octets on 2,062 scalars and every tier; `bench.sh ab` against e5a7526:
+     a public key 3.65x, 3.57x, 3.64x (8.92 us against 32.5; OpenSSL 44.0: 4.9x), a key share
+     1.540x, 1.538x, 1.535x at v3 and 1.56x at v1 (41.2 us; OpenSSL 87.0: 2.1x), all proven.
    - **Randomness** (2026-11-27), `src/HttpAsm/random.asm` (the OS-side library: the core makes
      no system call): `httpasm_random(buffer, length)`, getrandom(2) with no flags (the urandom
      source: it blocks only until the kernel's pool is first initialized, at boot). Short reads
@@ -1296,10 +1301,9 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      (4.3x), a verification 44.1 us (2.7x); v3 1.18x v1 on a signature, 1.10x on a
      verification. The first cut (Fermat's inversion, every doubling with T) took 10.85, 11.95
      and 47.3 us: the safegcd took 1.65 us from each encoding, the doublings without T about
-     1.5 us more from a verification. Next: X25519's public key by this fixed base (u = (1 + y)
-     / (1 - y) of a B, about 9 us against the ladder's 34), then the field itself (four
-     coordinates at once in AVX2 lanes, as curve25519-dalek's backend does, for verification's
-     doublings).
+     1.5 us more from a verification. X25519's public key now comes from this fixed base too
+     (its entry: 8.92 us against the ladder's 32.5). Next: the field itself (four coordinates at
+     once in AVX2 lanes, as curve25519-dalek's backend does, for verification's doublings).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

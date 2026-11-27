@@ -1731,8 +1731,9 @@ static int chacha_tiers(long randoms)
  * against the guard page (an over-read faults); outputs are followed by canaries. */
 
 /* x25519_tiers: `randoms` random scalars and points (a seventh with bit 255 set, a seventh
- * non-canonical, p to 2^255 - 1, and every so often a small-order point). Returns 0 when every
- * tier agrees with v1, 1 at the first difference. */
+ * non-canonical, p to 2^255 - 1, and every so often a small-order point); and each scalar's
+ * public key, which must equal the tier's own ladder at u = 9 (it comes from edwards25519's fixed
+ * base instead) and v1's. Returns 0 when every tier agrees with v1, 1 at the first difference. */
 static int x25519_tiers(long randoms)
 {
     static const uint8_t small[2][32] = { { 0 }, { 1 } };   /* u = 0 and u = 1: small order */
@@ -1780,9 +1781,25 @@ static int x25519_tiers(long randoms)
                 fprintf(stderr, "httpasm_x25519 at %s returned %d for a %s result\n", cap_names[t], result, zero ? "zero" : "nonzero");
                 return 1;
             }
-            if (i % 8 == 0) {
+            {
+                /* every round, the public key (edwards25519's fixed base) against v1's and against
+                 * this tier's own ladder at u = 9: two separate codes for X25519(scalar, 9) */
+                static const uint8_t nine[32] = { 9 };
+                uint8_t ladder[32];
                 memset(out, 0xC3, sizeof out);
                 httpasm_x25519_public_key(out, scalar);
+                for (size_t k = 32; k < sizeof out; k++) {
+                    if (out[k] != 0xC3) {
+                        fprintf(stderr, "httpasm_x25519_public_key at %s wrote past its 32 octets\n", cap_names[t]);
+                        return 1;
+                    }
+                }
+                httpasm_x25519(ladder, scalar, nine);
+                if (memcmp(out, ladder, 32) != 0) {
+                    fprintf(stderr, "httpasm_x25519_public_key at %s differs from the ladder at u = 9\n", cap_names[t]);
+                    dump("scalar", scalar, 32);
+                    return 1;
+                }
                 if (t == 0) {
                     memcpy(expected_public, out, 32);
                 } else if (memcmp(out, expected_public, 32) != 0) {
@@ -1793,7 +1810,7 @@ static int x25519_tiers(long randoms)
             checked++;
         }
     }
-    printf("httpasm_x25519: %ld scalar multiplications at every tier, every one equal to v1's\n", checked);
+    printf("httpasm_x25519: %ld scalar multiplications and public keys at every tier, every one equal to v1's (each public key to the ladder at u = 9)\n", checked);
     return 0;
 }
 

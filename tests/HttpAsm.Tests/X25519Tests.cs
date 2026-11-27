@@ -8,9 +8,10 @@ namespace HttpAsm.Tests;
 /// own vectors (read from the pinned text: section 5.2's two scalar multiplications and its
 /// iterations, section 6.1's Diffie-Hellman example), to Project Wycheproof's 518 X25519 tests
 /// (twist points, non-canonical and small-order public keys, edge-case scalars), and to the
-/// ladder computed with BigInteger on random scalars and points. tests/run-linux.sh runs the
-/// suite at every CPU tier, so both versions answer: mulx with adcx/adox (v3 with ADX) and mul on
-/// 51-bit limbs (v1).
+/// ladder computed with BigInteger on random scalars and points; and the public key, which is
+/// edwards25519's fixed base rather than the ladder, to the ladder at u = 9. tests/run-linux.sh
+/// runs the suite at every CPU tier, so both versions answer: mulx with adcx/adox (v3 with ADX)
+/// and mul on 51-bit limbs (v1).
 /// </summary>
 public sealed unsafe partial class X25519Tests
 {
@@ -161,6 +162,78 @@ public sealed unsafe partial class X25519Tests
                 byte[] nine = new byte[32];
                 nine[0] = 9;
                 Assert.Equal(LadderReference(scalar, nine), PublicKey(scalar));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The public key against the ladder at u = 9, since the two are separate code: the public
+    /// key is edwards25519's fixed base (crypto/ed25519.asm's ha_x25519_base_v: k B from the
+    /// precomputed table, then u = (1 + y) / (1 - y)), the shared secret the Montgomery ladder.
+    /// 2,000 random scalars and the edges of the clamped range and of the table's signed 6-bit
+    /// digits (all zeros and all ones, which clamp to 2^254 and 2^255 - 8; one bit set at each
+    /// place; runs of ones and zeros that make every digit +32, -32 or 0; alternating patterns),
+    /// each with httpasm_x25519(scalar, 9) and, for the edges and the first 100, the BigInteger
+    /// ladder too.
+    /// </summary>
+    [Fact]
+    public void PublicKeysAreTheLaddersAtNine()
+    {
+        Platform.RequireLinuxX64();
+        byte[] nine = new byte[32];
+        nine[0] = 9;
+        var scalars = new List<byte[]>
+        {
+            new byte[32],
+            Enumerable.Repeat((byte)0xFF, 32).ToArray(),
+            Enumerable.Repeat((byte)0x55, 32).ToArray(),
+            Enumerable.Repeat((byte)0xAA, 32).ToArray(),
+            Enumerable.Repeat((byte)0x0F, 32).ToArray(),
+            Enumerable.Repeat((byte)0xF0, 32).ToArray(),
+        };
+        for (int bit = 0; bit < 256; bit += 5)
+        {
+            byte[] one = new byte[32];
+            one[bit / 8] = (byte)(1 << (bit % 8));
+            scalars.Add(one);
+        }
+
+        foreach (int run in new[] { 5, 6, 7, 12 })
+        {
+            // ones in runs of `run` then zeros: windows whose 7 bits are 0111111 or 1000000 (digit
+            // +32 or -32), or all zeros (digit 0), at many window offsets
+            var bits = new BigInteger();
+            for (int i = 0; i < 256; i++)
+            {
+                if (i / run % 2 == 0)
+                {
+                    bits |= BigInteger.One << i;
+                }
+            }
+
+            byte[] pattern = new byte[32];
+            (bits & ((BigInteger.One << 256) - 1)).TryWriteBytes(pattern, out _, isUnsigned: true);
+            scalars.Add(pattern);
+        }
+
+        int edges = scalars.Count;
+        var random = new Random(41);
+        for (int i = 0; i < 2000; i++)
+        {
+            byte[] scalar = new byte[32];
+            random.NextBytes(scalar);
+            scalars.Add(scalar);
+        }
+
+        for (int i = 0; i < scalars.Count; i++)
+        {
+            byte[] publicKey = PublicKey(scalars[i]);
+            (int result, byte[] ladder) = X25519(scalars[i], nine);
+            Assert.Equal(0, result);
+            Assert.True(ladder.SequenceEqual(publicKey), $"scalar {Convert.ToHexStringLower(scalars[i])}");
+            if (i < edges + 100)
+            {
+                Assert.Equal(Convert.ToHexStringLower(LadderReference(scalars[i], nine)), Convert.ToHexStringLower(publicKey));
             }
         }
     }

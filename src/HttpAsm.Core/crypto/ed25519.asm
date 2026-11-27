@@ -815,6 +815,50 @@ ed_public_key_%3:
     ED_FINISH   E_FRAME, E_END
 
 ; -----------------------------------------------------------------------------
+; void ha_x25519_base_v(uint8_t out[32], const uint8_t scalar[32]): httpasm_x25519_public_key's
+; work (crypto/x25519.asm dispatches here), by this file's fixed base instead of the ladder.
+; X25519(k, 9) is the u-coordinate of k times the Montgomery curve's base point, which is B's
+; image under RFC 7748 4.1's birational map u = (1 + y) / (1 - y) (B's y = 4/5 gives 9), and
+; the map carries k B to it: so u = (Z + Y) / (Z - Y) of k B in extended coordinates. k is the
+; scalar clamped as RFC 7748 5 decodes it (low three bits and bit 255 cleared, bit 254 set):
+; below 2^255, which the 43 windows cover; a multiple of 8 between 2^254 and 2^255, so k B is
+; never the neutral point (L, B's order, is prime and above 2^252) and Z - Y never 0. Constant
+; time as a signature's R = r B; the frame (k, every point) is wiped.
+; -----------------------------------------------------------------------------
+global ha_x25519_base_%3:function hidden (ha_x25519_base_%3.end - ha_x25519_base_%3)
+align 16
+ha_x25519_base_%3:
+    ED_ENTER    E_FRAME
+    mov         [rbp + EF_OUT], rdi
+    mov         rax, [rsi]                  ; k, clamped (decodeScalar25519)
+    and         rax, -8
+    mov         [rbp + EF_ST], rax
+    mov         rax, [rsi + 8]
+    mov         [rbp + EF_ST + 8], rax
+    mov         rax, [rsi + 16]
+    mov         [rbp + EF_ST + 16], rax
+    mov         rax, [rsi + 24]
+    btr         rax, 63
+    bts         rax, 62
+    mov         [rbp + EF_ST + 24], rax
+    call        ed_const_%3
+    lea         rsi, [rbp + EF_ST]
+    call        ed_set_k2
+    call        ed_mul_base_%3              ; ACC = k B
+    %1_ADD      rbp + E_PX, rbp + E_AZ, rbp + E_AY          ; Z + Y (PX: free here)
+    %1_SUB      rbp + E_AZ, rbp + E_AZ, rbp + E_AY          ; Z - Y, where ed_invert reads
+    call        ed_invert_%3                                ; T0 = 1 / (Z - Y)
+    %1_MUL      rbp + E_T1, rbp + E_PX, rbp + E_T0          ; u
+    mov         esi, E_T1
+    mov         edi, EF_CMP
+    call        ed_canon_%3
+    mov         rdi, [rbp + EF_OUT]
+    ED_COPY     rdi, rbp + EF_CMP, 4        ; u, fully reduced, little-endian
+    mov         qword [rbp + EF_RES], 0
+    ED_FINISH   E_FRAME, E_END
+.end:
+
+; -----------------------------------------------------------------------------
 ; void ed_key_init_v(httpasm_ed25519_private_key *key, const uint8_t seed[32]):
 ; httpasm_ed25519_private_key_init: a mod L, the prefix, A.
 ; -----------------------------------------------------------------------------

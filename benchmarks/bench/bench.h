@@ -256,6 +256,10 @@ void bench_chacha_seal(const bench_build *b, const bench_case *c, long calls);
  * peer's u-coordinate), `calls` times: the ladder alone (suite_rivals.c). */
 void bench_x25519(const bench_build *b, const bench_case *c, long calls);
 
+/* bench_x25519_public_key: httpasm_x25519_public_key of the case's first 32 octets (X25519(k, 9):
+ * edwards25519's fixed base since Ed25519, the ladder before). */
+void bench_x25519_public_key(const bench_build *b, const bench_case *c, long calls);
+
 /* bench_x25519_share: a TLS 1.3 key share's X25519 work per handshake: the public key of the
  * case's scalar, then the shared secret with the peer's point (suite_rivals.c). */
 void bench_x25519_share(const bench_build *b, const bench_case *c, long calls);

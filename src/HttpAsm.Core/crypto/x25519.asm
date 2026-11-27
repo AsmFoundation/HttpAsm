@@ -23,17 +23,23 @@
 ; An all-zero result means the peer's point had small order (it carries no secret of ours):
 ; TLS 1.3 aborts then (RFC 9846 7.4.2), so httpasm_x25519 says so with -1, the zeros still
 ; written for callers that want them (RFC 7748 6.1: "MAY check").
+;
+; The public key, X25519(k, 9), does not take the ladder: the base point is fixed, so
+; crypto/ed25519.asm's ha_x25519_base_v computes k B on edwards25519 from its precomputed table
+; (43 signed 6-bit windows, one mixed addition each, constant time) and maps it to u = (1 + y) /
+; (1 - y) (RFC 7748 4.1's birational map, which takes edwards25519's B to u = 9): the same
+; octets as the ladder at u = 9 (X25519Tests compares the two on every case), in about a quarter
+; of its time (see the httpasm_x25519_public_key dispatcher below).
 ; =============================================================================
 default rel
 %include "httpasm_core.inc"
 %include "crypto/fe25519.inc"
 
 extern ha_modinv256                         ; crypto/inverse.asm: x^-1 mod M (safegcd)
+extern ha_x25519_base_v3                    ; crypto/ed25519.asm: X25519(k, 9) by edwards25519's
+extern ha_x25519_base_v1                    ; fixed base, per field version
 
 section .rodata
-align 32
-x25519_base: db 9                           ; the base point's u-coordinate, little-endian
-             times 31 db 0
 FE25519_INVERSE_RECORD                      ; fe25519_mod_p, for ha_modinv256
 
 section .text
@@ -217,14 +223,16 @@ httpasm_x25519:
 ; -----------------------------------------------------------------------------
 ; void httpasm_x25519_public_key(uint8_t out[32], const uint8_t scalar[32])
 ;   out = X25519(scalar, 9), the public key of a private scalar. Never zero: the base point's
-;   order is the large prime, and a clamped scalar is below eight times it.
+;   order is the large prime, and a clamped scalar is below eight times it. Computed by
+;   edwards25519's fixed base (crypto/ed25519.asm's ha_x25519_base_v, see this file's header),
+;   not the ladder: the same octets, the same version choice (v3 with BMI2 and ADX; the table
+;   scans use AVX2 there, which v3 implies).
 ; -----------------------------------------------------------------------------
 global httpasm_x25519_public_key:function (httpasm_x25519_public_key.end - httpasm_x25519_public_key)
 align 16
 httpasm_x25519_public_key:
-    lea         rdx, [rel x25519_base]
-    HA_CPU_PICK HTTPASM_CPU_V3 | HTTPASM_CPU_ADX, .v3  ; (its own dispatch: a jump to the exported
-    jmp         x25519_v1                               ; httpasm_x25519 would go through the PLT)
+    HA_CPU_PICK HTTPASM_CPU_V3 | HTTPASM_CPU_ADX, .v3
+    jmp         ha_x25519_base_v1           ; (tail calls: the version returns to our caller)
 .v3:
-    jmp         x25519_v3
+    jmp         ha_x25519_base_v3
 .end:

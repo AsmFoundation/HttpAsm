@@ -487,7 +487,9 @@ int httpasm_chacha20_poly1305_open(const uint8_t key[HTTPASM_CHACHA20_KEY],
 int httpasm_x25519(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY],
                    const uint8_t point[HTTPASM_X25519_KEY]);
 
-/* out = X25519(scalar, 9): the public key of a private scalar (never all zeros). */
+/* out = X25519(scalar, 9): the public key of a private scalar (never all zeros). Computed from
+ * edwards25519's precomputed fixed base (Ed25519's table, constant time), not the ladder: the
+ * same octets in about a quarter of a shared secret's time. */
 void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY]);
 
 /* ------------------------------------------------------------------------------------------

@@ -393,6 +393,17 @@ tiers suite's shared secret 1.055x, 1.057x, 1.057x at v1 and 1.048x, 1.047x, 1.0
 OpenSSL 87.5). The rivals suite's shared secret gave 1.044x, 1.057x, 1.059x, not proven: its
 first process ran disturbed (its median 17% over its fastest, the interval 0.95-1.10).
 
+Then the public key by edwards25519's fixed base (Ed25519's table, `ha_x25519_base_v`) instead
+of the ladder, with a case of its own (`x25519_public_key`; OpenSSL's rival makes the key from
+raw octets, which derives its public key, and takes it): `bench.sh ab e5a7526 --filter
+'rivals/x25519*'`, 41 rounds, three processes:
+
+| Case | v3 | v1 | before (v3) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---:|---|
+| public key | 8.92 us | 10.55 us | 32.5 us | 44.0 us | 3.65x, 3.57x, 3.64x (proven); 4.9x OpenSSL |
+| key share (public key + shared secret) | 41.2 us | 48.6 us | 64.7 us | 87.0 us | 1.540x, 1.538x, 1.535x (proven); 2.1x OpenSSL |
+| shared secret | | | | | 0.992x, 1.001x, 1.014x: no difference |
+
 **2026-11-27: ChaCha20-Poly1305.** `httpasm_chacha20_poly1305_seal` in the TLS 1.3 shape (a
 new nonce and a 5-octet AAD per record; the key is raw octets) beside OpenSSL 3.0.13's EVP
 driven the same way (the key set once, per record the nonce, the AAD, the text, the final, the
