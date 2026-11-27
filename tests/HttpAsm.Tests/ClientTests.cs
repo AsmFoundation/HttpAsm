@@ -185,7 +185,7 @@ internal sealed class CannedServer : IDisposable
                         {
                             if (i > 0)
                             {
-                                Thread.Sleep(100);                      // the client reads what came so far
+                                Tests.Pause.AtLeast(100);                      // the client reads what came so far
                             }
 
                             socket.Send(Encoding.Latin1.GetBytes(pieces[i]));
@@ -194,7 +194,7 @@ internal sealed class CannedServer : IDisposable
 
                     if (!string.IsNullOrEmpty(after))
                     {
-                        Thread.Sleep(200);
+                        Tests.Pause.AtLeast(200);
                         socket.Send(Encoding.Latin1.GetBytes(after));
                     }
                 }
@@ -210,7 +210,7 @@ internal sealed class CannedServer : IDisposable
                 if (!close)
                 {
                     Settled.Set();                                      // all sent; the connection stays
-                    Thread.Sleep(3000);
+                    Tests.Pause.AtLeast(3000);
                 }
             }
 
@@ -470,7 +470,7 @@ public sealed class ClientTests
         ClientResult first = client.Send("GET", "/");
         Assert.Equal((0, 200, "ok"), (first.Result, first.Status, first.Text));
         Assert.True(server.Settled.Wait(5000, TestContext.Current.CancellationToken), "the canned server did not finish");
-        Thread.Sleep(50);                                           // loopback delivery: what came has arrived
+        Pause.AtLeast(50);                                           // loopback delivery: what came has arrived
 
         Assert.Equal(second, client.Send("GET", "/").Result);
         Assert.Equal(-107, client.Send("GET", "/").Result);
@@ -669,7 +669,7 @@ public sealed class ClientTests
                 // hold at the end drains well within the client's receive timeout.
                 if (Interlocked.Read(ref headLength) < 4 << 20)
                 {
-                    Thread.Sleep(20);
+                    Pause.AtLeast(20);
                 }
             }
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);

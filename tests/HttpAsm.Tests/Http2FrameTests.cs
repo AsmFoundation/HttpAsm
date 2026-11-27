@@ -702,7 +702,7 @@ public sealed class Http2FrameTests
             body.Write(frame.Payload);
             if (body.Length % 65536 < frame.Payload.Length)
             {
-                Thread.Sleep(10);                                   // about 6 MB/s
+                Pause.AtLeast(10);                                   // about 6 MB/s
             }
 
             if ((frame.Flags & EndStream) != 0)
@@ -1364,7 +1364,11 @@ public sealed class Http2FrameTests
     /// The margins are wide both ways: about 490 tokens (1.5 s of refill) beyond the 600, and
     /// about 710 short of the 1,200. A 1.5 s pause followed by 500 left a margin of 95 tokens
     /// (0.3 s), and one run of the coverage build - instrumented, every test class at once - was
-    /// cut there (2026-11-26).
+    /// cut there (2026-11-26). The pause is <see cref="Pause.AtLeast"/>, not Thread.Sleep: under
+    /// the full suite's load Thread.Sleep(3000) came back after 1.26 s (2026-11-27; the server's
+    /// counters, carried in its GOAWAY's debug data for the hunt, showed a 1,264 ms gap between
+    /// the two bursts' glitches, and the client's own clocks agreed), so the server had refilled
+    /// about 400 tokens, and cut the 600.
     /// </remarks>
     [Fact]
     [Requirement("RFC9113-10.5-6#1", "RFC9113-10.5-6#2")]
@@ -1377,7 +1381,7 @@ public sealed class Http2FrameTests
         Glitches(c, "priority", 9_900);
         c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
         Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // all taken: about 100 left
-        Thread.Sleep(3_000);
+        Pause.AtLeast(3_000);
         Glitches(c, "priority", 600);
         c.SendFrame(Ping, 0, 0, [1, 2, 3, 4, 5, 6, 7, 8]);
         Assert.Equal(Ack, c.Expect(Ping).Flags & Ack);              // the refill paid for them
@@ -1719,7 +1723,7 @@ public sealed class Http2FrameTests
         c.SendFrame(Headers, EndHeaders | EndStream, 1, c.Block(("x-after-the-end", "1")));
 
         Assert.Equal(StreamClosed, c.ExpectReset(1));
-        Thread.Sleep(1200);                                         // /slow's answer comes, and is dropped
+        Pause.AtLeast(1200);                                         // /slow's answer comes, and is dropped
         c.SendRequest(3);
         Assert.Equal(200, c.ReadResponse(3).Status);
         Assert.False(c.Decoded.ContainsKey(1) && c.Decoded[1].Any(f => f.Name == ":status"), "the reset stream was answered");
@@ -1944,7 +1948,7 @@ public sealed class Http2FrameTests
 
         c.SendRequest(1, path: "/slow-mid");
         c.ShutdownSend();
-        Thread.Sleep(700);                                          // the answer meets a full socket
+        Pause.AtLeast(700);                                          // the answer meets a full socket
 
         H2Response response = c.ReadResponse(1);
         Assert.Equal(200, response.Status);
@@ -1968,7 +1972,7 @@ public sealed class Http2FrameTests
         c.SendRequest(1, endStream: false, "POST", "/echo", ("content-length", "1500"));
         for (int i = 0; i < 15; i++)
         {
-            Thread.Sleep(100);
+            Pause.AtLeast(100);
             c.SendFrame(Data, i == 14 ? EndStream : 0, 1, new byte[100]);
         }
 
@@ -2260,7 +2264,7 @@ public sealed class Http2FrameTests
             (Headers, EndHeaders | EndStream, 1, c.RequestBlock("GET", "/a")),
             (Headers, EndHeaders | EndStream, 3, c.RequestBlock("GET", "/b")),
             (Data, 0, 0, [(byte)'x']));                             // DATA on stream 0: PROTOCOL_ERROR
-        Thread.Sleep(2000);                                         // nothing read: the deadline closes it
+        Pause.AtLeast(2000);                                         // nothing read: the deadline closes it
 
         long received = 0;
         try

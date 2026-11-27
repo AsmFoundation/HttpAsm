@@ -869,7 +869,7 @@ public sealed class ServerTests
         {
             busy.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
             Assert.Equal("ok", busy.ReadResponse().Text);
-            Thread.Sleep(150);
+            Pause.AtLeast(150);
         }
 
         Assert.True(idle.ServerClosed());
@@ -933,7 +933,7 @@ public sealed class ServerTests
         c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 2097152\r\n\r\n");
         for (int i = 0; i < 64; i++)
         {
-            Thread.Sleep(25);
+            Pause.AtLeast(25);
             c.Send(piece);
         }
 
@@ -960,7 +960,7 @@ public sealed class ServerTests
         bool cut = false;
         for (int i = 0; i < 64 && !cut; i++)
         {
-            Thread.Sleep(25);
+            Pause.AtLeast(25);
             cut = !TrySend(c, Encoding.Latin1.GetString(piece));
         }
 
@@ -997,7 +997,7 @@ public sealed class ServerTests
         for (int i = 0; i < 80 && !closed; i++)
         {
             closed = !TrySend(c, attack == "rudy" ? "0123456789" : i == 0 ? "G" : "x");
-            Thread.Sleep(50);
+            Pause.AtLeast(50);
         }
 
         Assert.True(closed || c.ServerClosed(1000), $"{attack}: still open after {clock.ElapsedMilliseconds} ms");
@@ -1191,7 +1191,7 @@ public sealed class ServerTests
         }
 
         c.Send(burst.ToString());
-        Thread.Sleep(200);                  // the server fills the socket and stops
+        Pause.AtLeast(200);                  // the server fills the socket and stops
 
         for (int i = 0; i < 24; i++)
         {
@@ -1353,7 +1353,7 @@ public sealed class ServerTests
         using var c = new RawConnection(server.Port);
 
         c.Send("GET /defer HTTP/1.1\r\nHost: t\r\n\r\n");
-        Thread.Sleep(100);                          // deferred by now: the server reads nothing more
+        Pause.AtLeast(100);                          // deferred by now: the server reads nothing more
         c.Send("GET /second HTTP/1.1\r\nHost: t\r\n\r\n");
         c.ShutdownSend();                           // the end, seen while the first is deferred
 
@@ -1416,7 +1416,7 @@ public sealed class ServerTests
         c.Send(request);
         for (int at = 0; at < body.Length; at += 50_000)
         {
-            Thread.Sleep(5);                                        // separate reads: the input grows in steps
+            Pause.AtLeast(5);                                        // separate reads: the input grows in steps
             c.Send(body.AsSpan(at, 50_000));
         }
 
@@ -1441,9 +1441,9 @@ public sealed class ServerTests
         using var c = new RawConnection(server.Port);
 
         c.Send("POST / HTTP/1.1\r\nHost: t\r\nContent-Length: 10\r\n\r\nhello");
-        Thread.Sleep(100);                                          // the head is read; the body waits
+        Pause.AtLeast(100);                                          // the head is read; the body waits
         Task stop = Task.Run(server.Stop, ct);
-        Thread.Sleep(100);
+        Pause.AtLeast(100);
         c.Send("world");
 
         Assert.Equal("helloworld", c.ReadResponse().Text);
@@ -1466,7 +1466,7 @@ public sealed class ServerTests
         using (var midRequest = new RawConnection(server.Port))
         {
             midRequest.Send("GET / HTTP/1.1\r\nHo");
-            Thread.Sleep(50);
+            Pause.AtLeast(50);
             midRequest.Abort();
         }
 
@@ -1477,7 +1477,7 @@ public sealed class ServerTests
             midAnswer.Abort();
         }
 
-        Thread.Sleep(100);
+        Pause.AtLeast(100);
         using var next = new RawConnection(server.Port);
         next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         Assert.Equal("ok", next.ReadResponse().Text);
@@ -1500,7 +1500,7 @@ public sealed class ServerTests
         {
             if (x.Target == "/busy")
             {
-                Thread.Sleep(300);                                  // the worker's thread: nothing else runs
+                Pause.AtLeast(300);                                  // the worker's thread: nothing else runs
             }
 
             x.Respond(200, x.Target);
@@ -1509,9 +1509,9 @@ public sealed class ServerTests
         try
         {
             using var busy = new RawConnection(server.Port);
-            Thread.Sleep(200);                                      // every connection accepted and watched
+            Pause.AtLeast(200);                                      // every connection accepted and watched
             busy.Send("GET /busy HTTP/1.1\r\nHost: t\r\n\r\n");
-            Thread.Sleep(50);                                       // the handler holds the worker
+            Pause.AtLeast(50);                                       // the handler holds the worker
             for (int i = 0; i < connections.Count; i++)
             {
                 connections[i].Send(CultureInfoInvariant($"GET /{i} HTTP/1.1\r\nHost: t\r\n\r\n"));
@@ -1542,7 +1542,7 @@ public sealed class ServerTests
         {
             if (x.Target == "/slow-handler")
             {
-                Thread.Sleep(200);                                  // the reset arrives meanwhile
+                Pause.AtLeast(200);                                  // the reset arrives meanwhile
             }
 
             x.Respond(200, "answer");
@@ -1550,11 +1550,11 @@ public sealed class ServerTests
         using (var gone = new RawConnection(server.Port))
         {
             gone.Send("GET /slow-handler HTTP/1.1\r\nHost: t\r\n\r\n");
-            Thread.Sleep(50);
+            Pause.AtLeast(50);
             gone.Abort();
         }
 
-        Thread.Sleep(300);
+        Pause.AtLeast(300);
         using var next = new RawConnection(server.Port);
         next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         Assert.Equal("answer", next.ReadResponse().Text);
@@ -1582,7 +1582,7 @@ public sealed class ServerTests
         }, workers: 1);
         using var c = new RawConnection(server.Port, timeoutMs: 15000);
         c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
-        Thread.Sleep(100);                                          // the handler has deferred it
+        Pause.AtLeast(100);                                          // the handler has deferred it
         var clock = Stopwatch.StartNew();
 
         await Task.Run(server.Stop, ct).WaitAsync(TimeSpan.FromSeconds(15), ct);
@@ -1621,14 +1621,14 @@ public sealed class ServerTests
         using (var c = new RawConnection(server.Port, timeoutMs: 15000))
         {
             c.Send("GET /held HTTP/1.1\r\nHost: t\r\n\r\n");
-            Thread.Sleep(100);                                      // the handler has deferred it
+            Pause.AtLeast(100);                                      // the handler has deferred it
             await Task.Run(server.Stop, ct).WaitAsync(TimeSpan.FromSeconds(15), ct);
             Assert.True(c.ServerClosed(1000));
         }
 
         Assert.Equal(0, held!.Respond(200, "late"));                // queued: no worker runs
         Assert.Equal(0, server.Start());
-        Thread.Sleep(200);                                          // the new worker takes the answer
+        Pause.AtLeast(200);                                          // the new worker takes the answer
 
         using var next = new RawConnection(server.Port);
         next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
@@ -1649,7 +1649,7 @@ public sealed class ServerTests
         using var c = new RawConnection(server.Port, receiveBuffer: 16 << 10);
 
         c.Send("GET /a HTTP/1.1\r\nHost: t\r\n\r\nGET /bb HTTP/1.1\r\nHost: t\r\n\r\nGET /ccc HTTP/1.1\r\nHost: t\r\n\r\n");
-        Thread.Sleep(200);                                          // the server fills what the socket takes
+        Pause.AtLeast(200);                                          // the server fills what the socket takes
 
         foreach (string target in new[] { "/a", "/bb", "/ccc" })
         {
@@ -1697,7 +1697,7 @@ public sealed class ServerTests
         using var c = new RawConnection(server.Port, receiveBuffer: 16 << 10);
 
         c.Send("GET /first HTTP/1.1\r\nHost: t\r\n\r\nGET /second HTTP/1.1\r\nHost: t\r\n\r\n");
-        Thread.Sleep(500);                                          // the deferred answer is appended meanwhile
+        Pause.AtLeast(500);                                          // the deferred answer is appended meanwhile
 
         Assert.True(first.AsSpan().SequenceEqual(c.ReadResponse().Body), "the first answer");
         Assert.True(second.AsSpan().SequenceEqual(c.ReadResponse().Body), "the deferred answer");
@@ -1735,7 +1735,7 @@ public sealed class ServerTests
 
         c.Send("GET /big HTTP/1.1\r\nHost: t\r\n\r\nGET /later HTTP/1.1\r\nHost: t\r\n\r\n");
         c.ShutdownSend();
-        Thread.Sleep(300);                                          // the end arrives while the output waits
+        Pause.AtLeast(300);                                          // the end arrives while the output waits
 
         Assert.True(big.AsSpan().SequenceEqual(c.ReadResponse().Body), "the large answer");
         Assert.Equal("deferred", c.ReadResponse().Text);
@@ -1767,14 +1767,14 @@ public sealed class ServerTests
         // Hyper-V's time sync steps: the assertion below then read 1630 ms (2026-11-26).
         while (clock.ElapsedMilliseconds < 2700)
         {
-            Thread.Sleep(10);
+            Pause.AtLeast(10);
         }
 
         bool reset = false;
         for (int i = 0; i < 20 && !reset; i++)
         {
             reset = !TrySend(c, new string('y', 65_536));            // the first may still go; the reset follows
-            Thread.Sleep(20);
+            Pause.AtLeast(20);
         }
 
         Assert.True(reset, $"still lingering {clock.ElapsedMilliseconds} ms after the answer");
@@ -1805,7 +1805,7 @@ public sealed class ServerTests
         for (int i = 0; i < text.Length; i += piece)
         {
             c.Send(text.Substring(i, Math.Min(piece, text.Length - i)));
-            Thread.Sleep(1);                // a separate segment, so the server reads it apart
+            Pause.AtLeast(1);                // a separate segment, so the server reads it apart
         }
     }
 

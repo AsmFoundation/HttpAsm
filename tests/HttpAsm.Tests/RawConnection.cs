@@ -109,7 +109,7 @@ internal sealed class RawConnection : IDisposable
             }
 
             all.Write(chunk, 0, n);
-            Thread.Sleep(pauseMs);
+            Pause.AtLeast(pauseMs);
         }
 
         return all.ToArray();

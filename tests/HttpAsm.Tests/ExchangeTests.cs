@@ -241,9 +241,9 @@ public sealed unsafe class ExchangeTests
             c.SendRequest(3, path: "/later");
             Exchange first = waiting.Take(TestContext.Current.CancellationToken), second = waiting.Take(TestContext.Current.CancellationToken);
             c.Abort();
-            Thread.Sleep(100);                                  // the worker sees the reset
+            Pause.AtLeast(100);                                  // the worker sees the reset
             Assert.Equal(0, first.Respond(200, "nobody"));
-            Thread.Sleep(50);
+            Pause.AtLeast(50);
             Assert.Equal(0, second.Respond(200, "nobody"));
         }
         else
@@ -252,11 +252,11 @@ public sealed unsafe class ExchangeTests
             c.Send("GET /later HTTP/1.1\r\nHost: t\r\n\r\n");
             Exchange only = waiting.Take(TestContext.Current.CancellationToken);
             c.Abort();
-            Thread.Sleep(100);
+            Pause.AtLeast(100);
             Assert.Equal(0, only.Respond(200, "nobody"));
         }
 
-        Thread.Sleep(100);
+        Pause.AtLeast(100);
         using var next = new RawConnection(server.Port);
         next.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
         Assert.Equal("next", next.ReadResponse().Text);

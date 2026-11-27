@@ -58,13 +58,13 @@ public sealed class RestingWorkerTests
         }
 
         c.Send(requests.ToString());
-        Thread.Sleep(100);                      // the server takes what it can, then the back-pressure
+        Pause.AtLeast(100);                      // the server takes what it can, then the back-pressure
         c.ShutdownSend();
-        Thread.Sleep(100);                      // the FIN arrives; a worker that spins starts now
+        Pause.AtLeast(100);                      // the FIN arrives; a worker that spins starts now
 
         // The whole process's CPU: the server's worker is a thread of this process.
         TimeSpan before = Process.GetCurrentProcess().TotalProcessorTime;
-        Thread.Sleep(1000);
+        Pause.AtLeast(1000);
         TimeSpan used = Process.GetCurrentProcess().TotalProcessorTime - before;
         Assert.True(used < QuietCpu, $"{used.TotalMilliseconds:F0} ms of CPU over a second in which nothing could be done");
 
