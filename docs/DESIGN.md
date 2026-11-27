@@ -438,7 +438,15 @@ HTTP/2, the drivers, the client):
          keeps. Only a name with a static entry went in by that entry's index, with the static
          table's lower-case spelling on both sides; any other entry's name now serves only a
          name spelled the same, octet for octet. HttpAsm's own HTTP/2 answers lower-case their
-         names first, so only a direct caller of `httpasm_hpack_encode` saw it.
+         names first, so only a direct caller of `httpasm_hpack_encode` saw it;
+       - the client returned a parser's status, -431 or -400, for a refused trailer section,
+         where its contract promises -HTTPASM_ERROR_* (a 10-minute campaign of `client`,
+         2026-11-27). The finding itself was the oracle's: it gave a response's trailers the
+         head's 128 field records where the client gives them what its 256 leave
+         (`HTTPASM_CLIENT_FIELDS`, now in `httpasm.h`), and it took any result below -37 for
+         I/O, so no refusal of trailers was ever checked. The trailer parser now names its
+         rule (in `edx`, which its C signature has no place for), the client returns it, and
+         the oracle accepts nothing outside -HTTPASM_ERROR_* and -errno.
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
        test once fixed. CI runs each fuzzer for 30 s.
      - **Replay:** `run.sh merge` minimizes each fuzzer's corpus into `tests/fuzz/corpus/<name>/`,
@@ -764,6 +772,14 @@ HTTP/2, the drivers, the client):
 *H is done when:* the coverage gate passes; set-length fuzzing campaigns run clean (short ones
 in CI); differential fuzzing has no untriaged difference; every row passes on every tier and
 both backends; the measurements are recorded.
+
+*The closing campaign* (2026-11-27, every fuzzer 600 s on one core each, every input at every
+tier the CPU has, after step 4's last change): h1_request 85.2 million inputs, h1_request_diff
+43.8 million (every difference from llhttp and picohttpparser in its triaged classes), h1_response
+62.2 million, chunked 33.9 million, h2_request 104.2 million, hpack 46.3 million, hpack_nghttp2
+2.0 million (no difference from nghttp2), h1_write 2.5 million, client 5.1 million, server 3.7
+million: clean, once the campaign's one finding (the client's trailer refusals, above) was fixed.
+CI's 30-second campaigns found the other (the HPACK encoder's names, above) the same day.
 
 **M2: crypto in assembly + TLS 1.3 (RFC 9846)**:
 1. *Documents:*

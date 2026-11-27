@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* The head's field records: the client reads a head under the default limits (128 fields). */
 enum { MAX_FIELDS = 128 };
 
 static int listener;
@@ -161,8 +162,12 @@ static int expected(uint8_t *buf, size_t n, uint32_t method, httpasm_response_he
     if (used < 0 || state.state != HTTPASM_CHUNKED_TRAILERS)
         return 0;
     *body_length = produced;
+    /* The trailers take the client's records the head left (httpasm.h, HTTPASM_CLIENT_FIELDS):
+     * this oracle once gave them the head's 128, and a 10-minute campaign (2026-11-27) found the
+     * client taking 133 trailer fields the oracle refused. */
+    httpasm_h1_limits trailer_limits = { .max_fields = HTTPASM_CLIENT_FIELDS - h->field_count };
     size_t scan = 0;
-    int64_t t = httpasm_h1_parse_trailers(buf + at + used, n - at - (size_t)used, &scan, &limits, trailers, trailer_count);
+    int64_t t = httpasm_h1_parse_trailers(buf + at + used, n - at - (size_t)used, &scan, &trailer_limits, trailers, trailer_count);
     return t > 0;
 }
 
@@ -170,7 +175,7 @@ static int expected(uint8_t *buf, size_t n, uint32_t method, httpasm_response_he
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     static uint8_t copy[FUZZ_MAX];
-    static httpasm_field fields[MAX_FIELDS], trailers[MAX_FIELDS];
+    static httpasm_field fields[MAX_FIELDS], trailers[HTTPASM_CLIENT_FIELDS];
     if (size < 1 || size > FUZZ_MAX)
         return 0;
     uint32_t method = data[0] & 1 ? HTTPASM_METHOD_HEAD : HTTPASM_METHOD_GET;
@@ -218,6 +223,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             FUZZ_CHECK(same_field(&resp.trailers[i], &trailers[i]), "trailer %u differs", i);
     } else {
         FUZZ_CHECK(r < 0, "result %d", r);
+        /* Every refusal is -HTTPASM_ERROR_* (1-37) or -errno (Linux's run to 133): never a parser's
+         * status, which the client returned for a refused trailer section until 2026-11-27, and
+         * which the check below, taking all else for I/O, let pass. */
+        FUZZ_CHECK(r >= -133, "result %d is neither -HTTPASM_ERROR_* nor -errno", r);
         FUZZ_CHECK(r != -ETIMEDOUT, "the client timed out on an answer the server had finished");
         /* A refusal of the response itself (-HTTPASM_ERROR_*, 1 to 37): the parsers must find
          * no valid complete one. -errno codes are I/O, the server's doing, not a verdict; the

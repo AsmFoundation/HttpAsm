@@ -46,7 +46,7 @@ EPROTO              equ 71          ; the server sent octets no request asked fo
 
 HA_CLIENT_BUFFER    equ 16384   ; the input to start with (it grows as a response needs)
 HA_CLIENT_OUTPUT    equ 4096    ; the request head's buffer to start with
-HA_CLIENT_FIELDS    equ 256     ; response field records: the head's, then the trailers'
+HA_CLIENT_FIELDS    equ HTTPASM_CLIENT_FIELDS ; response field records: the head's, then the trailers'
 
 ; A response head is parsed under the default limits (HA_H1_DEFAULT_MAX_FIELDS fields), so the
 ; trailers always find room after the head's records. httpasm_client_send's no-room branch
@@ -777,7 +777,7 @@ httpasm_client_send:
     lea     r9, [rsp + S_COUNT]
     call    httpasm_h1_parse_trailers
     test    rax, rax
-    js      .bad_response
+    js      .bad_trailers                   ; edx: the rule (chunked.asm), the head knows none
     jnz     .trailers_parsed
     call    client_receive
     test    rax, rax
@@ -789,8 +789,8 @@ httpasm_client_send:
     je      .trailers_fit                   ; an empty section fits whatever the room
     cmp     dword [rsp + S_NO_ROOM], 0
     je      .trailers_fit
-    mov     rax, -431                       ; a field the records have no room for
-    jmp     .bad_response
+    mov     rax, -HTTPASM_ERROR_TOO_MANY_FIELDS ; a field the records have no room for
+    jmp     .broken
 .trailers_fit:
     add     rax, [rsp + S_BODY_END]
     mov     [rbx + client.consumed], rax
@@ -869,8 +869,16 @@ httpasm_client_send:
 .bad_response_chunk:
     mov     rax, -HTTPASM_ERROR_CHUNK
     jmp     .broken
+.bad_trailers:
+    ; The trailer parser's refusal names its rule in edx (its status, -400 or -431, is no
+    ; HTTPASM_ERROR_* code: this function returned it as is until 2026-11-27, against its
+    ; contract, which tests/fuzz/client's oracle let pass by taking anything below -37 for I/O).
+    mov     eax, edx
+    neg     rax
+    jmp     .broken
 .bad_response:
-    ; -400 or -431 from a parser: the head says which rule, when it knows.
+    ; -400 or -431 from the response parser, whose every refusal names its rule in the head
+    ; (the check for none stays as a guard: tests/coverage/unreachable.tsv has the proof).
     movzx   ecx, word [r15 + httpasm_client_response.head + httpasm_response_head.error]
     test    ecx, ecx
     jz      .broken

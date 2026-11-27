@@ -447,6 +447,10 @@ httpasm_h1_chunked_decode:
 ;   Returns the section's length (>= 2: an empty section is just CRLF), 0 when incomplete
 ;   (*scan_from as in httpasm_h1_parse_request), or -400 (malformed, a bare LF, obs-fold) /
 ;   -431 (over limits->max_head octets, or more than limits->max_fields fields).
+;   On a refusal edx also holds the rule (HTTPASM_ERROR_*: BARE_LF, HEAD_TOO_LARGE, or the one
+;   ha_h1_fields named), which the C signature has no place for: httpasm_client_send returns it,
+;   as its contract promises -HTTPASM_ERROR_* for an invalid response (it returned -400 and -431
+;   themselves until 2026-11-27). C callers see only the status.
 ;   In: rdi, rsi, rdx, rcx, r8, r9 (System V). Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
 TR_FRAME_COUNT      equ h1ctx_size              ; uint32_t *count
@@ -511,12 +515,15 @@ httpasm_h1_parse_trailers:
 .fields_failed:
     mov     eax, [rsp + h1ctx.status]
     neg     rax
+    mov     edx, [rsp + h1ctx.error]        ; the rule, for asm callers (the header above)
     jmp     .return
 .malformed:
     mov     rax, -400
+    mov     edx, HTTPASM_ERROR_BARE_LF      ; ha_h1_head_end's only refusal but the size
     jmp     .return
 .too_large:
     mov     rax, -431
+    mov     edx, HTTPASM_ERROR_HEAD_TOO_LARGE
 .return:
     add     rsp, TR_FRAME_SIZE
     pop     r15

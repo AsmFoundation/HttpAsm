@@ -597,6 +597,13 @@ int httpasm_exchange_respond(httpasm_exchange *exchange, uint16_t status,
 
 typedef struct httpasm_client httpasm_client;       /* opaque */
 
+/* The field records httpasm_client_send keeps for one response: the head's fields first, read
+ * under httpasm_h1_limits' defaults (at most 128, in a head of at most 65536 octets), then a
+ * chunked body's trailer fields in the rest (at most HTTPASM_CLIENT_FIELDS less the head's, in
+ * a section of at most 65536 octets). A response past either is refused:
+ * -HTTPASM_ERROR_TOO_MANY_FIELDS or -HTTPASM_ERROR_HEAD_TOO_LARGE. */
+#define HTTPASM_CLIENT_FIELDS 256
+
 /* What httpasm_client_send reads (96 octets). Every pointer is valid until the next call on the
  * client (they point into its input buffer). */
 typedef struct httpasm_client_response {
@@ -618,7 +625,8 @@ httpasm_client *httpasm_client_connect(uint32_t address, uint16_t port, uint32_t
  * _EXPECT_CONTINUE; the framing is the client's: Content-Length when there is a body or the
  * method defines one) and reads the final response whole: 1xx skipped, the body by its framing
  * (chunked decoded, trailers apart, or until the close). 0; -HTTPASM_ERROR_* for a request the
- * writer refuses (nothing sent) or an invalid response (connection closed); -errno for I/O
+ * writer refuses (nothing sent) or an invalid response (connection closed; a trailer section's
+ * rule too, and the limits of HTTPASM_CLIENT_FIELDS); -errno for I/O
  * (ETIMEDOUT, ECONNRESET, ENOMEM; connection closed); -ENOTCONN once the connection is closed,
  * which also follows a response that does not keep it, or a request that asked to close.
  * Unsolicited octets are never read as a response (RFC 9112 9.2): octets after a response

@@ -368,6 +368,41 @@ public sealed class ClientTests
     }
 
     /// <summary>
+    /// A chunked answer's trailers take the client's field records the head left
+    /// (HTTPASM_CLIENT_FIELDS, 256): after a head of one field, 255 trailer fields are read whole
+    /// and 256 are refused with -HTTPASM_ERROR_TOO_MANY_FIELDS. A malformed trailer line is
+    /// refused with its own rule. The client returned a parser's status there (-431, -400) until
+    /// 2026-11-27, against its contract (-HTTPASM_ERROR_* for an invalid response):
+    /// tests/fuzz/client's 10-minute campaign found its oracle allowing the trailers only the
+    /// head's 128 records, and the oracle also took any result below -37 for I/O.
+    /// </summary>
+    /// <param name="trailers">How many trailer fields the answer carries.</param>
+    /// <param name="extra">A last trailer line, or empty.</param>
+    /// <param name="result">0, or the -HTTPASM_ERROR_* expected.</param>
+    [Theory]
+    [InlineData(255, "", 0)]
+    [InlineData(256, "", -(int)ParseError.TooManyFields)]
+    [InlineData(1, "Bad Name: x\r\n", -(int)ParseError.WhitespaceBeforeColon)]
+    [InlineData(1, "X-Folded: a\r\n b\r\n", -(int)ParseError.ObsFold)]
+    [InlineData(1, "X-Bare: a\n", -(int)ParseError.BareLf)]
+    public void BoundsTrailersByTheClientsRecords(int trailers, string extra, int result)
+    {
+        Platform.RequireLinuxX64();
+        string answer = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n"
+            + string.Concat(Enumerable.Range(0, trailers).Select(i => $"X-T{i}: {i}\r\n")) + extra + "\r\n";
+        using var server = new CannedServer([answer], close: true);
+        using var client = new AsmClient(server.Port);
+        ClientResult r = client.Send("GET", "/");
+        Assert.Equal(result, r.Result);
+        if (result == 0)
+        {
+            Assert.Equal("ok", r.Text);
+            Assert.Equal(trailers, r.Trailers.Count);
+            Assert.Equal("254", r.Trailers[^1].Value);
+        }
+    }
+
+    /// <summary>
     /// Failures close the connection: an invalid status-line, a server that closes in the middle
     /// of a body (incomplete: RFC9112-6.3-2.6, reported as a failure, never as a response that
     /// looks complete), a server that never answers (the timeout), and a 101 (Switching

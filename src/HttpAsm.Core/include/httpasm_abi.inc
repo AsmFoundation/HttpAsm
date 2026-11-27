@@ -214,6 +214,10 @@ HA_H1_DEFAULT_MAX_HEAD          equ 65536
 HA_H1_DEFAULT_MAX_TARGET        equ 8192
 HA_H1_DEFAULT_MAX_FIELDS        equ 128
 
+; HTTPASM_CLIENT_FIELDS: the field records httpasm_client_send keeps for one response (see
+; httpasm.h): the head's, under the default limits, then the trailer section's in the rest.
+HTTPASM_CLIENT_FIELDS           equ 256
+
 ; -----------------------------------------------------------------------------
 ; httpasm_hpack_output: where httpasm_hpack_decode puts one header block's fields (48 octets).
 ; Strings from the static table point at the library's constant text; every other name and
