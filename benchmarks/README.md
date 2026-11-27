@@ -191,6 +191,25 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-28: Ed448, and X448's public key from its fixed base.** Ed448's public key from a seed,
+a signature of Ed25519's 130-octet CertificateVerify content (pure Ed448, empty context, as TLS
+1.3 signs) under a key prepared before the loop, and its verification; beside OpenSSL 3.0.13
+through EVP_PKEY_ED448 (the key from raw octets; EVP_DigestSign and EVP_DigestVerify, contexts
+made once). And X448 again, its public key now from Ed448's table. 41 rounds:
+
+| Case | v3 | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| Ed448 public key | 39.2 us | 40.8 us | 191.6 us | 4.89x OpenSSL |
+| Ed448 signature | 44.3 us | 46.3 us | 205.6 us | 4.64x OpenSSL |
+| Ed448 verification | 176.6 us | 176.4 us | 230.4 us | 1.30x OpenSSL |
+| X448 public key | 38.4 us | 40.2 us | 187.2 us | 4.87x OpenSSL (115.7 us by the ladder) |
+| X448 key share | 165.1 us | 166.9 us | 391.9 us | 2.37x OpenSSL (241.1 us before) |
+| X448 shared secret | 124.9 us | 125.5 us | 205.4 us | 1.64x OpenSSL |
+
+The fixed base is 90 mixed additions (signed 5-bit digits, a constant-time scan of 16 points a
+window) and one inversion; a verification is 446 shared doublings (Straus over width-5 NAFs),
+which is why it leads OpenSSL least.
+
 **2026-11-27: X448.** The shared secret of a random scalar and u-coordinate, the public key
 (X448(k, 5)), and a key share's whole work (the public key, then the shared secret). Beside
 OpenSSL 3.0.13 through EVP_PKEY_X448: its derive with the keys and context made once; its

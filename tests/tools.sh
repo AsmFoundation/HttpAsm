@@ -191,6 +191,10 @@ fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc
 #   non-canonical u, edge-case scalars and products; 12 are 57-octet public keys, which a
 #   56-octet ABI cannot be given (counted, skipped).
 fetch wycheproof/x448_test.json "$wycheproof/x448_test.json" 0f8f7199dbd47d1805cb9b13dfb29c207406bc786827bfd9ba7b73374b830fe5
+#   Ed448 (Ed448Tests): 87 verifications, an empty context - special values of R and S, S of L
+#   and more (malleability), invalid encodings, truncated, compressed and padded signatures
+#   (12 of other lengths than 114, which a 114-octet ABI cannot be given: counted).
+fetch wycheproof/ed448_test.json "$wycheproof/ed448_test.json" 3b3c7995853deb2fbbb49fba0fd292f314dc081f9154bd33252f294ca211289a
 fetch wycheproof/ecdh_secp256r1_ecpoint_test.json "$wycheproof/ecdh_secp256r1_ecpoint_test.json" 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
 fetch wycheproof/ecdsa_secp256r1_sha256_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha256_p1363_test.json" c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
 fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha512_p1363_test.json" 95c41daca2101540641cc13ccab128d67ad665eaf8349896434e1e6a0c5c68fc

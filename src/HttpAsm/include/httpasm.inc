@@ -114,6 +114,10 @@ extern httpasm_ed25519_public_key   ; void (public_key[32], private_key[32]): A 
 extern httpasm_ed25519_private_key_init ; void (httpasm_ed25519_private_key *key, private_key[32]): a mod L, prefix, A
 extern httpasm_ed25519_sign         ; void (signature[64], const httpasm_ed25519_private_key *key, message, length)
 extern httpasm_ed25519_verify       ; int (public_key[32], message, length, signature[64]): 0 valid, -1 not
+extern httpasm_ed448_public_key     ; void (public_key[57], private_key[57])
+extern httpasm_ed448_private_key_init ; void (key, private_key[57])
+extern httpasm_ed448_sign           ; int (signature[114], key, message, length, context, context_length): 0, -1 context over 255
+extern httpasm_ed448_verify         ; int (public_key[57], message, length, context, context_length, signature[114]): 0 valid, -1 not
 extern httpasm_mlkem512_keypair     ; void (ek[800], dk[1632], seed[64])
 extern httpasm_mlkem512_encaps      ; int (c[768], shared[32], ek[800], m[32]): 0, -1 (ek's modulus check; zeros)
 extern httpasm_mlkem512_decaps      ; int (shared[32], dk[1632], c[768]): 0, -1 (dk's hash check; zeros)

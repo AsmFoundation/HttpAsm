@@ -303,6 +303,22 @@ struc httpasm_ed25519_private_key
     .public:            resb 32     ; A = a B, encoded (RFC 8032 5.1.2)
 endstruc
 
+; -----------------------------------------------------------------------------
+; httpasm_ed448_private_key: a private key ready to sign (crypto/ed448.asm), 176 octets; opaque
+; in httpasm.h (struct size id 21). httpasm_ed448_private_key_init derives all three parts from
+; the seed, the public key included (never the caller's: r does not depend on A, so one message
+; signed under two public keys would give the private scalar away). Its octets are secrets: the
+; caller zeroes them when done.
+; -----------------------------------------------------------------------------
+struc httpasm_ed448_private_key
+    .scalar:            resq 7      ; s, clamped from SHAKE256(seed, 114)'s first 56 octets (below
+                                    ; 2^448, not reduced: s B = (s mod L) B, and k s's Montgomery
+                                    ; product takes it as it is)
+    .prefix:            resb 57     ; the hash's last 57 octets: r's secret input
+    .public:            resb 57     ; A = s B, encoded (RFC 8032 5.2.2)
+    .pad:               resb 6      ; to a multiple of 8 (written as zeros)
+endstruc
+
 ; ML-KEM (FIPS 203; crypto/mlkem.asm): the keys and ciphertexts of each parameter set, the 64-octet
 ; key generation seed (d || z), the 32-octet encapsulation message and shared secret.
 HTTPASM_MLKEM_SEED              equ 64

@@ -86,6 +86,10 @@
     X(httpasm_ed25519_private_key_init) \
     X(httpasm_ed25519_sign)         \
     X(httpasm_ed25519_verify)       \
+    X(httpasm_ed448_public_key)     \
+    X(httpasm_ed448_private_key_init) \
+    X(httpasm_ed448_sign)           \
+    X(httpasm_ed448_verify)         \
     X(httpasm_mlkem768_keypair)     \
     X(httpasm_mlkem768_encaps)      \
     X(httpasm_mlkem768_decaps)      \
@@ -356,6 +360,23 @@ void bench_ed25519_sign(const bench_build *b, const bench_case *c, long calls);
 /* bench_ed25519_verify: httpasm_ed25519_verify of a valid signature (made before the loop): a
  * TLS client's work per Ed25519 signature, CertificateVerify's or a certificate's. */
 void bench_ed25519_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* The Ed448 cases' input (bench_ed448_input, suite_rivals.c): a private key (the 57-octet seed),
+ * then Ed25519's 130-octet CertificateVerify content, the message pure Ed448 signs whole (with an
+ * empty context, as TLS 1.3 signs). */
+const uint8_t *bench_ed448_input(void);
+
+/* bench_ed448_public_key: httpasm_ed448_public_key of the input's seed (SHAKE256 and the fixed
+ * base: the work of making a key, and of preparing one). */
+void bench_ed448_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_ed448_sign: httpasm_ed448_sign of the message under a key prepared before the loop (a TLS
+ * server's work per handshake with an Ed448 certificate). */
+void bench_ed448_sign(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_ed448_verify: httpasm_ed448_verify of a valid signature (made before the loop): a TLS
+ * client's work per Ed448 signature, CertificateVerify's or a certificate's. */
+void bench_ed448_verify(const bench_build *b, const bench_case *c, long calls);
 
 /* The ML-KEM cases (suite_rivals.c): a case's data is 96 fixed octets (the seed d || z, then m)
  * and its length the parameter set (768 or 1024). bench_mlkem_keypair: the key pair from the seed

@@ -343,6 +343,32 @@ internal unsafe struct Ed25519PrivateKey
 }
 
 /// <summary>
+/// httpasm_ed448_private_key (httpasm_abi.inc; opaque in httpasm.h), 176 octets: a private key
+/// ready to sign, every part derived from the seed by httpasm_ed448_private_key_init. The tests
+/// read its parts to hold the init to the BigInteger model (s, the prefix, A) and plant a
+/// mismatched public key in it to show what the prepared key protects against; a caller only
+/// passes it.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Ed448PrivateKey
+{
+    /// <summary>
+    /// s, seven little-endian limbs: SHAKE256(seed, 114)'s first 56 octets clamped (the two low
+    /// bits cleared, bit 447 set), not reduced modulo L (s B = (s mod L) B).
+    /// </summary>
+    public fixed ulong Scalar[7];
+
+    /// <summary>The hash's last 57 octets: r's secret input.</summary>
+    public fixed byte Prefix[57];
+
+    /// <summary>A = s B, encoded (RFC 8032 5.2.2): what k = SHAKE256(dom4 || R || A || M) hashes.</summary>
+    public fixed byte Public[57];
+
+    /// <summary>Six octets to a multiple of 8, written as zeros.</summary>
+    public fixed byte Pad[6];
+}
+
+/// <summary>
 /// httpasm_rsa_private_key (httpasm_abi.inc; opaque in httpasm.h), 6720 octets: a private key
 /// ready to sign, its public key first. The tests read its fields and plant faults in them (a bit
 /// flipped in a CRT exponent after the init); a caller only passes it. All zeros after a refused

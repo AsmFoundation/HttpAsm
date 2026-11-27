@@ -253,7 +253,8 @@ uint32_t httpasm_abi_version(void);
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
- * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx; 0 for any other value. */
+ * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key; 0 for any
+ * other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -541,8 +542,10 @@ void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t sc
 
 /* ------------------------------------------------------------------------------------------
  * X448 (RFC 7748), TLS 1.3's x448 group. The field in eight 56-bit limbs at both versions (mulx,
- * or mul), Karatsuba over 2^224; the ladder computes its products in pairs, interleaved. Both
- * constant time. Stack: 2,248 octets (tests/native/stack measures it).
+ * or mul), Karatsuba over 2^224; the ladder computes its products in pairs, interleaved; the
+ * public key comes from Ed448's fixed base (the 4-isogeny takes its B to u = 5). Both constant
+ * time. Stack (tests/native/stack measures it): 2,248 octets for a shared secret, 6,472 for a
+ * public key (Ed448's frame).
  * ------------------------------------------------------------------------------------------ */
 
 #define HTTPASM_X448_KEY 56             /* octets of a scalar, a u-coordinate, a shared secret */
@@ -556,8 +559,9 @@ void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t sc
 int httpasm_x448(uint8_t out[HTTPASM_X448_KEY], const uint8_t scalar[HTTPASM_X448_KEY],
                  const uint8_t point[HTTPASM_X448_KEY]);
 
-/* out = X448(scalar, 5): the public key of a private scalar, by the ladder with the base point's
- * u = 5 (a product by 5 in place of one product a step). Returns 0; or -1 when out is all zeros,
+/* out = X448(scalar, 5): the public key of a private scalar, from edwards448's precomputed fixed
+ * base ((y / x)^2 of scalar B: the same octets as the ladder at u = 5, about a third of a shared
+ * secret's time, constant time). Returns 0; or -1 when out is all zeros,
  * which one clamped scalar gives: 4q, q the base point's prime order (X448's clamped range,
  * unlike X25519's, holds a multiple of q; a random scalar never meets it, but such a key share
  * would make every peer abort). */
@@ -691,6 +695,53 @@ void httpasm_ed25519_sign(uint8_t signature[HTTPASM_ED25519_SIGNATURE],
  * small order are not refused by policy. */
 int httpasm_ed25519_verify(const uint8_t public_key[HTTPASM_ED25519_KEY], const uint8_t *message,
                            size_t length, const uint8_t signature[HTTPASM_ED25519_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
+ * Ed448 (RFC 8032 5.2, pure EdDSA with SHAKE256 and dom4): TLS 1.3's ed448 signature scheme and
+ * Ed448 certificates (RFC 8410). X448's field (eight 56-bit limbs; mulx and AVX2 table scans, or
+ * mul and SSE2); signing is constant time in the key and r, verification (public inputs) is not.
+ * Stack: 6,472 octets (tests/native/stack measures it).
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_ED448_KEY       57      /* octets of a private key (the seed) or a public key */
+#define HTTPASM_ED448_SIGNATURE 114     /* octets of a signature: R || S */
+#define HTTPASM_ED448_CONTEXT   255     /* the longest context (RFC 8032's dom4); TLS 1.3 uses none */
+
+/* The public key of a private key (57 octets, any value: RFC 8032 5.2.5's seed; draw them from
+ * httpasm_random). */
+void httpasm_ed448_public_key(uint8_t public_key[HTTPASM_ED448_KEY],
+                              const uint8_t private_key[HTTPASM_ED448_KEY]);
+
+/* A private key ready to sign (176 octets): the scalar, the nonce prefix and the public key, all
+ * derived from the seed by the library. There is no way to sign under a public key the caller
+ * names: signing one message under two public keys with one seed would reveal the private
+ * scalar. Its octets ARE the secret: zero it when done. */
+typedef struct httpasm_ed448_private_key {
+    uint64_t opaque[22];
+} httpasm_ed448_private_key;
+
+/* Prepares key from a private key (the seed): one public key's worth of work, so prepare a key
+ * once and keep it for its signatures. */
+void httpasm_ed448_private_key_init(httpasm_ed448_private_key *key,
+                                    const uint8_t private_key[HTTPASM_ED448_KEY]);
+
+/* Signs message[0..length) under the context (context_length octets, at most 255; 0 for none,
+ * which TLS 1.3 uses: context may then be NULL), as RFC 8032 5.2.6 defines it (deterministic).
+ * Returns 0; or -1 for a longer context, with nothing written. signature may overlap the message
+ * (it is written after both hashes have read it). */
+int httpasm_ed448_sign(uint8_t signature[HTTPASM_ED448_SIGNATURE],
+                       const httpasm_ed448_private_key *key, const uint8_t *message, size_t length,
+                       const uint8_t *context, size_t context_length);
+
+/* Verifies signature over message[0..length) and the context under a public key (RFC 8032 5.2.7,
+ * the cofactorless equation [S]B = R + [k]A). Returns 0 when valid; -1 otherwise: a context over
+ * 255 octets, S not below L (no malleable signature passes), the public key not a point's
+ * encoding (the last octet's low seven bits set, y not below p, no x for it, or x = 0 with the
+ * sign bit set), or the equation failing (R is compared octet for octet with the encoding of
+ * [S]B - [k]A, so a non-canonical R never passes). */
+int httpasm_ed448_verify(const uint8_t public_key[HTTPASM_ED448_KEY], const uint8_t *message,
+                         size_t length, const uint8_t *context, size_t context_length,
+                         const uint8_t signature[HTTPASM_ED448_SIGNATURE]);
 
 /* ------------------------------------------------------------------------------------------
  * ML-KEM (FIPS 203): the post-quantum key encapsulation of TLS 1.3's hybrids (RFC 10024's

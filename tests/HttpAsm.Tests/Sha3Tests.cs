@@ -38,9 +38,10 @@ public sealed unsafe class Sha3Tests
     }
 
     /// <summary>
-    /// The .NET copy of httpasm_sha3_ctx has the library's size (216 octets, struct size 20, the
-    /// last id: 21 answers 0), and each init writes its kind's rate and suffix into a context
-    /// filled with garbage, the rest zero.
+    /// The .NET copy of httpasm_sha3_ctx has the library's size (216 octets, struct size 20), and
+    /// each init writes its kind's rate and suffix into a context filled with garbage, the rest
+    /// zero. (The check that the ids end, one past the last answering 0, is with the last id's
+    /// test: Ed448Tests.)
     /// </summary>
     [Fact]
     public void StructureMatchesTheLibrary()
@@ -48,7 +49,6 @@ public sealed unsafe class Sha3Tests
         Platform.RequireLinuxX64();
         Assert.Equal(216, Unsafe.SizeOf<Sha3Context>());
         Assert.Equal((uint)Unsafe.SizeOf<Sha3Context>(), Native.StructSize(20));
-        Assert.Equal(0u, Native.StructSize(21));
         foreach (Kind kind in Enum.GetValues<Kind>())
         {
             Sha3Context h;

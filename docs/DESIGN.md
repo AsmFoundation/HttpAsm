@@ -1512,7 +1512,50 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      `tests/native/stack` (2,248 octets deep). *Measured* against OpenSSL 3.0.13 (EVP_PKEY_X448,
      41 rounds): shared secret 124.6 us against 204.7 (1.64x), public key 115.7 against 187.0
      (1.62x), a key share 241 against 390 (1.62x); v3 and v1 equal (mul and mulx cost the same
-     here). Next for it: the public key from Ed448's fixed base (as X25519's comes from Ed25519's).
+     here). Since Ed448 (below), the public key comes from its fixed base: 38.4 us (4.9x
+     OpenSSL), a key share 165 us (2.4x).
+   - **Ed448** (2026-11-28), `crypto/ed448.asm` over `include/crypto/fe448.inc` (X448's field,
+     moved there to be shared): `httpasm_ed448_public_key`, `httpasm_ed448_private_key_init` (a
+     176-octet prepared key: s, the prefix, A, all from the seed; struct size 21),
+     `httpasm_ed448_sign` and `httpasm_ed448_verify` (RFC 8032 5.2: pure Ed448, SHAKE256 with
+     dom4, any context of 0 to 255 octets - TLS 1.3 uses none - longer refused). *The group:*
+     extended coordinates on edwards448 (a = 1), dbl-2008-hwcd and add-2008-hwcd with H = B - A,
+     complete (d is not a square); their products in X448's interleaved pairs (a mixed addition
+     four pairs, a doubling two pairs of squares and two of products). *Fixed base* (public keys,
+     R, and now X448's public keys), constant time: signed 5-bit digits over 90 windows (450 bits:
+     any scalar below 2^448 goes in unreduced, since s B = (s mod L) B), each window's 16 points
+     (x, y, d x y) in `include/generated/ed448_table.inc` (276,480 octets), written and proven by
+     `specs/ed448.cs` (built by affine additions, each point checked by double-and-add in extended
+     coordinates; the primes; d not a square; and the 4-isogeny taking B to u = 5, which lets X448
+     take this table: X448(k, 5) = (y / x)^2 of k B for every clamped k, 4q giving the neutral
+     point and 0); a scan reading all 16 entries a window (AVX2 at v3, SSE2 at v1), a negative
+     digit taking 2p - x and 2p - d x y; one mixed addition a window. *Verification*, variable
+     time: Straus over width-5 NAFs, S's from window 0's entries, k's from -A's odd multiples, the
+     doublings shared; cofactorless, R compared octet for octet with [S]B - [k]A's encoding (a
+     non-canonical R never passes). *Decoding*: x = u^3 v (u^5 v^3)^((p - 3) / 4), which is the
+     inverse's chain stopped two squarings early: fe448's power routine now has both entries
+     (ha_fe448_pow_p34, ha_fe448_invert). *Scalars* modulo L by Montgomery products on seven limbs
+     (a 912-bit hash as REDC(REDC(h2 R^4) + REDC(h1 R^3) + REDC(h0 R^2))). Each comparison of a
+     whole value is one decision (the OR of the differences, or a sub/sbb borrow): a branch per
+     qword would leave edges no input reaches (a y of p or more always differs in its lowest
+     limb; L's all-ones qwords can never be exceeded), which the coverage gate would rightly
+     refuse. Designed in a Python model first (scratchpad ed448/model.py: RFC 8032 7.4's nine
+     vectors and Wycheproof's 75 fitting tests). The assembly's first run had all keys and
+     signatures right and every verification wrong: two bugs, each a lesson - `ED_COPY rbp +
+     EF_ODD + q` inside a loop counting in q passes the inner macro's own %assign q (NASM resolves
+     an argument's %assign names where the inner body uses them), and S was kept in a slot the
+     hash's reduction uses as scratch. *Proven by* Ed448Tests (RFC 8032 7.4 with its context case,
+     Wycheproof's 87 (12 of other lengths counted), a BigInteger model of RFC 8032 5.2 on seeds,
+     message and context lengths across SHAKE256's block, the cofactorless edges under the neutral
+     and small-order keys, refusals (non-canonical y, stray bits, x = 0 with the sign, S of L or
+     more, a non-canonical R, flipped bits), contexts (dom4's length separation, 256 refused with
+     nothing written), signing over the message, the double-public-key oracle shown on a planted
+     key), `tests/native/tiers` (400 rounds at every tier equal to v1's, every input against the
+     guard page in turn), `tests/native/stack` (6,472 octets deep). *Measured* against OpenSSL
+     3.0.13 (EVP_PKEY_ED448, the 130-octet CertificateVerify content, 41 rounds): public key 39.2
+     us against 191.6 (4.9x), signature 44.3 against 205.6 (4.6x), verification 176.6 against
+     230.4 (1.30x: 446 doublings dominate it; next to try there: doublings without T when no
+     addition follows).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

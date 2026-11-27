@@ -1677,6 +1677,127 @@ static bench_rival ed25519_public_key_rivals[] = { { openssl_name, openssl_ed255
 static bench_rival ed25519_sign_rivals[] = { { openssl_name, openssl_ed25519_sign } };
 static bench_rival ed25519_verify_rivals[] = { { openssl_name, openssl_ed25519_verify } };
 
+/* ---- Ed448: the public key, a signature, a verification. OpenSSL's rival goes through the same
+ * EVP functions as Ed25519's (openssl_load_ed25519 loads them) with EVP_PKEY_ED448: its curve448
+ * code (libdecaf's 56-bit limbs in C, a fixed-base comb), pure Ed448 with an empty context. */
+
+enum { OPENSSL_PKEY_ED448 = 1088 };         /* EVP_PKEY_ED448 (NID_ED448) */
+
+/* The Ed448 cases' input (see bench.h): the seed, then Ed25519's CertificateVerify content. */
+static uint8_t ed448_input[57 + BENCH_ED25519_MESSAGE];
+
+/* bench_ed448_input: see bench.h. */
+const uint8_t *bench_ed448_input(void)
+{
+    if (ed448_input[57] == 0) {
+        for (size_t i = 0; i < 57; i++)
+            ed448_input[i] = (uint8_t)(0x4F + 41 * i);      /* the seed: any 57 octets are a key */
+        memcpy(ed448_input + 57, bench_ed25519_input() + 32, BENCH_ED25519_MESSAGE);
+    }
+    return ed448_input;
+}
+
+/* bench_ed448_public_key: see bench.h. */
+void bench_ed448_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[57];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ed448_public_key(out, c->data);
+    bench_sink = out[0];
+}
+
+/* bench_ed448_sign: see bench.h. */
+void bench_ed448_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    httpasm_ed448_private_key key;
+    uint8_t signature[114];
+    b->api.httpasm_ed448_private_key_init(&key, c->data);
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ed448_sign(signature, &key, c->data + 57, BENCH_ED25519_MESSAGE, NULL, 0);
+    memset(&key, 0, sizeof key);
+    bench_sink = signature[0];
+}
+
+/* bench_ed448_verify: see bench.h. */
+void bench_ed448_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    httpasm_ed448_private_key key;
+    uint8_t public_key[57], signature[114];
+    b->api.httpasm_ed448_public_key(public_key, c->data);
+    b->api.httpasm_ed448_private_key_init(&key, c->data);
+    b->api.httpasm_ed448_sign(signature, &key, c->data + 57, BENCH_ED25519_MESSAGE, NULL, 0);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_ed448_verify(public_key, c->data + 57, BENCH_ED25519_MESSAGE, NULL, 0, signature);
+    bench_sink = (uint8_t)sum;
+}
+
+/* openssl_ed448_public_key: the key made from the seed (OpenSSL derives its public key then) and
+ * the public key taken, each call. */
+static void openssl_ed448_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[57] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_new_private(OPENSSL_PKEY_ED448, NULL, c->data, 57);
+        size_t length = sizeof out;
+        openssl_get_raw_public(key, out, &length);
+        openssl_pkey_free(key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_ed448_sign: EVP_DigestSign of the message, the key and the context made once. */
+static void openssl_ed448_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_new_private(OPENSSL_PKEY_ED448, NULL, c->data, 57);
+    void *ctx = key ? openssl_md_ctx_new() : NULL;
+    unsigned char signature[114] = { 0 };
+    if (ctx != NULL && openssl_digest_sign_init(ctx, NULL, NULL, NULL, key) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            openssl_digest_sign(ctx, signature, &length, c->data + 57, BENCH_ED25519_MESSAGE);
+        }
+    }
+    openssl_md_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = signature[0];
+}
+
+/* openssl_ed448_verify: EVP_DigestVerify of a valid signature (made before the loop), the public
+ * key and the context made once. */
+static void openssl_ed448_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_new_private(OPENSSL_PKEY_ED448, NULL, c->data, 57);
+    unsigned char public_key[57], signature[114] = { 0 };
+    size_t length = sizeof public_key;
+    void *sign = key ? openssl_md_ctx_new() : NULL;
+    void *verify = key ? openssl_md_ctx_new() : NULL;
+    void *peer = NULL;
+    int sum = 0;
+    if (sign != NULL && verify != NULL && openssl_get_raw_public(key, public_key, &length) == 1 &&
+        (peer = openssl_new_public(OPENSSL_PKEY_ED448, NULL, public_key, 57)) != NULL &&
+        openssl_digest_sign_init(sign, NULL, NULL, NULL, key) == 1) {
+        length = sizeof signature;
+        if (openssl_digest_sign(sign, signature, &length, c->data + 57, BENCH_ED25519_MESSAGE) == 1 &&
+            openssl_digest_verify_init(verify, NULL, NULL, NULL, peer) == 1) {
+            for (long i = 0; i < calls; i++)
+                sum += openssl_digest_verify(verify, signature, 114, c->data + 57, BENCH_ED25519_MESSAGE);
+        }
+    }
+    openssl_md_ctx_free(verify);
+    openssl_md_ctx_free(sign);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival ed448_public_key_rivals[] = { { openssl_name, openssl_ed448_public_key } };
+static bench_rival ed448_sign_rivals[] = { { openssl_name, openssl_ed448_sign } };
+static bench_rival ed448_verify_rivals[] = { { openssl_name, openssl_ed448_verify } };
+
 /* ---- ML-KEM: a key pair, an encapsulation, a decapsulation, at 768 and 1024. OpenSSL 3.0.13 has
  * no ML-KEM (3.5 brought it): the rival is mlkem-native 2.1.0 (rival_mlkem.c), its AVX2 backend. */
 
@@ -2994,6 +3115,30 @@ void bench_suite_rivals(void)
         c.ours = ed25519_cases[i].ours;
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = ed25519 ? ed25519_cases[i].rivals : NULL;
+        c.rival_count = ed25519 ? 1 : 0;
+        bench_add(&c);
+    }
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } ed448_cases[] = {
+        { "ed448_public_key", "public key", bench_ed448_public_key, ed448_public_key_rivals },
+        { "ed448_sign", "signature (130-octet CertificateVerify content)", bench_ed448_sign, ed448_sign_rivals },
+        { "ed448_verify", "verification (130-octet CertificateVerify content)", bench_ed448_verify, ed448_verify_rivals },
+    };
+    for (size_t i = 0; i < sizeof ed448_cases / sizeof ed448_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = ed448_cases[i].name;
+        c.input = ed448_cases[i].input;
+        c.data = bench_ed448_input();
+        c.length = 57 + BENCH_ED25519_MESSAGE;
+        c.octets = 0;
+        c.ours = ed448_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = ed25519 ? ed448_cases[i].rivals : NULL;   /* (openssl_load_ed25519 loaded the EVP functions) */
         c.rival_count = ed25519 ? 1 : 0;
         bench_add(&c);
     }

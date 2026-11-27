@@ -2297,6 +2297,118 @@ static int ed25519_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_ed448_*: by versions (crypto/ed448.asm) --------------------------------------------
+ * v1 (mul, SSE2 table scans) against v3 (mulx, AVX2 scans), both on X448's field. Every tier must
+ * give v1's public key, prepared key and signature, and the same verdicts. */
+
+/* ed448_tiers: `randoms` rounds: a seed (random, every so often all zeros or all ones), a message
+ * of 0 to 300 octets and a context of 0 to 40 (every seventh round 255), each input against the
+ * guard page in turn (the seed, the message, the context, the prepared key, the public key, the
+ * signature), so a read past one faults; outputs followed by canaries. Each tier's signature must
+ * verify, and fail with one bit flipped, with S + L, under a random public key and under a
+ * context one octet longer. Returns 0 when every tier agrees with v1, 1 at the first difference. */
+static int ed448_tiers(long randoms)
+{
+    static const uint8_t l_octets[57] = {   /* L, little-endian */
+        0xF3, 0x44, 0x58, 0xAB, 0x92, 0xC2, 0x78, 0x23, 0x55, 0x8F, 0xC5, 0x8D, 0x72, 0xC2, 0x6C, 0x21,
+        0x90, 0x36, 0xD6, 0xAE, 0x49, 0xDB, 0x4E, 0xC4, 0xE9, 0x23, 0xCA, 0x7C, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x3F, 0x00,
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t length = (size_t)(rng() % 301);
+        size_t context_length = i % 7 == 3 ? 255 : (size_t)(rng() % 41);
+        uint8_t *area = page_end - 2048;                    /* where the inputs off the guard go */
+        int guard = (int)(i % 6);
+        uint8_t *seed = guard == 0 ? page_end - 57 : area;
+        uint8_t *message = guard == 1 ? page_end - length : area + 64;
+        uint8_t *context = guard == 2 ? page_end - context_length - 1 : area + 384;   /* (one spare for the longer context) */
+        httpasm_ed448_private_key *key = (httpasm_ed448_private_key *)(guard == 3 ? page_end - 176 : area + 704);
+        uint8_t *public_in = guard == 4 ? page_end - 57 : area + 896;
+        uint8_t *signature_in = guard == 5 ? page_end - 114 : area + 960;
+        for (size_t k = 0; k < 57; k++)
+            seed[k] = (uint8_t)rng();
+        if (i % 13 == 1)
+            memset(seed, 0, 57);
+        if (i % 13 == 2)
+            memset(seed, 0xFF, 57);
+        for (size_t k = 0; k < length; k++)
+            message[k] = (uint8_t)rng();
+        for (size_t k = 0; k <= context_length; k++)
+            context[k] = (uint8_t)rng();
+        uint8_t random_key[57];
+        for (size_t k = 0; k < 57; k++)
+            random_key[k] = (uint8_t)rng();
+        size_t flip = (size_t)(rng() % 912);
+        uint8_t expected_public[57], expected_key[176], expected_signature[114];
+        int expected[5] = { 0 };
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            uint8_t public_key[57 + 16], signature[114 + 16];
+            union { httpasm_ed448_private_key key; uint8_t octets[176 + 16]; } prepared;
+            memset(public_key, 0xC3, sizeof public_key);
+            memset(signature, 0xC3, sizeof signature);
+            memset(prepared.octets, 0xC3, sizeof prepared.octets);
+            httpasm_ed448_public_key(public_key, seed);
+            httpasm_ed448_private_key_init(&prepared.key, seed);
+            memcpy(key, &prepared.key, 176);
+            int signed_result = httpasm_ed448_sign(signature, key, message, length, context, context_length);
+            for (size_t k = 0; k < 16; k++) {
+                if (public_key[57 + k] != 0xC3 || prepared.octets[176 + k] != 0xC3 || signature[114 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_ed448_* at %s wrote past an output\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (signed_result != 0 || memcmp(prepared.octets + 113, public_key, 57) != 0) {
+                fprintf(stderr, "httpasm_ed448_* at %s: sign returned %d, or the prepared key's public key is not httpasm_ed448_public_key's\n",
+                        cap_names[t], signed_result);
+                return 1;
+            }
+            memcpy(public_in, public_key, 57);
+            memcpy(signature_in, signature, 114);
+            int results[5];
+            results[0] = httpasm_ed448_verify(public_in, message, length, context, context_length, signature_in);
+            signature_in[flip / 8] ^= (uint8_t)(1 << (flip % 8));
+            results[1] = httpasm_ed448_verify(public_in, message, length, context, context_length, signature_in);
+            memcpy(signature_in, signature, 114);
+            unsigned carry = 0;                             /* S + L (S < L: below 2^447, the octets hold it) */
+            for (size_t k = 0; k < 57; k++) {
+                carry += (unsigned)signature_in[57 + k] + l_octets[k];
+                signature_in[57 + k] = (uint8_t)carry;
+                carry >>= 8;
+            }
+            results[2] = httpasm_ed448_verify(public_in, message, length, context, context_length, signature_in);
+            memcpy(signature_in, signature, 114);
+            results[3] = httpasm_ed448_verify(public_in, message, length, context, context_length + 1, signature_in);
+            memcpy(public_in, random_key, 57);
+            results[4] = httpasm_ed448_verify(public_in, message, length, context, context_length, signature_in);
+            if (results[0] != 0 || results[1] != -1 || results[2] != -1 || results[3] != -1 || results[4] != -1) {
+                fprintf(stderr, "httpasm_ed448_verify at %s: own %d, tampered %d, S + L %d, longer context %d, random key %d\n",
+                        cap_names[t], results[0], results[1], results[2], results[3], results[4]);
+                dump("seed", seed, 57);
+                dump("message", message, length);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_public, public_key, 57);
+                memcpy(expected_key, prepared.octets, 176);
+                memcpy(expected_signature, signature, 114);
+                memcpy(expected, results, sizeof expected);
+            } else if (memcmp(public_key, expected_public, 57) != 0 || memcmp(prepared.octets, expected_key, 176) != 0
+                       || memcmp(signature, expected_signature, 114) != 0 || memcmp(results, expected, sizeof expected) != 0) {
+                fprintf(stderr, "httpasm_ed448_* at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("seed", seed, 57);
+                dump("message", message, length);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_ed448_*: %ld rounds of public key, prepared key, signature and verifications at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_mlkem*: ML-KEM (crypto/mlkem.asm) ---------------------------------------------------
  * Its arithmetic has one version for now; SHA-3 and SHAKE under it have v1 and v3. Every tier must
  * give v1's keys, ciphertexts and shared secrets. Each round puts one input against the guard page
@@ -3090,6 +3202,8 @@ int main(int argc, char **argv)
         failed = p384_tiers(randoms / 1000);
     if (!failed)
         failed = ed25519_tiers(randoms / 500);
+    if (!failed)
+        failed = ed448_tiers(randoms / 2000);
     if (!failed)
         failed = mlkem_tiers(randoms / 500);
     if (!failed)

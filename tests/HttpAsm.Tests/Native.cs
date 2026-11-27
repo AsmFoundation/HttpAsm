@@ -464,6 +464,40 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_ed25519_verify")]
     internal static partial int Ed25519Verify(byte* publicKey, byte* message, nuint length, byte* signature);
 
+    /// <summary>void httpasm_ed448_public_key(public_key[57], private_key[57]).</summary>
+    /// <param name="publicKey">Receives A = s B, encoded.</param>
+    /// <param name="privateKey">The 57-octet seed.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed448_public_key")]
+    internal static partial void Ed448PublicKey(byte* publicKey, byte* privateKey);
+
+    /// <summary>void httpasm_ed448_private_key_init(key, private_key[57]).</summary>
+    /// <param name="key">Receives s, the prefix and A (<see cref="Ed448PrivateKey"/>).</param>
+    /// <param name="privateKey">The 57-octet seed.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed448_private_key_init")]
+    internal static partial void Ed448PrivateKeyInit(Ed448PrivateKey* key, byte* privateKey);
+
+    /// <summary>int httpasm_ed448_sign(signature[114], key, message, length, context, context_length).</summary>
+    /// <param name="signature">Receives R || S (may overlap the message).</param>
+    /// <param name="key">A prepared key.</param>
+    /// <param name="message">The message itself (pure Ed448 hashes it).</param>
+    /// <param name="length">Its length (0 allowed, message may then be null).</param>
+    /// <param name="context">The context (null allowed for length 0).</param>
+    /// <param name="contextLength">Its length, at most 255.</param>
+    /// <returns>0, or -1 for a context over 255 octets (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed448_sign")]
+    internal static partial int Ed448Sign(byte* signature, Ed448PrivateKey* key, byte* message, nuint length, byte* context, nuint contextLength);
+
+    /// <summary>int httpasm_ed448_verify(public_key[57], message, length, context, context_length, signature[114]).</summary>
+    /// <param name="publicKey">A, 57 octets.</param>
+    /// <param name="message">The message.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="context">The context.</param>
+    /// <param name="contextLength">Its length (over 255: refused).</param>
+    /// <param name="signature">R || S, 114 octets.</param>
+    /// <returns>0 when the signature is valid (the cofactorless equation), else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed448_verify")]
+    internal static partial int Ed448Verify(byte* publicKey, byte* message, nuint length, byte* context, nuint contextLength, byte* signature);
+
     /// <summary>void httpasm_mlkem512_keypair(ek[800], dk[1632], seed[64]).</summary>
     /// <param name="ek">Receives the encapsulation key.</param>
     /// <param name="dk">Receives the decapsulation key.</param>
