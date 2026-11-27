@@ -1274,6 +1274,168 @@ static bench_rival p384_share_rivals[] = { { openssl_name, openssl_p384_share } 
 static bench_rival p384_sign_rivals[] = { { openssl_name, openssl_p384_sign } };
 static bench_rival p384_verify_rivals[] = { { openssl_name, openssl_p384_verify } };
 
+/* ---- Ed25519: the public key, a signature, a verification. */
+
+/* The Ed25519 cases' input (see bench.h): the seed, then the CertificateVerify content, built on
+ * first use (the bench is single-threaded). */
+static uint8_t ed25519_input[32 + BENCH_ED25519_MESSAGE];
+
+/* bench_ed25519_input: see bench.h. */
+const uint8_t *bench_ed25519_input(void)
+{
+    static const char context[] = "TLS 1.3, server CertificateVerify";
+    if (ed25519_input[32] == 0) {
+        for (size_t i = 0; i < 32; i++)
+            ed25519_input[i] = (uint8_t)(0x9D + 37 * i);    /* the seed: any 32 octets are a key */
+        memset(ed25519_input + 32, 0x20, 64);
+        memcpy(ed25519_input + 32 + 64, context, sizeof context);    /* (its NUL is the separator) */
+        for (size_t i = 0; i < 32; i++)
+            ed25519_input[32 + 64 + sizeof context + i] = (uint8_t)(0x5A ^ (13 * i));   /* the hash */
+    }
+    return ed25519_input;
+}
+
+/* bench_ed25519_public_key: see bench.h. */
+void bench_ed25519_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[32];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ed25519_public_key(out, c->data);
+    bench_sink = out[0];
+}
+
+/* bench_ed25519_sign: see bench.h. */
+void bench_ed25519_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    httpasm_ed25519_private_key key;
+    uint8_t signature[64];
+    b->api.httpasm_ed25519_private_key_init(&key, c->data);
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_ed25519_sign(signature, &key, c->data + 32, BENCH_ED25519_MESSAGE);
+    memset(&key, 0, sizeof key);
+    bench_sink = signature[0];
+}
+
+/* bench_ed25519_verify: see bench.h. */
+void bench_ed25519_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    httpasm_ed25519_private_key key;
+    uint8_t public_key[32], signature[64];
+    b->api.httpasm_ed25519_public_key(public_key, c->data);
+    b->api.httpasm_ed25519_private_key_init(&key, c->data);
+    b->api.httpasm_ed25519_sign(signature, &key, c->data + 32, BENCH_ED25519_MESSAGE);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_ed25519_verify(public_key, c->data + 32, BENCH_ED25519_MESSAGE, signature);
+    bench_sink = (uint8_t)sum;
+}
+
+/* OpenSSL's Ed25519 (3.0.13: its own curve25519.c, 51-bit limbs in C on x86-64, with the
+ * fixed-base table) through EVP: the key from raw octets (which derives the public key), the
+ * message signed and verified whole with EVP_DigestSign and EVP_DigestVerify. OpenSSL 3.0.13
+ * takes repeated one-shot calls on one context (checked: the same signature each time), so the
+ * contexts are made before the loops and only the calls are timed - the strictest rival. */
+typedef void *(*openssl_md_ctx_new_fn)(void);
+typedef int (*openssl_digest_sign_init_fn)(void *ctx, void **pctx, const void *md, void *engine, void *pkey);
+typedef int (*openssl_digest_sign_fn)(void *ctx, unsigned char *sig, size_t *siglen, const unsigned char *tbs, size_t tbslen);
+typedef int (*openssl_digest_verify_fn)(void *ctx, const unsigned char *sig, size_t siglen, const unsigned char *tbs, size_t tbslen);
+typedef int (*openssl_get_raw_fn)(const void *pkey, unsigned char *out, size_t *length);
+static openssl_md_ctx_new_fn openssl_md_ctx_new;
+static openssl_free_fn openssl_md_ctx_free;
+static openssl_digest_sign_init_fn openssl_digest_sign_init, openssl_digest_verify_init;
+static openssl_digest_sign_fn openssl_digest_sign;
+static openssl_digest_verify_fn openssl_digest_verify;
+static openssl_get_raw_fn openssl_get_raw_public;
+enum { OPENSSL_PKEY_ED25519 = 1087 };       /* EVP_PKEY_ED25519 (NID_ED25519) */
+
+/* openssl_load_ed25519: OpenSSL's EVP functions for Ed25519 (the raw-key ones come with
+ * X25519's). Returns 0, or -1 (the cases then run without this rival). */
+static int openssl_load_ed25519(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL || openssl_load_x25519() != 0)
+        return -1;
+    openssl_md_ctx_new = (openssl_md_ctx_new_fn)dlsym(crypto, "EVP_MD_CTX_new");
+    openssl_md_ctx_free = (openssl_free_fn)dlsym(crypto, "EVP_MD_CTX_free");
+    openssl_digest_sign_init = (openssl_digest_sign_init_fn)dlsym(crypto, "EVP_DigestSignInit");
+    openssl_digest_sign = (openssl_digest_sign_fn)dlsym(crypto, "EVP_DigestSign");
+    openssl_digest_verify_init = (openssl_digest_sign_init_fn)dlsym(crypto, "EVP_DigestVerifyInit");
+    openssl_digest_verify = (openssl_digest_verify_fn)dlsym(crypto, "EVP_DigestVerify");
+    openssl_get_raw_public = (openssl_get_raw_fn)dlsym(crypto, "EVP_PKEY_get_raw_public_key");
+    if (!openssl_md_ctx_new || !openssl_md_ctx_free || !openssl_digest_sign_init || !openssl_digest_sign ||
+        !openssl_digest_verify_init || !openssl_digest_verify || !openssl_get_raw_public) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP Ed25519 functions\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_ed25519_public_key: the key made from the seed (OpenSSL derives its public key then)
+ * and the public key taken, each call. */
+static void openssl_ed25519_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[32] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_new_private(OPENSSL_PKEY_ED25519, NULL, c->data, 32);
+        size_t length = sizeof out;
+        openssl_get_raw_public(key, out, &length);
+        openssl_pkey_free(key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_ed25519_sign: EVP_DigestSign of the message, the key and the context made once. */
+static void openssl_ed25519_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_new_private(OPENSSL_PKEY_ED25519, NULL, c->data, 32);
+    void *ctx = key ? openssl_md_ctx_new() : NULL;
+    unsigned char signature[64] = { 0 };
+    if (ctx != NULL && openssl_digest_sign_init(ctx, NULL, NULL, NULL, key) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            openssl_digest_sign(ctx, signature, &length, c->data + 32, BENCH_ED25519_MESSAGE);
+        }
+    }
+    openssl_md_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = signature[0];
+}
+
+/* openssl_ed25519_verify: EVP_DigestVerify of a valid signature (made before the loop), the
+ * public key and the context made once. */
+static void openssl_ed25519_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_new_private(OPENSSL_PKEY_ED25519, NULL, c->data, 32);
+    unsigned char public_key[32], signature[64] = { 0 };
+    size_t length = sizeof public_key;
+    void *sign = key ? openssl_md_ctx_new() : NULL;
+    void *verify = key ? openssl_md_ctx_new() : NULL;
+    void *peer = NULL;
+    int sum = 0;
+    if (sign != NULL && verify != NULL && openssl_get_raw_public(key, public_key, &length) == 1 &&
+        (peer = openssl_new_public(OPENSSL_PKEY_ED25519, NULL, public_key, 32)) != NULL &&
+        openssl_digest_sign_init(sign, NULL, NULL, NULL, key) == 1) {
+        length = sizeof signature;
+        if (openssl_digest_sign(sign, signature, &length, c->data + 32, BENCH_ED25519_MESSAGE) == 1 &&
+            openssl_digest_verify_init(verify, NULL, NULL, NULL, peer) == 1) {
+            for (long i = 0; i < calls; i++)
+                sum += openssl_digest_verify(verify, signature, 64, c->data + 32, BENCH_ED25519_MESSAGE);
+        }
+    }
+    openssl_md_ctx_free(verify);
+    openssl_md_ctx_free(sign);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival ed25519_public_key_rivals[] = { { openssl_name, openssl_ed25519_public_key } };
+static bench_rival ed25519_sign_rivals[] = { { openssl_name, openssl_ed25519_sign } };
+static bench_rival ed25519_verify_rivals[] = { { openssl_name, openssl_ed25519_verify } };
+
 /* ---- RSA verification ------------------------------------------------------------------------
  * The vectors: a public key, a SHA-256 digest and its valid PKCS#1 v1.5 signature at each size,
  * Project Wycheproof's rsa_signature_{2048,3072,4096}_sha256_test.json, each one's first valid
@@ -2192,6 +2354,31 @@ void bench_suite_rivals(void)
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = p256 ? p384_cases[i].rivals : NULL;  /* (P-256's loading brought the functions) */
         c.rival_count = p256 ? 1 : 0;
+        bench_add(&c);
+    }
+    int ed25519 = openssl_load_ed25519() == 0;
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } ed25519_cases[] = {
+        { "ed25519_public_key", "public key", bench_ed25519_public_key, ed25519_public_key_rivals },
+        { "ed25519_sign", "signature (130-octet CertificateVerify content)", bench_ed25519_sign, ed25519_sign_rivals },
+        { "ed25519_verify", "verification (130-octet CertificateVerify content)", bench_ed25519_verify, ed25519_verify_rivals },
+    };
+    for (size_t i = 0; i < sizeof ed25519_cases / sizeof ed25519_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = ed25519_cases[i].name;
+        c.input = ed25519_cases[i].input;
+        c.data = bench_ed25519_input();
+        c.length = 32 + BENCH_ED25519_MESSAGE;
+        c.octets = 0;
+        c.ours = ed25519_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = ed25519 ? ed25519_cases[i].rivals : NULL;
+        c.rival_count = ed25519 ? 1 : 0;
         bench_add(&c);
     }
     int rsa = openssl_load_rsa() == 0;

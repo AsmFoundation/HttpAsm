@@ -266,6 +266,34 @@ static void add_p384(void)
     }
 }
 
+/* add_ed25519: the tiers cases of Ed25519: a signature (SHA-512 twice and the fixed base by
+ * table scans) and a verification (the decompression's exponentiation and the double scalar
+ * multiplication), each at every tier: v1's mul on 51-bit limbs and SSE2 scans against v3's
+ * mulx, adcx/adox on 64-bit limbs and AVX2 scans (the v2 tier runs v1's code, v4 v3's). */
+static void add_ed25519(void)
+{
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+    } cases[] = {
+        { "ed25519_sign", "signature", bench_ed25519_sign },
+        { "ed25519_verify", "verification", bench_ed25519_verify },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = cases[i].name;
+        c.input = cases[i].input;
+        c.data = bench_ed25519_input();
+        c.length = 32 + BENCH_ED25519_MESSAGE;
+        c.octets = 0;
+        c.ours = cases[i].ours;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_rsa: the tiers cases of RSA at 2048 bits, Wycheproof's keys (e = 65537), each prepared before
  * the loop, at every tier: a PKCS#1 v1.5 verification and a PKCS#1 v1.5 signature (the CRT's
  * two 1024-bit exponentiations: v3's own k = 16 square and product and its AVX2 gather against
@@ -352,6 +380,7 @@ void bench_suite_tiers(void)
     add_x25519();
     add_p256();
     add_p384();
+    add_ed25519();
     add_rsa();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);

@@ -93,6 +93,10 @@ extern httpasm_p384_public_key      ; int (public_key[97], private_key[48]): 0, 
 extern httpasm_p384_ecdh            ; int (shared[48], private_key[48], peer_key[97]): 0, -1 (key or point refused; zeros)
 extern httpasm_p384_sign            ; int (signature[96], private_key[48], digest, length, entropy[48] or NULL): 0, -1
 extern httpasm_p384_verify          ; int (public_key[97], digest, length, signature[96]): 0 valid, -1 not
+extern httpasm_ed25519_public_key   ; void (public_key[32], private_key[32]): A of the seed
+extern httpasm_ed25519_private_key_init ; void (httpasm_ed25519_private_key *key, private_key[32]): a mod L, prefix, A
+extern httpasm_ed25519_sign         ; void (signature[64], const httpasm_ed25519_private_key *key, message, length)
+extern httpasm_ed25519_verify       ; int (public_key[32], message, length, signature[64]): 0 valid, -1 not
 extern httpasm_rsa_public_key_init  ; int (httpasm_rsa_public_key *key, n, n_length, e, e_length): 0, -1 refused
 extern httpasm_rsa_verify_pkcs1     ; int (key, hash, digest, signature, signature_length): 0 valid, -1 not
 extern httpasm_rsa_verify_pss       ; int (key, hash, digest, salt_length, signature, signature_length): 0 valid, -1 not

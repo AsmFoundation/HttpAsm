@@ -1242,6 +1242,59 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      less than the square's own gain because the doublings' and additions' small operations
      (adds, subtractions, halvings, the selections by mask) are a large part of them. Next: those
      small operations (fused into the products, or values kept in registers between them).
+   - **Ed25519** (2026-11-27), `crypto/ed25519.asm` over `include/crypto/fe25519.inc` (X25519's
+     field, both versions): `httpasm_ed25519_public_key` (the seed's A),
+     `httpasm_ed25519_private_key_init` (a prepared key: a mod L, the prefix, A),
+     `httpasm_ed25519_sign` (RFC 8032 5.1.6 over the message itself) and
+     `httpasm_ed25519_verify` (5.1.7, cofactorless): TLS 1.3's ed25519 scheme and Ed25519
+     certificates (RFC 8410). *The key:* signing takes only a prepared key whose A the library
+     computed from the seed: r = SHA-512(prefix || M) does not depend on A, so one message signed
+     under two public keys gives a = (S1 - S2) / (k1 - k2) mod L (the "double public key
+     oracle" of libraries that take A from their caller; a test plants a wrong A in a prepared
+     key and recovers a that way). *The group:* extended coordinates with dbl-2008-hwcd (4M +
+     4S) and add-2008-hwcd-3 (8M, 7M against a precomputed (y + x, y - x, 2d x y) point), which
+     are complete on edwards25519 (a = -1 a square, d not): no input is exceptional, so no
+     masks. v1's additions stay uncarried as in X25519, and two values here are sums of three
+     carried ones (G = 2Z + C, F' = 2Z^2 + G'), whose products stay below 77 * 3 * 2^103 < 2^111,
+     the field's limit. *The fixed base* (public keys, R = r B), constant time: P-256's signed
+     digits at 6 bits, 43 windows of m 2^(6i) B for m = 1..32 (132,096 octets in
+     `include/generated/ed25519_table.inc`, written and proven by `specs/ed25519.cs`, which CI
+     runs with --check), each window's entry scanned (v3 AVX2, v1 SSE2), negated by a swap and
+     a masked negation, digit 0 the neutral (1, 1, 0); one mixed addition a window, no doubling.
+     *Verification* (public inputs, variable time): S below L first (non-malleable); A decoded
+     by RFC 8032 5.1.3 (y below p, x from the square root, x = 0 with the sign bit refused);
+     [S]B + [k](-A) in one Straus pass, S's width-6 NAF over the table's window 0, k's width-5
+     NAF over -A's odd multiples 1..15 (cached form, built per call), and doublings without T
+     where no addition follows (dbl-2008-hwcd never reads T: one product fewer on about 175 of
+     the 253); then the result's encoding compared with R octet for octet (a non-canonical R
+     never matches). Small- and mixed-order public keys are not refused by policy (Wycheproof
+     lets either policy pass them; the cofactorless equation decides). *Scalars modulo L:*
+     four-limb Montgomery products with mul (a signature takes five): a 512-bit hash h1 R + h0
+     reduces as REDC(REDC(h1, R^3) + REDC(h0, R^2), 1), S as REDC(REDC(k, a), R^2) + r. *The
+     inversion* (each encoding): P-256's safegcd, moved to `crypto/inverse.asm` as
+     `ha_modinv256` with 2^255 - 19's record (`fe25519.inc`'s FE25519_INVERSE_RECORD, which
+     `specs/ed25519.cs` proves): 2.11 us where this field's Fermat chains (254 squarings, each
+     waiting for the last) take 3.76 us at v3 and 4.03 us at v1 (scratchpad ed25519/inv.asm, the
+     same inverses on 20,000 inputs). *Proven by* RFC 8032 7.1's five vectors read from the
+     pinned text, Wycheproof's 210 verifications (65ca494: 117 valid pass, 64 invalid fail, the
+     29 small- and mixed-order "acceptable" ones get the model's answer, which takes all 29), a
+     BigInteger model of RFC 8032 (section 6's code in C#) on 120 seeds with messages across
+     SHA-512's block edges up to 1 MiB (public keys, every part of the prepared key, signatures
+     octet for octet), S's digits at their edges under the neutral, order-2 and order-4 keys
+     (where [k]A cannot hide S), refusals of every non-canonical or off-curve key, x = 0 with the
+     sign bit, S of L or more, a non-canonical R and single flipped bits, signatures into a
+     buffer over the message, and `tests/native/tiers` (1,600 rounds over the four tiers, each
+     input against the guard page in turn). A scratch run against Python's cryptography package
+     agreed octet for octet at both versions. *Measured* against OpenSSL 3.0.13's EVP (its C
+     curve25519.c; contexts made once, as 3.0.13 takes repeated one-shot calls), 41 rounds: a
+     public key 9.17 us (4.9x), a signature of a 130-octet CertificateVerify content 10.27 us
+     (4.3x), a verification 44.1 us (2.7x); v3 1.18x v1 on a signature, 1.10x on a
+     verification. The first cut (Fermat's inversion, every doubling with T) took 10.85, 11.95
+     and 47.3 us: the safegcd took 1.65 us from each encoding, the doublings without T about
+     1.5 us more from a verification. Next: X25519's public key by this fixed base (u = (1 + y)
+     / (1 - y) of a B, about 9 us against the ladder's 34), then the field itself (four
+     coordinates at once in AVX2 lanes, as curve25519-dalek's backend does, for verification's
+     doublings).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

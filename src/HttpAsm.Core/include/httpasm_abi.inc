@@ -285,6 +285,24 @@ HTTPASM_P384_POINT              equ 97      ; octets of a public key: 04, x, y
 HTTPASM_P384_SIGNATURE          equ 96      ; octets of a signature: r, s (IEEE P1363's form)
 HTTPASM_P384_ENTROPY            equ 48      ; octets of a signature's optional entropy
 
+; Ed25519 (RFC 8032 5.1; crypto/ed25519.asm): private keys (the 32-octet seed) and public keys
+; are 32 octets, signatures R || S 64.
+HTTPASM_ED25519_KEY             equ 32      ; octets of a private key (seed) or a public key
+HTTPASM_ED25519_SIGNATURE       equ 64      ; octets of a signature: R, then S (little-endian)
+
+; -----------------------------------------------------------------------------
+; httpasm_ed25519_private_key: a private key ready to sign (crypto/ed25519.asm), 96 octets;
+; opaque in httpasm.h (struct size id 19). httpasm_ed25519_private_key_init derives all three
+; parts from the seed: the public key is the library's own, never the caller's (signing a
+; message under two public keys with one seed would give the private scalar away: r does not
+; depend on A). Its octets are secrets: the caller zeroes them when done.
+; -----------------------------------------------------------------------------
+struc httpasm_ed25519_private_key
+    .scalar:            resq 4      ; a mod L (a = the clamped first half of SHA-512(seed))
+    .prefix:            resb 32     ; the second half of SHA-512(seed): r's secret input
+    .public:            resb 32     ; A = a B, encoded (RFC 8032 5.1.2)
+endstruc
+
 ; Hash identifiers (the RSA signatures name their hash with these; SHA-1 and SHA-224 only where
 ; the caller brings the digest: PKCS#1 v1.5 verification of legacy certificates).
 HTTPASM_HASH_SHA1               equ 1

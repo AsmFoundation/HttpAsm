@@ -252,8 +252,8 @@ uint32_t httpasm_abi_version(void);
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
- * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers; 0 for
- * any other value. */
+ * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
+ * 19 httpasm_ed25519_private_key; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -572,6 +572,50 @@ int httpasm_p384_sign(uint8_t signature[HTTPASM_P384_SIGNATURE],
  * point of the curve, or the equation failing. */
 int httpasm_p384_verify(const uint8_t public_key[HTTPASM_P384_POINT], const uint8_t *digest,
                         size_t digest_length, const uint8_t signature[HTTPASM_P384_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
+ * Ed25519 (RFC 8032 5.1, pure EdDSA): TLS 1.3's ed25519 signature scheme and Ed25519
+ * certificates (RFC 8410). Versions: mulx with adcx/adox and AVX2 table scans on four 64-bit
+ * limbs, and mul with SSE2 on five 51-bit limbs; signing is constant time in the key and r,
+ * verification (public inputs) is not.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_ED25519_KEY       32    /* octets of a private key (the seed) or a public key */
+#define HTTPASM_ED25519_SIGNATURE 64    /* octets of a signature: R || S */
+
+/* The public key of a private key (32 octets, any value: RFC 8032 5.1.5's seed; draw them from
+ * httpasm_random). */
+void httpasm_ed25519_public_key(uint8_t public_key[HTTPASM_ED25519_KEY],
+                                const uint8_t private_key[HTTPASM_ED25519_KEY]);
+
+/* A private key ready to sign (96 octets): the scalar, the nonce prefix and the public key, all
+ * derived from the seed by the library. There is no way to sign under a public key the caller
+ * names: signing one message under two public keys with one seed would reveal the private
+ * scalar. Its octets ARE the secret: zero it when done. */
+typedef struct httpasm_ed25519_private_key {
+    uint64_t opaque[12];
+} httpasm_ed25519_private_key;
+
+/* Prepares key from a private key (the seed): one public key's worth of work, so prepare a key
+ * once and keep it for its signatures. */
+void httpasm_ed25519_private_key_init(httpasm_ed25519_private_key *key,
+                                      const uint8_t private_key[HTTPASM_ED25519_KEY]);
+
+/* Signs message[0..length) (the message itself: pure Ed25519 hashes it twice, so a TLS
+ * CertificateVerify passes its whole signed content). Deterministic, as RFC 8032 5.1.6 defines
+ * it; signature may overlap the message. */
+void httpasm_ed25519_sign(uint8_t signature[HTTPASM_ED25519_SIGNATURE],
+                          const httpasm_ed25519_private_key *key, const uint8_t *message,
+                          size_t length);
+
+/* Verifies signature over message[0..length) under a public key (RFC 8032 5.1.7, the
+ * cofactorless equation [S]B = R + [k]A). Returns 0 when valid; -1 otherwise: S not below L
+ * (no malleable signature passes), the public key not a point's encoding (y not below p, or no
+ * x for it, or x = 0 with the sign bit set), or the equation failing (R is compared octet for
+ * octet with the encoding of [S]B - [k]A, so a non-canonical R never passes). Public keys of
+ * small order are not refused by policy. */
+int httpasm_ed25519_verify(const uint8_t public_key[HTTPASM_ED25519_KEY], const uint8_t *message,
+                           size_t length, const uint8_t signature[HTTPASM_ED25519_SIGNATURE]);
 
 /* ------------------------------------------------------------------------------------------
  * RSA signatures (RFC 8017): verification of RSASSA-PKCS1-v1_5 (certificates' sha256With-

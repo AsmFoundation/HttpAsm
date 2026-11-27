@@ -326,6 +326,35 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_p384_verify")]
     internal static partial int P384Verify(byte* publicKey, byte* digest, nuint digestLength, byte* signature);
 
+    /// <summary>void httpasm_ed25519_public_key(public_key[32], private_key[32]).</summary>
+    /// <param name="publicKey">Receives A, the encoding of a B (RFC 8032 5.1.5).</param>
+    /// <param name="privateKey">The 32-octet seed (any value).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed25519_public_key")]
+    internal static partial void Ed25519PublicKey(byte* publicKey, byte* privateKey);
+
+    /// <summary>void httpasm_ed25519_private_key_init(key, private_key[32]).</summary>
+    /// <param name="key">Receives a mod L, the prefix and A (<see cref="Ed25519PrivateKey"/>).</param>
+    /// <param name="privateKey">The 32-octet seed.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed25519_private_key_init")]
+    internal static partial void Ed25519PrivateKeyInit(Ed25519PrivateKey* key, byte* privateKey);
+
+    /// <summary>void httpasm_ed25519_sign(signature[64], key, message, length).</summary>
+    /// <param name="signature">Receives R || S; may overlap the message.</param>
+    /// <param name="key">A prepared key.</param>
+    /// <param name="message">The message itself (pure Ed25519 hashes it).</param>
+    /// <param name="length">Its length (0 allowed, message may then be null).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed25519_sign")]
+    internal static partial void Ed25519Sign(byte* signature, Ed25519PrivateKey* key, byte* message, nuint length);
+
+    /// <summary>int httpasm_ed25519_verify(public_key[32], message, length, signature[64]).</summary>
+    /// <param name="publicKey">A, 32 octets.</param>
+    /// <param name="message">The message.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="signature">R || S, 64 octets.</param>
+    /// <returns>0 when the signature is valid (the cofactorless equation), else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_ed25519_verify")]
+    internal static partial int Ed25519Verify(byte* publicKey, byte* message, nuint length, byte* signature);
+
     /// <summary>int httpasm_rsa_public_key_init(key, n, n_length, e, e_length).</summary>
     /// <param name="key">Receives the key; all zeros when refused.</param>
     /// <param name="n">The modulus, big-endian (leading zero octets allowed).</param>

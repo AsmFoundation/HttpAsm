@@ -191,6 +191,32 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: Ed25519.** Three cases (bench_ed25519_*): a public key from a seed (SHA-512 and
+the fixed base), a signature under a key prepared before the loop, and a verification of a valid
+signature, the message a TLS 1.3 server CertificateVerify's signed content (130 octets: 64
+spaces, the context string, a zero, a SHA-256 transcript hash). Beside OpenSSL 3.0.13's EVP (its
+C curve25519.c): the key from raw octets (which derives the public key), EVP_DigestSign and
+EVP_DigestVerify with the contexts made once (3.0.13 takes repeated one-shot calls on one
+context: checked, the same signature each time), so only the calls are timed. 41 rounds; the
+ratio is the paired estimate:
+
+| Case | v3 (mulx, adcx/adox, AVX2) | v1 (mul, 51-bit limbs, SSE2) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| public key | 9.17 us | 10.88 us | 44.4 us | 4.9x OpenSSL [4.85-5.08] |
+| signature (130 octets) | 10.27 us | 12.18 us | 43.8 us | 4.3x OpenSSL [4.18-4.33] |
+| verification (130 octets) | 44.1 us | 48.1 us | 119.3 us | 2.7x OpenSSL [2.69-2.77] |
+
+The first cut took 10.85, 11.95 and 47.3 us (OpenSSL 4.2x, 3.6x and 2.5x). Two changes since,
+each measured: the inversion of each encoding by safegcd (`crypto/inverse.asm`, P-256's
+routine moved there) instead of Fermat's chain, 2.11 us against 3.76 us at v3 and 4.03 at v1
+(scratchpad ed25519/inv.asm, the same inverses on 20,000 inputs), which took 1.65 us from a
+public key and a signature; and verification's doublings without T where no addition follows
+(one product of eight), about 1.5 us more from a verification. A signature is now about 43 mixed
+additions (7 products each, 4 us), their table scans (43 times 3 KiB, about 1.4 us), the
+inversion (2.1 us) and two SHA-512 runs of two blocks; a verification about 253 doublings and
+78 additions (2,400 field operations, most of its time), the decompression's exponentiation
+(3.8 us) and the inversion.
+
 **2026-11-27: P-384 (secp384r1).** P-256's five cases at P-384 (bench_p384_*: a shared secret,
 a public key, a TLS 1.3 key share, a hedged RFC 6979 signature of a SHA-384 digest, a
 verification), beside OpenSSL 3.0.13's EVP_PKEY at P-384, which is its generic

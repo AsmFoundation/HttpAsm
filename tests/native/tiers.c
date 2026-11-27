@@ -1986,6 +1986,113 @@ static int p384_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_ed25519_*: by versions (crypto/ed25519.asm) ---------------------------------------
+ * v1 (mul on 51-bit limbs, SSE2 table scans) against v3 (mulx with adcx/adox on 64-bit limbs,
+ * AVX2 scans, with ADX). Every tier must give v1's public key, prepared key, signature and
+ * verdicts. Each round puts one input against the guard page in turn (the seed, the message, the
+ * prepared key, the public key, the signature), so a version reading past one faults; outputs are
+ * followed by canaries. */
+
+/* ed25519_tiers: `randoms` rounds: a seed (random, every so often all zeros or all ones) and a
+ * message of 0 to 200 random octets; at every tier the public key, the prepared key (its public
+ * part must be the public key), the signature, its verification, a tampered copy's, one with S
+ * pushed past L (S + L: the same point, refused), and a random 32 octets as a public key with the
+ * genuine signature (decoding refused, or the equation failing). Returns 0 when every tier agrees
+ * with v1, 1 at the first difference. */
+static int ed25519_tiers(long randoms)
+{
+    static const uint8_t l_octets[32] = {   /* L, little-endian */
+        0xED, 0xD3, 0xF5, 0x5C, 0x1A, 0x63, 0x12, 0x58, 0xD6, 0x9C, 0xF7, 0xA2, 0xDE, 0xF9, 0xDE, 0x14,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t length = (size_t)(rng() % 201);
+        uint8_t *area = page_end - 1024;                    /* where the inputs off the guard go */
+        int guard = (int)(i % 5);
+        uint8_t *seed = guard == 0 ? page_end - 32 : area;
+        uint8_t *message = guard == 1 ? page_end - length : area + 64;
+        httpasm_ed25519_private_key *key = (httpasm_ed25519_private_key *)(guard == 2 ? page_end - 96 : area + 272);
+        uint8_t *public_in = guard == 3 ? page_end - 32 : area + 384;
+        uint8_t *signature_in = guard == 4 ? page_end - 64 : area + 448;
+        for (size_t k = 0; k < 32; k++)
+            seed[k] = (uint8_t)rng();
+        if (i % 13 == 1)
+            memset(seed, 0, 32);
+        if (i % 13 == 2)
+            memset(seed, 0xFF, 32);
+        for (size_t k = 0; k < length; k++)
+            message[k] = (uint8_t)rng();
+        uint8_t random_key[32];
+        for (size_t k = 0; k < 32; k++)
+            random_key[k] = (uint8_t)rng();
+        size_t flip = (size_t)(rng() % 512);
+        uint8_t expected_public[32], expected_key[96], expected_signature[64];
+        int expected[4] = { 0 };
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            uint8_t public_key[32 + 16], signature[64 + 16];
+            union { httpasm_ed25519_private_key key; uint8_t octets[96 + 16]; } prepared;
+            memset(public_key, 0xC3, sizeof public_key);
+            memset(signature, 0xC3, sizeof signature);
+            memset(prepared.octets, 0xC3, sizeof prepared.octets);
+            httpasm_ed25519_public_key(public_key, seed);
+            httpasm_ed25519_private_key_init(&prepared.key, seed);
+            memcpy(key, &prepared.key, 96);
+            httpasm_ed25519_sign(signature, key, message, length);
+            for (size_t k = 0; k < 16; k++) {
+                if (public_key[32 + k] != 0xC3 || prepared.octets[96 + k] != 0xC3 || signature[64 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_ed25519_* at %s wrote past an output\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (memcmp(prepared.octets + 64, public_key, 32) != 0) {
+                fprintf(stderr, "httpasm_ed25519_private_key_init at %s: its public key is not httpasm_ed25519_public_key's\n", cap_names[t]);
+                return 1;
+            }
+            memcpy(public_in, public_key, 32);
+            memcpy(signature_in, signature, 64);
+            int results[4];
+            results[0] = httpasm_ed25519_verify(public_in, message, length, signature_in);
+            signature_in[flip / 8] ^= (uint8_t)(1 << (flip % 8));
+            results[1] = httpasm_ed25519_verify(public_in, message, length, signature_in);
+            memcpy(signature_in, signature, 64);
+            unsigned carry = 0;                             /* S + L (S < L: no carry out of 2^256) */
+            for (size_t k = 0; k < 32; k++) {
+                carry += (unsigned)signature_in[32 + k] + l_octets[k];
+                signature_in[32 + k] = (uint8_t)carry;
+                carry >>= 8;
+            }
+            results[2] = httpasm_ed25519_verify(public_in, message, length, signature_in);
+            memcpy(signature_in, signature, 64);
+            memcpy(public_in, random_key, 32);
+            results[3] = httpasm_ed25519_verify(public_in, message, length, signature_in);
+            if (results[0] != 0 || results[1] != -1 || results[2] != -1 || results[3] != -1) {
+                fprintf(stderr, "httpasm_ed25519_verify at %s: own %d, tampered %d, S + L %d, random key %d\n",
+                        cap_names[t], results[0], results[1], results[2], results[3]);
+                dump("seed", seed, 32);
+                dump("message", message, length);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_public, public_key, 32);
+                memcpy(expected_key, prepared.octets, 96);
+                memcpy(expected_signature, signature, 64);
+                memcpy(expected, results, sizeof expected);
+            } else if (memcmp(public_key, expected_public, 32) != 0 || memcmp(prepared.octets, expected_key, 96) != 0
+                       || memcmp(signature, expected_signature, 64) != 0 || memcmp(results, expected, sizeof expected) != 0) {
+                fprintf(stderr, "httpasm_ed25519_* at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("seed", seed, 32);
+                dump("message", message, length);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_ed25519_*: %ld rounds of public key, prepared key, signature and verifications at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_rsa_*: RSA verification by versions (rsa.asm) ---------------------------------
  * v3 runs the Montgomery product, square and reduction with mulx and adcx/adox, eight limbs a
  * step; v1 and v2 run them with mul. A verification only says valid or not, so each round checks
@@ -2581,6 +2688,8 @@ int main(int argc, char **argv)
         failed = p256_tiers(randoms / 1000);
     if (!failed)
         failed = p384_tiers(randoms / 1000);
+    if (!failed)
+        failed = ed25519_tiers(randoms / 500);
     if (!failed)
         failed = rsa_tiers(randoms / 1000);
     if (!failed)

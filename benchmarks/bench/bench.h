@@ -78,6 +78,10 @@
     X(httpasm_p384_ecdh)            \
     X(httpasm_p384_sign)            \
     X(httpasm_p384_verify)          \
+    X(httpasm_ed25519_public_key)   \
+    X(httpasm_ed25519_private_key_init) \
+    X(httpasm_ed25519_sign)         \
+    X(httpasm_ed25519_verify)       \
     X(httpasm_rsa_public_key_init)  \
     X(httpasm_rsa_verify_pkcs1)     \
     X(httpasm_rsa_private_key_init) \
@@ -300,6 +304,25 @@ void bench_p384_sign(const bench_build *b, const bench_case *c, long calls);
 /* bench_p384_verify: httpasm_p384_verify of a valid signature (made before the loop): a TLS
  * client's work per P-384 signature in a certificate chain. */
 void bench_p384_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* The Ed25519 cases' input (bench_ed25519_input, suite_rivals.c): a private key (the 32-octet
+ * seed), then a TLS 1.3 server CertificateVerify's signed content (130 octets: 64 spaces, the
+ * context string, a zero, a SHA-256 transcript hash; RFC 9846 4.4.3), the message pure Ed25519
+ * signs whole. */
+enum { BENCH_ED25519_MESSAGE = 130 };
+const uint8_t *bench_ed25519_input(void);
+
+/* bench_ed25519_public_key: httpasm_ed25519_public_key of the input's seed (SHA-512 and the fixed
+ * base: the work of making a key, and of preparing one). */
+void bench_ed25519_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_ed25519_sign: httpasm_ed25519_sign of the message under a key prepared before the loop
+ * (a TLS server's work per handshake with an Ed25519 certificate). */
+void bench_ed25519_sign(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_ed25519_verify: httpasm_ed25519_verify of a valid signature (made before the loop): a
+ * TLS client's work per Ed25519 signature, CertificateVerify's or a certificate's. */
+void bench_ed25519_verify(const bench_build *b, const bench_case *c, long calls);
 
 /* An RSA verification's input (bench_rsa_input, suite_rivals.c): a public key (n of `octets`
  * octets, e = 65537) with a SHA-256 digest and its valid RSASSA-PKCS1-v1_5 signature, from

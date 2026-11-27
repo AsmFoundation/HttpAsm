@@ -624,6 +624,17 @@ FE51_MASK   equ 0x7FFFFFFFFFFFF             ; 2^51 - 1
 ; Shared.
 ; =============================================================================
 
+; FE25519_INVERSE_RECORD: p = 2^255 - 19 as ha_modinv256 (crypto/inverse.asm) takes a modulus,
+; at the label fe25519_mod_p: five signed 62-bit limbs (2^62 - 19, then 2^62 - 1 three times,
+; then 2^7 - 1: 255 = 4 * 62 + 7), then p^-1 mod 2^62. Each file that inverts expands it once,
+; in its .rodata (specs/ed25519.cs checks these six values). Inverting a field element: pack
+; it, FE_CANON it (ha_modinv256 takes values below p, and 0 must come back 0), store the four
+; qwords, call with rsi = fe25519_mod_p, load the result back (both versions' loads take it).
+%macro FE25519_INVERSE_RECORD 0
+align 16
+fe25519_mod_p: dq 0x3FFFFFFFFFFFFFED, 0x3FFFFFFFFFFFFFFF, 0x3FFFFFFFFFFFFFFF, 0x3FFFFFFFFFFFFFFF, 0x000000000000007F, 0x39435E50D79435E5
+%endmacro
+
 ; FE_CANON: the value in r8..r11 (below 2^256) fully reduced modulo p in place: bit 255 comes
 ; back as 19 (leaving a value below 2^255 + 19), then p is subtracted when that value + 19
 ; reaches 2^255 (x >= p exactly then), selected with cmov.

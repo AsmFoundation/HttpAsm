@@ -323,6 +323,26 @@ internal unsafe struct RsaPublicKey
 }
 
 /// <summary>
+/// httpasm_ed25519_private_key (httpasm_abi.inc; opaque in httpasm.h), 96 octets: a private key
+/// ready to sign, every part derived from the seed by httpasm_ed25519_private_key_init. The tests
+/// read its parts to hold the init to the BigInteger model (a mod L, the prefix, A) and plant a
+/// mismatched public key in it to show what the prepared key protects against; a caller only
+/// passes it.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Ed25519PrivateKey
+{
+    /// <summary>a mod L, four little-endian limbs (a = the clamped first half of SHA-512(seed)).</summary>
+    public fixed ulong Scalar[4];
+
+    /// <summary>The second half of SHA-512(seed): r's secret input.</summary>
+    public fixed byte Prefix[32];
+
+    /// <summary>A = a B, encoded (RFC 8032 5.1.2): what k = SHA-512(R || A || M) hashes.</summary>
+    public fixed byte Public[32];
+}
+
+/// <summary>
 /// httpasm_rsa_private_key (httpasm_abi.inc; opaque in httpasm.h), 6720 octets: a private key
 /// ready to sign, its public key first. The tests read its fields and plant faults in them (a bit
 /// flipped in a CRT exponent after the init); a caller only passes it. All zeros after a refused

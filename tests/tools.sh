@@ -169,6 +169,10 @@ fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp2
 fetch wycheproof/ecdh_secp384r1_ecpoint_test.json "$wycheproof/ecdh_secp384r1_ecpoint_test.json" ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3
 fetch wycheproof/ecdsa_secp384r1_sha384_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha384_p1363_test.json" e27344bf6daae75fa19663620883809f91c79fc4b4420eff9eae8036b34476be
 fetch wycheproof/ecdsa_secp384r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha512_p1363_test.json" d994c43b997760ce51c4bbae4a974bf9f9c61db2c4b0e454c3999179de7aae46
+#   Ed25519 (Ed25519Tests): 210 verifications - malleable S, non-canonical and invalid encodings
+#   of R and A, truncated and padded signatures, Tink's overflow cases, and the small- and
+#   mixed-order public keys whose signatures either policy may take ("acceptable").
+fetch wycheproof/ed25519_test.json "$wycheproof/ed25519_test.json" ea80ffebac085e21cb9d3e903e7fa2b448d96702da5b31f061d0b83b430b74b3
 #   RSA signatures (RsaTests): RSASSA-PKCS1-v1_5 at 2048 to 8192 bits with every SHA-2 hash this
 #   library takes (BER and malformed paddings, wrong hashes, the missing NULL, small and edge-case
 #   signatures), and RSASSA-PSS: MGF1 with the same hash at the salt lengths TLS 1.3 and the
