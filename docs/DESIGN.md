@@ -1015,6 +1015,74 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      interval timer without SA_RESTART, about 37,000 signals, and the three refusals each in a
      forked child behind its own seccomp filter) and RandomTests (lengths 0-300 and to 1 MiB,
      nothing written past the end; 1,000 32-octet values all different; the histogram).
+   - **P-256** (2026-11-27), `crypto/p256.asm` over `include/crypto/p256.inc`:
+     `httpasm_p256_public_key`, `httpasm_p256_ecdh` (TLS 1.3's secp256r1 key share and the
+     ECDH half of SecP256r1MLKEM768), `httpasm_p256_sign` and `httpasm_p256_verify` (ECDSA as
+     ecdsa_secp256r1_sha256 and certificates use it). Keys are SEC 1's uncompressed points
+     (04, x, y) and 32-octet scalars, signatures r || s. *The field:* Montgomery form, four
+     64-bit limbs fully reduced, Gueron and Krasnov's reduction for this p (the quotient is the
+     low limb, m p one product), in two versions: v3 mulx with adcx/adox, v1 mul. *Points* in
+     Jacobian coordinates, infinity as all zeros: OpenSSL's doubling (4M + 4S), add-2007-bl and
+     madd-2007-bl, an input at infinity replaced by mask after the addition. *Scalar
+     multiplications,* constant time (every table entry read and masked, digits from public
+     positions only): the variable base by 5-bit Booth digits over a table of 1P..16P (52
+     windows, five doublings and one addition each), the fixed base by 7-bit Booth digits over
+     37 tables of 64 affine points (151.5 KB, `include/generated/p256_table.inc`, written by
+     `specs/p256.cs`, which proves the curve, every constant and every point by a second route
+     first; CI checks it), one mixed addition a window. *No addition meets the doubling case*
+     for a scalar k in [1, n - 1], so the formulas skip it: in the fixed base, the accumulator
+     before window j is A G with A = (k mod 2^(7j)) - b 2^(7j) (Booth's digits telescope; b the
+     bit below the window), |A| <= 2^(7j - 1), and the addend is d 2^(7j) G with 1 <= |d| <= 64,
+     so A +- d 2^(7j) is nonzero and, below the top window, smaller than n; in the top window
+     A + d 2^252 is k itself and A - d 2^252 = k - 2d 2^252 vanishes modulo n only for a k whose
+     own top digit is not d (each d from 1 to 16 checked). In the variable base the
+     accumulator before window j is B P with B a multiple of 32 and the addend d P with
+     1 <= |d| <= 16, so B +- d is nonzero and below n except in window 0, where B + d = k and
+     B - d = k - 2d is a multiple of n only for k = 2d or n + 2d, neither of which has d as its
+     low digit (n = 17 mod 32). The accumulator is infinity exactly until the first nonzero
+     digit, which the masks handle. *Inversions* (to affine, ECDSA's k^-1 and s^-1): Bernstein
+     and Yang's divsteps in libsecp256k1's modinv64 arrangement (590 half-delta divsteps in 10
+     batches of 59 on the low 62 bits, the 2x2 matrix then applied to f, g and the Bezout
+     coefficients in signed 62-bit limbs), constant time, one routine for p and for n.
+     *ECDSA:* the nonce is RFC 6979's (HMAC-SHA256: RFC 6979's own k for a SHA-256 digest),
+     hedged with the caller's 32 octets of entropy as RFC 6979 3.6's extra input when given;
+     a digest of any length counts by its leftmost 256 bits (FIPS 186-5 6.4.1). Verification
+     computes u1 G + u2 Q with both multiplications (inputs public), checks the doubling and
+     cancelling cases of the last addition, and compares x(R) with r in Jacobian coordinates
+     (X = r Z^2, or (r + n) Z^2 when r + n < p) without an inversion. *Validation:* a public
+     key must be 04 || x || y with x, y below p on the curve (RFC 9846 4.2.8.2; it also stops
+     the invalid-curve attack); private keys, r and s must be in [1, n - 1]; every refusal
+     writes zeros where there is an output. Proven by RFC 6979 A.2.5 read from the pinned text
+     (pinned with this entry: the key pair, the two SHA-256 signatures exactly, all ten
+     verified), NIST's CAVP P-256 records (KAS ECC CDH's 25; FIPS 186-4's KeyPair 10, PKV 12,
+     SigGen 60 with each k's point checked, SigVer 75 with SHA-1 to SHA-512; SHA-224 by a
+     managed implementation in the tests), Wycheproof's 355 ECDH tests on raw points (the 204
+     EdgeCaseDoubling and the 16 invalid-curve points among them) and its ECDSA P1363 tests
+     with SHA-256 (262) and SHA-512 (332) (point duplication, Shamir edge cases, r and s at
+     every boundary), .NET's ECDiffieHellman and ECDsa on 150 random keys both ways, a
+     BigInteger model on 200 scalars from the edges (1, n - 1, all-negative Booth digits) with
+     digests of every length to 80 octets, RFC 6979's retry after a candidate k of n or more
+     (one signature in about 2^32: a key, digest and entropy that take it were found by a
+     search over 702 million draws, and the test checks the refusal against the reference; the
+     retries after r = 0 or s = 0, about 2^-256 each, are listed as rare for the coverage gate,
+     as is verification's check that R is not at infinity, which nothing reaches but which
+     stops a forgery if anything ever did), and `tests/native/tiers` (800 rounds of every
+     function equal at every tier, inputs against the guard page, outputs fenced). *Measured*
+     (benchmarks/README.md has the table and every experiment): against OpenSSL 3.0.13's EVP,
+     a shared secret 1.37x (52.0 us), a public key 3.0x, a TLS 1.3 key share 2.7x, a signature
+     1.72x (15.5 us), a verification 1.32x (65.1 us); v3 1.05x v1 on a shared secret and 1.31x
+     on a signature. Why the gains are what they are: every carry instruction, cmov and shift
+     runs on ports 0 and 6 only, which llvm-mca's model puts at 94% busy in a product (37 cycles
+     a product apart, where the multiplier allows 20), so the products are near their bound
+     and v3's mulx gains little over mul; what moved the needle was taking work off those ports
+     (the reduction's shifts as one mulx: doubling 378 to 356 cycles), the 7-bit fixed-base
+     window (11.85 against 13.3 us a public key at 5 bits) and the inversion (2.16 against
+     Fermat's 4.1 us). Measured and not kept: the final subtraction by masks (14 cycles more
+     latency a product), five doublings expanded in one routine (no change). Next levers: a
+     variable-time verification that shares the doublings of u1 G and u2 Q (Straus with wNAF
+     digits and a table of odd multiples of G: about 20% fewer field operations), the
+     divsteps' 6-cycle step chain (both zeta outcomes computed ahead: about 4), and on CPUs
+     with AVX-512 IFMA a 52-bit-limb field (no machine here to measure it on).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

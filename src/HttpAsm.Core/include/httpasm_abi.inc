@@ -272,6 +272,13 @@ HTTPASM_POLY1305_TAG            equ 16      ; octets of a Poly1305 tag (the AEAD
 ; X25519 (RFC 7748; crypto/x25519.asm): scalars, u-coordinates and shared secrets are 32 octets.
 HTTPASM_X25519_KEY              equ 32
 
+; P-256 (SP 800-186; crypto/p256.asm): scalars (private keys, shared secrets, r, s) are 32
+; big-endian octets, public keys SEC 1's uncompressed form (04 || x || y), signatures r || s.
+HTTPASM_P256_SCALAR             equ 32      ; octets of a private key, a shared secret, r or s
+HTTPASM_P256_POINT              equ 65      ; octets of a public key: 04, x, y
+HTTPASM_P256_SIGNATURE          equ 64      ; octets of a signature: r, s (IEEE P1363's form)
+HTTPASM_P256_ENTROPY            equ 32      ; octets of a signature's optional entropy
+
 ; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's

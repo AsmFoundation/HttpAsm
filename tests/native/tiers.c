@@ -1797,6 +1797,100 @@ static int x25519_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_p256_*: by versions (crypto/p256.asm) ---------------------------------------------
+ * v1 (mul, SSE2 table scans) against v3 (mulx with adcx/adox, AVX2 scans, with ADX). Every tier
+ * must give v1's public key, shared secret, signature and verdicts, return values included.
+ * Every input ends against the guard page (an over-read faults); outputs are followed by
+ * canaries. */
+
+/* p256_tiers: `randoms` rounds: a private key (random, every so often 1, n - 1, or a refused
+ * one: 0, n, all ones), a peer's point (v1's public key of another random key, every so often
+ * with a flipped octet: refused), a digest of 0 to 80 random octets, entropy every other round;
+ * then public key, ECDH, signature and its verification (and a tampered one's) at every tier.
+ * Returns 0 when every tier agrees with v1, 1 at the first difference. */
+static int p256_tiers(long randoms)
+{
+    static const uint8_t n_minus_1[32] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xBC, 0xE6, 0xFA, 0xAD, 0xA7, 0x17, 0x9E, 0x84, 0xF3, 0xB9, 0xCA, 0xC2, 0xFC, 0x63, 0x25, 0x50,
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        uint8_t *key = page_end - 32, *peer = page_end - 32 - 65 - 7, *entropy = page_end - 300;
+        size_t length = (size_t)(rng() % 81);
+        uint8_t *digest = page_end - 200 - length;
+        for (size_t k = 0; k < 32; k++) {
+            key[k] = (uint8_t)rng();
+            entropy[k] = (uint8_t)rng();
+        }
+        for (size_t k = 0; k < length; k++)
+            digest[k] = (uint8_t)rng();
+        if (i % 10 == 1)
+            memcpy(key, n_minus_1, 32);
+        if (i % 10 == 2) {
+            memset(key, 0, 32);
+            key[31] = 1;
+        }
+        if (i % 25 == 3)
+            memset(key, 0, 32);                             /* refused: 0 */
+        if (i % 25 == 4)
+            memset(key, 0xFF, 32);                          /* refused: past n */
+        uint8_t other[32];
+        for (size_t k = 0; k < 32; k++)
+            other[k] = (uint8_t)rng();
+        httpasm_cpu_limit(caps[0]);
+        if (httpasm_p256_public_key(peer, other) != 0)
+            memcpy(peer, (uint8_t[65]){ 4 }, 65);           /* (a refused draw: an invalid point) */
+        if (i % 9 == 5)
+            peer[1 + rng() % 64] ^= (uint8_t)(1 + rng() % 255);  /* off the curve, or past p */
+        const uint8_t *extra = i % 2 ? entropy : NULL;
+        uint8_t expected_public[65], expected_shared[32], expected_signature[64];
+        int expected[5] = { 0 };
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            uint8_t public_key[65 + 16], shared[32 + 16], signature[64 + 16];
+            memset(public_key, 0xC3, sizeof public_key);
+            memset(shared, 0xC3, sizeof shared);
+            memset(signature, 0xC3, sizeof signature);
+            int results[5];
+            results[0] = httpasm_p256_public_key(public_key, key);
+            results[1] = httpasm_p256_ecdh(shared, key, peer);
+            results[2] = httpasm_p256_sign(signature, key, digest, length, extra);
+            results[3] = results[0] == 0 ? httpasm_p256_verify(public_key, digest, length, signature) : -1;
+            uint8_t tampered[64];
+            memcpy(tampered, signature, 64);
+            tampered[rng() % 64] ^= (uint8_t)(1 << (rng() % 8));
+            results[4] = results[0] == 0 ? httpasm_p256_verify(public_key, digest, length, tampered) : -1;
+            for (size_t k = 0; k < 16; k++) {
+                if (public_key[65 + k] != 0xC3 || shared[32 + k] != 0xC3 || signature[64 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_p256_* at %s wrote past an output\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (results[3] != results[0] || results[4] != -1) {
+                fprintf(stderr, "httpasm_p256_verify at %s: own signature %d, tampered %d\n", cap_names[t], results[3], results[4]);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_public, public_key, 65);
+                memcpy(expected_shared, shared, 32);
+                memcpy(expected_signature, signature, 64);
+                memcpy(expected, results, sizeof expected);
+            } else if (memcmp(public_key, expected_public, 65) != 0 || memcmp(shared, expected_shared, 32) != 0
+                       || memcmp(signature, expected_signature, 64) != 0 || memcmp(results, expected, 3 * sizeof(int)) != 0) {
+                fprintf(stderr, "httpasm_p256_* at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("key", key, 32);
+                dump("peer", peer, 65);
+                dump("digest", digest, length);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_p256_*: %ld rounds of public key, ECDH, signature and verification at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -2062,6 +2156,8 @@ int main(int argc, char **argv)
         failed = chacha_tiers(randoms / 100);
     if (!failed)
         failed = x25519_tiers(randoms / 1000);
+    if (!failed)
+        failed = p256_tiers(randoms / 1000);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

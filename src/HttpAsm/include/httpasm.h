@@ -490,6 +490,49 @@ int httpasm_x25519(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM
 void httpasm_x25519_public_key(uint8_t out[HTTPASM_X25519_KEY], const uint8_t scalar[HTTPASM_X25519_KEY]);
 
 /* ------------------------------------------------------------------------------------------
+ * NIST P-256 (SP 800-186; TLS's secp256r1): ECDH for TLS 1.3's secp256r1 key share and
+ * SecP256r1MLKEM768, ECDSA (FIPS 186-5) for ecdsa_secp256r1_sha256 and certificates. Versions:
+ * mulx with adcx/adox and AVX2 table scans, and mul with SSE2; all constant time in the private
+ * key, the nonce and the peer's point (verification's inputs are public).
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_P256_SCALAR    32       /* octets of a private key, a shared secret, r or s */
+#define HTTPASM_P256_POINT     65       /* octets of a public key: 04 || x || y (SEC 1, uncompressed) */
+#define HTTPASM_P256_SIGNATURE 64       /* octets of a signature: r || s (IEEE P1363's form) */
+#define HTTPASM_P256_ENTROPY   32       /* octets of a signature's optional entropy */
+
+/* The public key of a private key d (32 big-endian octets, 1 <= d < n): 04 || x || y of d G,
+ * the uncompressed form a TLS 1.3 key share carries (RFC 9846 4.2.8.2). Returns 0; or -1 when d
+ * is 0 or n or more (out is then all zeros): to make a key, draw 32 random octets until this
+ * succeeds (a draw fails about once in 2^32). */
+int httpasm_p256_public_key(uint8_t public_key[HTTPASM_P256_POINT],
+                            const uint8_t private_key[HTTPASM_P256_SCALAR]);
+
+/* ECDH: shared = the x-coordinate of d Q (32 big-endian octets, the premaster secret TLS uses),
+ * for a private key d and a peer's public key Q. Returns 0; or -1 when d is out of range or Q
+ * is not a point of the curve in uncompressed form (a first octet other than 04, a coordinate p
+ * or more, the curve equation failing: RFC 9846 4.2.8.2's checks, which also stop the
+ * invalid-curve attack); shared is all zeros then. */
+int httpasm_p256_ecdh(uint8_t shared[HTTPASM_P256_SCALAR], const uint8_t private_key[HTTPASM_P256_SCALAR],
+                      const uint8_t peer_key[HTTPASM_P256_POINT]);
+
+/* ECDSA: signs a message digest (digest_length octets, any hash: its leftmost 256 bits are used,
+ * as FIPS 186-5 6.4.1 says) with a private key. The nonce is RFC 6979's deterministic k
+ * (HMAC-SHA256: exactly RFC 6979's for a SHA-256 digest), with entropy[0..32) mixed in as RFC
+ * 6979 3.6's extra input when entropy is not NULL (pass 32 random octets: a hedged signature
+ * keeps the key safe from a weak random generator and from faults alike). Returns 0; or -1
+ * when the private key is out of range (signature is then all zeros). */
+int httpasm_p256_sign(uint8_t signature[HTTPASM_P256_SIGNATURE],
+                      const uint8_t private_key[HTTPASM_P256_SCALAR], const uint8_t *digest,
+                      size_t digest_length, const uint8_t *entropy);
+
+/* ECDSA: verifies signature (r || s) over a digest (as httpasm_p256_sign takes it) under a public
+ * key. Returns 0 when valid; -1 otherwise: r or s not in [1, n - 1], the key not an uncompressed
+ * point of the curve, or the equation failing. */
+int httpasm_p256_verify(const uint8_t public_key[HTTPASM_P256_POINT], const uint8_t *digest,
+                        size_t digest_length, const uint8_t signature[HTTPASM_P256_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
  * Randomness: the kernel's generator (getrandom(2), the urandom source), for TLS randoms,
  * ephemeral keys and ticket keys.
  * ------------------------------------------------------------------------------------------ */

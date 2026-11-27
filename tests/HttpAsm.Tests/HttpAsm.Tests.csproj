@@ -50,6 +50,8 @@
     <None Include="../../specs/rfc/rfc8439.txt" Link="specs/rfc/rfc8439.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- RFC 7748 itself: the X25519 tests read section 5.2's and 6.1's vectors from it. -->
     <None Include="../../specs/rfc/rfc7748.txt" Link="specs/rfc/rfc7748.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- RFC 6979 itself: the P-256 tests read A.2.5's key pair and signatures from it. -->
+    <None Include="../../specs/rfc/rfc6979.txt" Link="specs/rfc/rfc6979.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

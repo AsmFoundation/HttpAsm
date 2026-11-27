@@ -38,7 +38,9 @@ internal static class Vectors
     /// The records of a CAVP response file: each a group of "Name = value" lines separated by a
     /// blank line, comments (#) left out. A bracketed line ("[L = 32]", "[L=32]") sets a section
     /// parameter that every following record carries as a field of its own ("L" = "32"), until
-    /// the next section sets it again: HMAC.rsp keeps each hash's MACs in an [L=...] section.
+    /// the next section sets it again: HMAC.rsp keeps each hash's MACs in an [L=...] section. A
+    /// bracketed line without "=" ("[P-256,SHA-256]", "[ENCRYPT]") becomes the field "Section"
+    /// (its text between the brackets): ECDSA's files name a record's curve and hash that way.
     /// </summary>
     /// <param name="path">The .rsp file.</param>
     /// <returns>Each record's fields by name, in file order.</returns>
@@ -76,6 +78,10 @@ internal static class Vectors
             if (equals > 0)
             {
                 (bracketed ? section : record)[body[..equals].Trim()] = body[(equals + 1)..].Trim();
+            }
+            else if (bracketed)
+            {
+                section["Section"] = body.Trim();
             }
         }
 

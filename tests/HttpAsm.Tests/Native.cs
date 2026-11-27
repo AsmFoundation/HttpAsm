@@ -258,6 +258,40 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_x25519_public_key")]
     internal static partial void X25519PublicKey(byte* output, byte* scalar);
 
+    /// <summary>int httpasm_p256_public_key(public_key[65], private_key[32]).</summary>
+    /// <param name="publicKey">Receives 04 || x || y of d G; all zeros when d is refused.</param>
+    /// <param name="privateKey">d, 32 big-endian octets.</param>
+    /// <returns>0, or -1 when d is 0 or n or more.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p256_public_key")]
+    internal static partial int P256PublicKey(byte* publicKey, byte* privateKey);
+
+    /// <summary>int httpasm_p256_ecdh(shared[32], private_key[32], peer_key[65]).</summary>
+    /// <param name="shared">Receives the x-coordinate of d Q; all zeros when refused.</param>
+    /// <param name="privateKey">d, 32 big-endian octets.</param>
+    /// <param name="peerKey">Q, 65 octets: 04 || x || y.</param>
+    /// <returns>0, or -1 when d is out of range or Q is no uncompressed point of the curve.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p256_ecdh")]
+    internal static partial int P256Ecdh(byte* shared, byte* privateKey, byte* peerKey);
+
+    /// <summary>int httpasm_p256_sign(signature[64], private_key[32], digest, digest_length, entropy).</summary>
+    /// <param name="signature">Receives r || s; all zeros when the key is refused.</param>
+    /// <param name="privateKey">d, 32 big-endian octets.</param>
+    /// <param name="digest">The message's digest (any hash; its leftmost 256 bits count).</param>
+    /// <param name="digestLength">Its length (0 allowed).</param>
+    /// <param name="entropy">32 octets mixed into RFC 6979's nonce, or null for RFC 6979's own.</param>
+    /// <returns>0, or -1 when d is 0 or n or more.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p256_sign")]
+    internal static partial int P256Sign(byte* signature, byte* privateKey, byte* digest, nuint digestLength, byte* entropy);
+
+    /// <summary>int httpasm_p256_verify(public_key[65], digest, digest_length, signature[64]).</summary>
+    /// <param name="publicKey">Q, 65 octets: 04 || x || y.</param>
+    /// <param name="digest">The message's digest.</param>
+    /// <param name="digestLength">Its length.</param>
+    /// <param name="signature">r || s, 64 octets.</param>
+    /// <returns>0 when the signature is valid, else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p256_verify")]
+    internal static partial int P256Verify(byte* publicKey, byte* digest, nuint digestLength, byte* signature);
+
     /// <summary>int httpasm_random(void *buffer, size_t length).</summary>
     /// <param name="buffer">Receives the random octets (anything when length is 0).</param>
     /// <param name="length">How many.</param>

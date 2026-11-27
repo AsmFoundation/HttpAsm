@@ -835,6 +835,246 @@ static bench_rival x25519_share_rivals[] = {
     { openssl_name, openssl_x25519_share },
 };
 
+/* ---- P-256: ECDH, the public key, a key share, ECDSA's signature and verification. */
+
+/* The P-256 cases' input: a private key, RFC 6979 A.2.5's public key as the peer's, a digest,
+ * entropy (see bench.h). */
+static const uint8_t p256_input[32 + 65 + 32 + 32] = {
+    0x5A, 0x31, 0x08, 0xC2, 0x77, 0x19, 0x4E, 0x63, 0xA0, 0x2B, 0xD5, 0x6E, 0x91, 0x3C, 0x47, 0xF8,
+    0x0D, 0xB6, 0x29, 0x84, 0x53, 0xE1, 0x7A, 0x9F, 0x36, 0xC4, 0x12, 0x5D, 0xE8, 0x70, 0xAB, 0x45,
+    0x04,
+    0x60, 0xFE, 0xD4, 0xBA, 0x25, 0x5A, 0x9D, 0x31, 0xC9, 0x61, 0xEB, 0x74, 0xC6, 0x35, 0x6D, 0x68,
+    0xC0, 0x49, 0xB8, 0x92, 0x3B, 0x61, 0xFA, 0x6C, 0xE6, 0x69, 0x62, 0x2E, 0x60, 0xF2, 0x9F, 0xB6,
+    0x79, 0x03, 0xFE, 0x10, 0x08, 0xB8, 0xBC, 0x99, 0xA4, 0x1A, 0xE9, 0xE9, 0x56, 0x28, 0xBC, 0x64,
+    0xF2, 0xF1, 0xB2, 0x0C, 0x2D, 0x7E, 0x9F, 0x51, 0x77, 0xA3, 0xC2, 0x94, 0xD4, 0x46, 0x22, 0x99,
+    0xAF, 0x2B, 0xDB, 0xE1, 0xAA, 0x9B, 0x6E, 0xC1, 0xE2, 0xAD, 0xE1, 0xD6, 0x94, 0xF4, 0x1F, 0xC7,
+    0x1A, 0x83, 0x1D, 0x02, 0x68, 0xE9, 0x89, 0x15, 0x62, 0x11, 0x3D, 0x8A, 0x62, 0xAD, 0xD1, 0xBF,
+    0x13, 0x57, 0x9B, 0xDF, 0x24, 0x68, 0xAC, 0xE0, 0x35, 0x79, 0xBD, 0xF1, 0x46, 0x8A, 0xCE, 0x02,
+    0x57, 0x9B, 0xDF, 0x13, 0x68, 0xAC, 0xE0, 0x24, 0x79, 0xBD, 0xF1, 0x35, 0x8A, 0xCE, 0x02, 0x46,
+};
+
+/* bench_p256_input: see bench.h. */
+const uint8_t *bench_p256_input(void)
+{
+    return p256_input;
+}
+
+/* bench_p256_ecdh: see bench.h. */
+void bench_p256_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[32];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p256_ecdh(out, c->data, c->data + 32);
+    bench_sink = out[0];
+}
+
+/* bench_p256_public_key: see bench.h. */
+void bench_p256_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[65];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p256_public_key(out, c->data);
+    bench_sink = out[1];
+}
+
+/* bench_p256_share: see bench.h. */
+void bench_p256_share(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t key[32], public_key[65], out[32];
+    for (long i = 0; i < calls; i++) {
+        do
+            b->api.httpasm_random(key, sizeof key);
+        while (b->api.httpasm_p256_public_key(public_key, key) != 0);
+        b->api.httpasm_p256_ecdh(out, key, c->data + 32);
+    }
+    bench_sink = out[0] + public_key[1];
+}
+
+/* bench_p256_sign: see bench.h. */
+void bench_p256_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t signature[64];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p256_sign(signature, c->data, c->data + 97, 32, c->data + 129);
+    bench_sink = signature[0];
+}
+
+/* bench_p256_verify: see bench.h. */
+void bench_p256_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[65], signature[64];
+    b->api.httpasm_p256_public_key(public_key, c->data);
+    b->api.httpasm_p256_sign(signature, c->data, c->data + 97, 32, NULL);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_p256_verify(public_key, c->data + 97, 32, signature);
+    bench_sink = (uint8_t)sum;
+}
+
+typedef void *(*openssl_q_keygen_fn)(void *libctx, const char *propq, const char *type, ...);
+typedef void *(*openssl_pkey_new_fn)(void);
+typedef int (*openssl_copy_parameters_fn)(void *to, const void *from);
+typedef int (*openssl_set1_encoded_fn)(void *pkey, const unsigned char *pub, size_t length);
+typedef size_t (*openssl_get1_encoded_fn)(void *pkey, unsigned char **pub);
+typedef void (*openssl_crypto_free_fn)(void *pointer, const char *file, int line);
+typedef int (*openssl_sign_fn)(void *ctx, unsigned char *sig, size_t *siglen, const unsigned char *tbs, size_t tbslen);
+typedef int (*openssl_verify_fn)(void *ctx, const unsigned char *sig, size_t siglen, const unsigned char *tbs, size_t tbslen);
+static openssl_q_keygen_fn openssl_q_keygen;
+static openssl_pkey_new_fn openssl_pkey_new;
+static openssl_copy_parameters_fn openssl_copy_parameters;
+static openssl_set1_encoded_fn openssl_set1_encoded;
+static openssl_get1_encoded_fn openssl_get1_encoded;
+static openssl_crypto_free_fn openssl_crypto_free;
+static openssl_pkey_ctx_fn openssl_sign_init, openssl_verify_init;
+static openssl_sign_fn openssl_sign;
+static openssl_verify_fn openssl_verify;
+
+/* openssl_load_p256: OpenSSL's EVP_PKEY functions for EC keys on P-256 (the X25519 set loaded
+ * first: the derive functions are shared). Returns 0, or -1 (the cases then run without this
+ * rival). */
+static int openssl_load_p256(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL || openssl_load_x25519() != 0)
+        return -1;
+    openssl_q_keygen = (openssl_q_keygen_fn)dlsym(crypto, "EVP_PKEY_Q_keygen");
+    openssl_pkey_new = (openssl_pkey_new_fn)dlsym(crypto, "EVP_PKEY_new");
+    openssl_copy_parameters = (openssl_copy_parameters_fn)dlsym(crypto, "EVP_PKEY_copy_parameters");
+    openssl_set1_encoded = (openssl_set1_encoded_fn)dlsym(crypto, "EVP_PKEY_set1_encoded_public_key");
+    openssl_get1_encoded = (openssl_get1_encoded_fn)dlsym(crypto, "EVP_PKEY_get1_encoded_public_key");
+    openssl_crypto_free = (openssl_crypto_free_fn)dlsym(crypto, "CRYPTO_free");
+    openssl_sign_init = (openssl_pkey_ctx_fn)dlsym(crypto, "EVP_PKEY_sign_init");
+    openssl_sign = (openssl_sign_fn)dlsym(crypto, "EVP_PKEY_sign");
+    openssl_verify_init = (openssl_pkey_ctx_fn)dlsym(crypto, "EVP_PKEY_verify_init");
+    openssl_verify = (openssl_verify_fn)dlsym(crypto, "EVP_PKEY_verify");
+    if (!openssl_q_keygen || !openssl_pkey_new || !openssl_copy_parameters || !openssl_set1_encoded || !openssl_get1_encoded ||
+        !openssl_crypto_free || !openssl_sign_init || !openssl_sign || !openssl_verify_init || !openssl_verify) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP_PKEY EC functions\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_p256_peer: an EVP_PKEY of the input's peer point, through the encoded form (the call a
+ * TLS stack makes for a key share), on the parameters of `like`. */
+static void *openssl_p256_peer(void *like, const uint8_t *point)
+{
+    void *peer = openssl_pkey_new();
+    if (peer != NULL && (openssl_copy_parameters(peer, like) != 1 || openssl_set1_encoded(peer, point, 65) != 1)) {
+        openssl_pkey_free(peer);
+        return NULL;
+    }
+    return peer;
+}
+
+/* openssl_p256_ecdh: OpenSSL's derive alone: a key made once, the peer's key and the context
+ * once, EVP_PKEY_derive `calls` times (the multiplication plus EVP's per-call cost; the peer's
+ * point checked once, where ours checks it every call). */
+static void openssl_p256_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-256");
+    void *peer = key ? openssl_p256_peer(key, c->data + 32) : NULL;
+    void *ctx = peer ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char out[32] = { 0 };
+    if (ctx != NULL && openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = 32;
+            openssl_derive(ctx, out, &length);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(key);
+    bench_sink = out[0];
+}
+
+/* openssl_p256_public_key: a key generated and its encoded public key taken, `calls` times (the
+ * fixed-base work OpenSSL does per handshake, with its random draw). */
+static void openssl_p256_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    (void)c;
+    unsigned char first = 0;
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-256");
+        unsigned char *encoded = NULL;
+        if (key != NULL && openssl_get1_encoded(key, &encoded) == 65)
+            first = encoded[1];
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = first;
+}
+
+/* openssl_p256_share: a key share as OpenSSL's TLS 1.3 code makes one per handshake: a key
+ * generated, its encoded public key, the peer's key from its encoding, a context, the derive. */
+static void openssl_p256_share(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[32] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-256");
+        unsigned char *encoded = NULL;
+        openssl_get1_encoded(key, &encoded);
+        void *peer = openssl_p256_peer(key, c->data + 32);
+        void *ctx = openssl_pkey_ctx_new(key, NULL);
+        size_t length = 32;
+        if (openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1)
+            openssl_derive(ctx, out, &length);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(peer);
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_p256_sign: EVP_PKEY_sign of the input's digest under a key made once, the context
+ * once (a random nonce from OpenSSL's generator each call, DER out). */
+static void openssl_p256_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-256");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[80] = { 0 };
+    if (ctx != NULL && openssl_sign_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            openssl_sign(ctx, signature, &length, c->data + 97, 32);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = signature[4];
+}
+
+/* openssl_p256_verify: EVP_PKEY_verify of a valid signature (made before the loop), the
+ * context made once. */
+static void openssl_p256_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-256");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[80] = { 0 };
+    size_t length = sizeof signature;
+    int sum = 0;
+    if (ctx != NULL && openssl_sign_init(ctx) == 1 && openssl_sign(ctx, signature, &length, c->data + 97, 32) == 1 &&
+        openssl_verify_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++)
+            sum += openssl_verify(ctx, signature, length, c->data + 97, 32);
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival p256_ecdh_rivals[] = { { openssl_name, openssl_p256_ecdh } };
+static bench_rival p256_public_key_rivals[] = { { openssl_name, openssl_p256_public_key } };
+static bench_rival p256_share_rivals[] = { { openssl_name, openssl_p256_share } };
+static bench_rival p256_sign_rivals[] = { { openssl_name, openssl_p256_sign } };
+static bench_rival p256_verify_rivals[] = { { openssl_name, openssl_p256_verify } };
+
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
                                        0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -1113,6 +1353,33 @@ void bench_suite_rivals(void)
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = x25519 ? (share ? x25519_share_rivals : x25519_rivals) : NULL;
         c.rival_count = x25519 ? 1 : 0;
+        bench_add(&c);
+    }
+    int p256 = openssl_load_p256() == 0;
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } p256_cases[] = {
+        { "p256_ecdh", "shared secret", bench_p256_ecdh, p256_ecdh_rivals },
+        { "p256_public_key", "public key", bench_p256_public_key, p256_public_key_rivals },
+        { "p256_key_share", "key drawn + public key + shared secret", bench_p256_share, p256_share_rivals },
+        { "p256_sign", "ECDSA signature (SHA-256 digest)", bench_p256_sign, p256_sign_rivals },
+        { "p256_verify", "ECDSA verification", bench_p256_verify, p256_verify_rivals },
+    };
+    for (size_t i = 0; i < sizeof p256_cases / sizeof p256_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = p256_cases[i].name;
+        c.input = p256_cases[i].input;
+        c.data = p256_input;
+        c.length = sizeof p256_input;
+        c.octets = 0;
+        c.ours = p256_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = p256 ? p256_cases[i].rivals : NULL;
+        c.rival_count = p256 ? 1 : 0;
         bench_add(&c);
     }
     int hmac384 = openssl_load_hmac384() == 0;

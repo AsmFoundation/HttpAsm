@@ -123,6 +123,24 @@ if [ ! -f "$tools/cavp/gcm/gcmDecrypt256.rsp" ] || [ "$tools/cavp/gcmtestvectors
   unzip -q -o "$tools/cavp/gcmtestvectors.zip" -d "$tools/cavp/gcm"
   touch "$tools/cavp/gcm/gcmDecrypt256.rsp"
 fi
+#   ecccdhtestvectors.zip: the KAS ECC CDH primitive (SP 800-56A's shared-secret computation)
+#   for every curve; P256Tests reads its [P-256] records (a key pair and a peer's point each).
+fetch cavp/ecccdhtestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/components/ecccdhtestvectors.zip \
+  5fff092551f2d72e89a3d9362711878708f9a14b502f0dfae819649105b0ea39
+if [ ! -f "$tools/cavp/ecccdh/KAS_ECC_CDH_PrimitiveTest.txt" ] || [ "$tools/cavp/ecccdhtestvectors.zip" -nt "$tools/cavp/ecccdh/KAS_ECC_CDH_PrimitiveTest.txt" ]; then
+  unzip -q -o "$tools/cavp/ecccdhtestvectors.zip" -d "$tools/cavp/ecccdh"
+  touch "$tools/cavp/ecccdh/KAS_ECC_CDH_PrimitiveTest.txt"
+fi
+#   186-4ecdsatestvectors.zip: FIPS 186-4's ECDSA files (KeyPair, PKV, SigGen with each k,
+#   SigVer), unpacked flat into cavp/ecdsa/; P256Tests reads every P-256 record.
+fetch cavp/186-4ecdsatestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-4ecdsatestvectors.zip \
+  fe47cc92b4cee418236125c9ffbcd9bb01c8c34e74a4ba195d954bcb72824752
+if [ ! -f "$tools/cavp/ecdsa/SigVer.rsp" ] || [ "$tools/cavp/186-4ecdsatestvectors.zip" -nt "$tools/cavp/ecdsa/SigVer.rsp" ]; then
+  unzip -q -o -j "$tools/cavp/186-4ecdsatestvectors.zip" -d "$tools/cavp/ecdsa"
+  touch "$tools/cavp/ecdsa/SigVer.rsp"
+fi
 #   Project Wycheproof (C2SP/wycheproof) at commit 65ca494 (2026-11-11), its testvectors_v1 files
 #   one by one into wycheproof/: edge cases the official vectors leave out (tags cut short or
 #   flipped, empty and long keys, HKDF's length limit), each test marked valid or invalid.
@@ -135,5 +153,8 @@ fetch wycheproof/hkdf_sha384_test.json "$wycheproof/hkdf_sha384_test.json" 69ff6
 fetch wycheproof/aes_gcm_test.json "$wycheproof/aes_gcm_test.json" 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
 fetch wycheproof/chacha20_poly1305_test.json "$wycheproof/chacha20_poly1305_test.json" fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
 fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
+fetch wycheproof/ecdh_secp256r1_ecpoint_test.json "$wycheproof/ecdh_secp256r1_ecpoint_test.json" 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
+fetch wycheproof/ecdsa_secp256r1_sha256_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha256_p1363_test.json" c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
+fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha512_p1363_test.json" 95c41daca2101540641cc13ccab128d67ad665eaf8349896434e1e6a0c5c68fc
 
 echo "$tools"

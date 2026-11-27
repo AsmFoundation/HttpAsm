@@ -68,7 +68,12 @@
     X(httpasm_aes_gcm_seal)         \
     X(httpasm_chacha20_poly1305_seal) \
     X(httpasm_x25519)               \
-    X(httpasm_x25519_public_key)
+    X(httpasm_x25519_public_key)    \
+    X(httpasm_random)               \
+    X(httpasm_p256_public_key)      \
+    X(httpasm_p256_ecdh)            \
+    X(httpasm_p256_sign)            \
+    X(httpasm_p256_verify)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -241,6 +246,28 @@ void bench_x25519(const bench_build *b, const bench_case *c, long calls);
 /* bench_x25519_share: a TLS 1.3 key share's X25519 work per handshake: the public key of the
  * case's scalar, then the shared secret with the peer's point (suite_rivals.c). */
 void bench_x25519_share(const bench_build *b, const bench_case *c, long calls);
+
+/* The P-256 cases' input (bench_p256_input, suite_rivals.c): a private key (32 octets), a
+ * peer's public key (65: RFC 6979 A.2.5's), a digest (32) and entropy (32). */
+const uint8_t *bench_p256_input(void);
+
+/* bench_p256_ecdh: httpasm_p256_ecdh of the input's key and peer point, `calls` times: the
+ * peer's point decoded and checked, the scalar multiplication, the affine x (suite_rivals.c). */
+void bench_p256_ecdh(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p256_public_key: httpasm_p256_public_key of the input's key (the fixed base). */
+void bench_p256_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p256_share: a TLS 1.3 secp256r1 key share's work per handshake: a private key drawn
+ * (httpasm_random, again when refused), its public key, the shared secret with the peer's. */
+void bench_p256_share(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p256_sign: httpasm_p256_sign of the input's digest with the input's entropy (a hedged
+ * RFC 6979 signature, as a TLS server makes one per handshake). */
+void bench_p256_sign(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p256_verify: httpasm_p256_verify of a valid signature (made before the loop). */
+void bench_p256_verify(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */
