@@ -236,6 +236,17 @@ HTTPASM_SHA256_DIGEST           equ 32      ; octets of a digest
 HTTPASM_SHA256_BLOCK            equ 64      ; octets of a block (HMAC's key padding)
 
 ; -----------------------------------------------------------------------------
+; httpasm_hmac_sha256_ctx: a running HMAC-SHA256 (FIPS 198-1), 224 octets: the inner hash,
+; already past the key's ipad block, then the outer one, past its opad block. The key itself is
+; not kept. Copying it after httpasm_hmac_sha256_init reuses the key without its two
+; compressions (HKDF-Expand does, once per output block).
+; -----------------------------------------------------------------------------
+struc httpasm_hmac_sha256_ctx
+    .inner:             resb httpasm_sha256_ctx_size    ; fed the message (update)
+    .outer:             resb httpasm_sha256_ctx_size    ; fed the inner digest (final)
+endstruc
+
+; -----------------------------------------------------------------------------
 ; httpasm_hpack_output: where httpasm_hpack_decode puts one header block's fields (48 octets).
 ; Strings from the static table point at the library's constant text; every other name and
 ; value is copied into space, so the fields stay valid however the dynamic table changes

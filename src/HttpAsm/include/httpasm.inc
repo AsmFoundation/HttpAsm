@@ -61,6 +61,12 @@ extern httpasm_sha256_init          ; void (httpasm_sha256_ctx *h)
 extern httpasm_sha256_update        ; void (httpasm_sha256_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_sha256_final         ; void (httpasm_sha256_ctx *h, uint8_t digest[32]): wipes h
 extern httpasm_sha256               ; void (const uint8_t *data, size_t n, uint8_t digest[32])
+extern httpasm_hmac_sha256_init     ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *key, size_t n)
+extern httpasm_hmac_sha256_update   ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *data, size_t n)
+extern httpasm_hmac_sha256_final    ; void (httpasm_hmac_sha256_ctx *h, uint8_t mac[32]): wipes h
+extern httpasm_hmac_sha256          ; void (key, key_length, data, n, mac[32])
+extern httpasm_hkdf_sha256_extract  ; void (salt, salt_length, ikm, ikm_length, prk[32])
+extern httpasm_hkdf_sha256_expand   ; int (prk, prk_length, info, info_length, okm, length): 0, -1 past 8160
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)

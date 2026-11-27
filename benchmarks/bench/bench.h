@@ -55,7 +55,9 @@
     X(httpasm_hpack_encode_bound)   \
     X(httpasm_hpack_encode)         \
     X(httpasm_h2_request)           \
-    X(httpasm_sha256)
+    X(httpasm_sha256)               \
+    X(httpasm_hmac_sha256)          \
+    X(httpasm_hkdf_sha256_expand)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -187,6 +189,15 @@ const uint8_t *bench_sha_input(void);
 /* bench_sha256: httpasm_sha256 of the case's message, `calls` times (suite_rivals.c). A batch for
  * any suite: the tiers suite times it at every tier, the rivals suite beside OpenSSL. */
 void bench_sha256(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_hmac_sha256: httpasm_hmac_sha256 of the case's message under a fixed 32-octet key (a TLS
+ * traffic secret's size), `calls` times (suite_rivals.c). */
+void bench_hmac_sha256(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_hkdf_expand: httpasm_hkdf_sha256_expand of the case's length (its data is the info),
+ * from a fixed 32-octet PRK, `calls` times: TLS 1.3's key schedule is made of such calls
+ * (suite_rivals.c). */
+void bench_hkdf_expand(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
  * nothing, built by the first build's encoder on the first call and shared by every suite

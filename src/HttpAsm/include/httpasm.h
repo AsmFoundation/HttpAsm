@@ -250,7 +250,7 @@ uint32_t httpasm_abi_version(void);
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
- * 10 httpasm_sha256_ctx; 0 for any other value. */
+ * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -328,6 +328,41 @@ void httpasm_sha256_final(httpasm_sha256_ctx *h, uint8_t digest[HTTPASM_SHA256_D
 
 /* The digest of n octets at once. */
 void httpasm_sha256(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA256_DIGEST]);
+
+/* ------------------------------------------------------------------------------------------
+ * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256. Every
+ * buffer that held key octets is wiped before a function returns, and finals wipe their context.
+ * ------------------------------------------------------------------------------------------ */
+
+/* A running HMAC-SHA256 (224 octets): the inner and outer hashes, each past its key block. The
+ * key is not kept. A copy of a freshly started context MACs another message under the same key
+ * without hashing the key again. */
+typedef struct httpasm_hmac_sha256_ctx {
+    httpasm_sha256_ctx inner;
+    httpasm_sha256_ctx outer;
+} httpasm_hmac_sha256_ctx;
+
+/* Starts an HMAC under key[0..n) (any length: a key longer than 64 octets is hashed first). */
+void httpasm_hmac_sha256_init(httpasm_hmac_sha256_ctx *h, const uint8_t *key, size_t n);
+
+/* Feeds n octets of the message. */
+void httpasm_hmac_sha256_update(httpasm_hmac_sha256_ctx *h, const uint8_t *data, size_t n);
+
+/* Writes the 32-octet MAC and wipes h. Compare MACs with a constant-time comparison. */
+void httpasm_hmac_sha256_final(httpasm_hmac_sha256_ctx *h, uint8_t mac[HTTPASM_SHA256_DIGEST]);
+
+/* The MAC of data[0..n) under the key, at once. */
+void httpasm_hmac_sha256(const uint8_t *key, size_t key_length, const uint8_t *data, size_t n,
+                         uint8_t mac[HTTPASM_SHA256_DIGEST]);
+
+/* HKDF-Extract: prk = HMAC-SHA256(salt, ikm). An empty salt is 32 zeros (RFC 5869 2.2). */
+void httpasm_hkdf_sha256_extract(const uint8_t *salt, size_t salt_length, const uint8_t *ikm,
+                                 size_t ikm_length, uint8_t prk[HTTPASM_SHA256_DIGEST]);
+
+/* HKDF-Expand: okm[0..length) from the pseudorandom key and info (RFC 5869 2.3). Returns 0, or
+ * -1 when length exceeds 255 * 32 = 8160 octets (nothing is written then). */
+int httpasm_hkdf_sha256_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
+                               size_t info_length, uint8_t *okm, size_t length);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)

@@ -96,5 +96,21 @@ if [ ! -f "$tools/cavp/shabytetestvectors/SHA256Monte.rsp" ] || [ "$tools/cavp/s
   unzip -q -o "$tools/cavp/shabytetestvectors.zip" -d "$tools/cavp"
   touch "$tools/cavp/shabytetestvectors/SHA256Monte.rsp"
 fi
+#   hmactestvectors.zip: HMAC.rsp, every hash's MACs with keys shorter and longer than a block
+#   and truncated tags; HmacTests reads its [L=32] (SHA-256) section.
+fetch cavp/hmactestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/hmactestvectors.zip \
+  418c3837d38f249d6668146bd0090db24dd3c02d2e6797e3de33860a387ae4bd
+if [ ! -f "$tools/cavp/hmac/HMAC.rsp" ] || [ "$tools/cavp/hmactestvectors.zip" -nt "$tools/cavp/hmac/HMAC.rsp" ]; then
+  unzip -q -o "$tools/cavp/hmactestvectors.zip" -d "$tools/cavp/hmac"
+  touch "$tools/cavp/hmac/HMAC.rsp"
+fi
+#   Project Wycheproof (C2SP/wycheproof) at commit 65ca494 (2026-11-11), its testvectors_v1 files
+#   one by one into wycheproof/: edge cases the official vectors leave out (tags cut short or
+#   flipped, empty and long keys, HKDF's length limit), each test marked valid or invalid.
+wycheproof=https://raw.githubusercontent.com/C2SP/wycheproof/65ca494727a52944c204441c860b039e6786b99b/testvectors_v1
+mkdir -p "$tools/wycheproof"
+fetch wycheproof/hmac_sha256_test.json "$wycheproof/hmac_sha256_test.json" 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
+fetch wycheproof/hkdf_sha256_test.json "$wycheproof/hkdf_sha256_test.json" bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
 
 echo "$tools"

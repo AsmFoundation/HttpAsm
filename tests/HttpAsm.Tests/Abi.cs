@@ -238,6 +238,20 @@ internal unsafe struct Sha256Context
     public uint Reserved;
 }
 
+/// <summary>
+/// httpasm_hmac_sha256_ctx (httpasm.h): a running HMAC-SHA256, 224 octets: the inner and outer
+/// hashes, each already past its key block.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct HmacSha256Context
+{
+    /// <summary>The inner hash, fed the message.</summary>
+    public Sha256Context Inner;
+
+    /// <summary>The outer hash, fed the inner digest at the end.</summary>
+    public Sha256Context Outer;
+}
+
 /// <summary>httpasm_client_response (httpasm.h): 96 octets.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct ClientResponse

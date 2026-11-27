@@ -335,6 +335,77 @@ static bench_rival sha256_rivals[] = {
     { openssl_name, openssl_sha256 },
 };
 
+/* The MAC cases' key: 32 octets, a TLS 1.3 traffic secret's size. */
+static const uint8_t mac_key[32] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
+                                     0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa };
+
+/* bench_hmac_sha256: httpasm_hmac_sha256 of the case's message under mac_key (bench.h). */
+void bench_hmac_sha256(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t mac[32];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_hmac_sha256(mac_key, sizeof mac_key, c->data, c->length, mac);
+        total += mac[0];
+    }
+    bench_sink = total;
+}
+
+/* bench_hkdf_expand: httpasm_hkdf_sha256_expand of c->octets octets, info = the case's data
+ * (bench.h). */
+void bench_hkdf_expand(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t okm[64];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        total += (size_t)b->api.httpasm_hkdf_sha256_expand(mac_key, sizeof mac_key, c->data, c->length, okm, c->octets);
+        total += okm[0];
+    }
+    bench_sink = total;
+}
+
+/* OpenSSL's one-shot HMAC() with EVP_sha256(), found by openssl_load_hmac. */
+typedef const void *(*openssl_md_fn)(void);
+typedef unsigned char *(*openssl_hmac_fn)(const void *md, const void *key, int key_length, const unsigned char *data, size_t n,
+                                          unsigned char *mac, unsigned int *mac_length);
+static openssl_hmac_fn openssl_hmac_call;
+static const void *openssl_sha256_md;
+
+/* openssl_load_hmac: HMAC and EVP_sha256 from the libcrypto openssl_load found. Returns 0, or -1
+ * (the HMAC case then runs without this rival). */
+static int openssl_load_hmac(void)
+{
+    if (openssl_load() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    openssl_hmac_call = crypto ? (openssl_hmac_fn)dlsym(crypto, "HMAC") : NULL;
+    openssl_md_fn md = crypto ? (openssl_md_fn)dlsym(crypto, "EVP_sha256") : NULL;
+    if (openssl_hmac_call == NULL || md == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks HMAC or EVP_sha256\n");
+        return -1;
+    }
+    openssl_sha256_md = md();
+    return 0;
+}
+
+/* openssl_hmac_sha256: OpenSSL's HMAC-SHA256 of the case's message under mac_key, `calls` times. */
+static void openssl_hmac_sha256(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char mac[32];
+    unsigned int length = 0;
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_hmac_call(openssl_sha256_md, mac_key, (int)sizeof mac_key, c->data, c->length, mac, &length);
+        total += mac[0];
+    }
+    bench_sink = total;
+}
+
+static bench_rival hmac_rivals[] = {
+    { openssl_name, openssl_hmac_sha256 },
+};
+
 /* The hash cases' message lengths and their labels. */
 static const size_t sha_lengths[] = { 64, 1024, 16384 };
 static const char *const sha_labels[] = { "64 octets", "1 KiB", "16 KiB" };
@@ -494,6 +565,10 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
         add("sha256", sha_labels[i], sha, sha_lengths[i], bench_sha256, openssl ? sha256_rivals : NULL,
             openssl ? sizeof sha256_rivals / sizeof sha256_rivals[0] : 0);
+    int hmac = openssl_load_hmac() == 0;
+    for (size_t i = 0; i < 2; i++)          /* 64 octets and 1 KiB: a record's MAC-sized inputs */
+        add("hmac_sha256", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha256, hmac ? hmac_rivals : NULL,
+            hmac ? sizeof hmac_rivals / sizeof hmac_rivals[0] : 0);
     const uint8_t *hpack_block;
     size_t hpack_length;
     if (bench_hpack_block(&hpack_block, &hpack_length) != 0 || nghttp2_hd_inflate_new(&theirs) != 0) {

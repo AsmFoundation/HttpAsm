@@ -830,6 +830,17 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      0.22x of them. Next for CPUs without the SHA extensions (Intel's client cores before 2021):
      a v3 version with BMI2's `rorx` and an AVX2 message schedule, measured against v1 with the
      SHA bit capped off.
+   - **HMAC-SHA256 and HKDF-SHA256** (2026-11-27), `crypto/hmac.asm`, over SHA-256's public
+     functions (so SHA-384's versions will be the same code): the HMAC context holds both
+     hashes already past their key blocks, the key itself is not kept, and a copy of a fresh
+     context MACs under the same key without hashing it again, which HKDF-Expand does once per
+     output block. K0, the pad blocks, the inner digest and HKDF's T(i) are wiped before each
+     function returns. Proven by RFC 4231's seven examples, NIST's CAVP HMAC file (every
+     SHA-256 record, truncated tags included), Wycheproof's 174 HMAC and 86 HKDF tests (the
+     8,160-octet limit refused without a write), and .NET's HMACSHA256 and HKDF on random
+     keys, messages and lengths, at every tier. Against OpenSSL 3.0.13's `HMAC()`: 6.0x faster
+     on 64 octets (253 against 1,524 ns), 2.31x on 1 KiB; HKDF-Expand of one 32-octet key from
+     a 32-octet secret takes 230 ns (four SHA-256 compressions), 3.83x v1's.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

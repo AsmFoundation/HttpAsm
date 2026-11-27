@@ -279,13 +279,16 @@ ha_sha256_blocks:
 .end:
 
 ; -----------------------------------------------------------------------------
-; sha256_copy: a few octets (a running hash's partial block) by moves sized to the count, no
-; rep movsb (whose start-up costs more than such a copy: write.asm wr_put measured it).
+; ha_copy_short: a few octets (a running hash's partial block, an HMAC key) by moves sized to
+; the count, no rep movsb (whose start-up costs more than such a copy: write.asm wr_put measured
+; it). Shared by the crypto code (hidden).
 ;   In: rdi = destination, rsi = source, rcx = count (0-64). The two may not overlap.
 ;   Keeps every register but rax, rdx, xmm0 and the flags.
+;   Memory: reads rsi[0..rcx), writes rdi[0..rcx), nothing past either.
 ; -----------------------------------------------------------------------------
+global ha_copy_short:function hidden (ha_copy_short.end - ha_copy_short)
 align 16
-sha256_copy:
+ha_copy_short:
     cmp     rcx, 16
     jae     .sixteen
     cmp     rcx, 8
@@ -328,6 +331,7 @@ sha256_copy:
     movdqu  xmm0, [rsi + rcx - 16]
     movdqu  [rdi + rcx - 16], xmm0
     ret
+.end:
 
 ; -----------------------------------------------------------------------------
 ; void httpasm_sha256_init(httpasm_sha256_ctx *h)
@@ -372,7 +376,7 @@ httpasm_sha256_update:
     jb      .keep                           ; still not a block
     lea     rdi, [rbx + httpasm_sha256_ctx.buffer + rax]
     mov     rsi, r12
-    call    sha256_copy                     ; keeps rcx
+    call    ha_copy_short                   ; keeps rcx
     add     r12, rcx
     sub     r13, rcx
     lea     rdi, [rbx + httpasm_sha256_ctx.state]
@@ -397,7 +401,7 @@ httpasm_sha256_update:
     lea     rdi, [rbx + httpasm_sha256_ctx.buffer + rax]
     mov     rsi, r12
     mov     rcx, r13
-    call    sha256_copy
+    call    ha_copy_short
     add     [rbx + httpasm_sha256_ctx.buffered], r13d
     pop     r13
     pop     r12
@@ -434,7 +438,7 @@ httpasm_sha256_final:
     lea     rdi, [rsp + FIN_PAD]
     lea     rsi, [rbx + httpasm_sha256_ctx.buffer]
     mov     ecx, [rbx + httpasm_sha256_ctx.buffered]
-    call    sha256_copy                     ; keeps rcx
+    call    ha_copy_short                   ; keeps rcx
     mov     byte [rsp + FIN_PAD + rcx], 0x80
     ; One block when the length fits after the 0x80 (55 octets buffered at most), else two.
     mov     edx, 1

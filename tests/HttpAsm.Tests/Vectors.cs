@@ -36,12 +36,15 @@ internal static class Vectors
 
     /// <summary>
     /// The records of a CAVP response file: each a group of "Name = value" lines separated by a
-    /// blank line, its comments (#) and bracketed parameter lines ([L = 32]) left out.
+    /// blank line, comments (#) left out. A bracketed line ("[L = 32]", "[L=32]") sets a section
+    /// parameter that every following record carries as a field of its own ("L" = "32"), until
+    /// the next section sets it again: HMAC.rsp keeps each hash's MACs in an [L=...] section.
     /// </summary>
     /// <param name="path">The .rsp file.</param>
     /// <returns>Each record's fields by name, in file order.</returns>
     public static IEnumerable<Dictionary<string, string>> CavpRecords(string path)
     {
+        var section = new Dictionary<string, string>(StringComparer.Ordinal);
         var record = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (string raw in File.ReadLines(path))
         {
@@ -50,6 +53,11 @@ internal static class Vectors
             {
                 if (record.Count > 0)
                 {
+                    foreach (KeyValuePair<string, string> parameter in section)
+                    {
+                        record.TryAdd(parameter.Key, parameter.Value);
+                    }
+
                     yield return record;
                     record = new Dictionary<string, string>(StringComparer.Ordinal);
                 }
@@ -57,21 +65,49 @@ internal static class Vectors
                 continue;
             }
 
-            if (line.StartsWith('#') || line.StartsWith('['))
+            if (line.StartsWith('#'))
             {
                 continue;
             }
 
-            int equals = line.IndexOf('=');
+            bool bracketed = line.StartsWith('[') && line.EndsWith(']');
+            string body = bracketed ? line[1..^1] : line;
+            int equals = body.IndexOf('=');
             if (equals > 0)
             {
-                record[line[..equals].Trim()] = line[(equals + 1)..].Trim();
+                (bracketed ? section : record)[body[..equals].Trim()] = body[(equals + 1)..].Trim();
             }
         }
 
         if (record.Count > 0)
         {
+            foreach (KeyValuePair<string, string> parameter in section)
+            {
+                record.TryAdd(parameter.Key, parameter.Value);
+            }
+
             yield return record;
         }
+    }
+
+    /// <summary>
+    /// The tests of a Project Wycheproof file (testvectors_v1/*.json): every test of every group,
+    /// each with its group's fields (keySize, tagSize, ...) under "group".
+    /// </summary>
+    /// <param name="path">The JSON file.</param>
+    /// <returns>(group, test) pairs in file order.</returns>
+    public static IEnumerable<(System.Text.Json.JsonElement Group, System.Text.Json.JsonElement Test)> WycheproofTests(string path)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(path));
+        var pairs = new List<(System.Text.Json.JsonElement, System.Text.Json.JsonElement)>();
+        foreach (System.Text.Json.JsonElement group in document.RootElement.GetProperty("testGroups").EnumerateArray())
+        {
+            foreach (System.Text.Json.JsonElement test in group.GetProperty("tests").EnumerateArray())
+            {
+                pairs.Add((group.Clone(), test.Clone()));
+            }
+        }
+
+        return pairs;
     }
 }

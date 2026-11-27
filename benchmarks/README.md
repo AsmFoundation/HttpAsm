@@ -191,6 +191,21 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: HMAC-SHA256 and HKDF-SHA256.** `rivals/hmac_sha256/*` (31 rounds; the host carried
+22% other load, the A/A control within 2%) beside OpenSSL 3.0.13's one-shot `HMAC()` with
+`EVP_sha256()`, under a 32-octet key; `tiers/hkdf_sha256_expand/*`, a 32-octet output key from a
+32-octet secret with a 20-octet info, as TLS 1.3's key schedule asks:
+
+| Case | HttpAsm best | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| HMAC-SHA256, 64 octets | 253 ns | 1,086 ns | 1,524 ns | 6.0x OpenSSL |
+| HMAC-SHA256, 1 KiB | 942 ns | 4,196 ns | 2,177 ns | 2.31x OpenSSL |
+| HKDF-Expand, 32 octets | 230 ns | 886 ns | | 3.83x v1 |
+
+Each is a few SHA-256 compressions (five for the 64-octet MAC, four for the HKDF output) at about
+46 ns each with the SHA extensions; OpenSSL's one-shot HMAC also fetches its digest and builds a
+context on every call.
+
 **2026-11-27: M2's first primitive, SHA-256.** `httpasm_sha256` (one shot) on fixed
 pseudo-random octets, beside OpenSSL 3.0.13's `SHA256` (the machine's libcrypto.so.3, loaded at
 run time; it picks its SHA-extensions code as any application gets it), 41 rounds:

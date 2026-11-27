@@ -91,6 +91,25 @@ static void add_sha256(void)
     }
 }
 
+/* add_hkdf_expand: the tiers case of httpasm_hkdf_sha256_expand as TLS 1.3's key schedule calls
+ * it: 32 octets (one HMAC block) from a 32-octet PRK, with a 20-octet info (an HkdfLabel's size
+ * for "tls13 key" and an empty context). Its time is two key compressions and two message ones,
+ * all SHA-256's, at each tier. */
+static void add_hkdf_expand(void)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "hkdf_sha256_expand";
+    c.input = "32 octets, 20-octet info";
+    c.data = bench_sha_input();
+    c.length = 20;
+    c.octets = 32;
+    c.ours = bench_hkdf_expand;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* add_hpack_decode: the tiers case of httpasm_hpack_decode on the rivals suite's block (bench.h):
  * the Huffman decoder's versions (v1's automaton, v2's table decoder) each against the tier below.
  * Left out, with a word on stderr, when the block cannot be made. */
@@ -124,6 +143,7 @@ void bench_suite_tiers(void)
     add_h1_response();
     add_hpack_decode();
     add_sha256();
+    add_hkdf_expand();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {
