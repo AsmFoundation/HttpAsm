@@ -64,6 +64,9 @@ public sealed unsafe class ExchangeTests
         c.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n");
 
         Assert.Equal("late", c.ReadResponse().Text);
+        // The answer can reach the client before the responder thread queues Respond's result
+        // (and the second answer's comes later still): wait for all four, then compare.
+        Assert.True(SpinWait.SpinUntil(() => results.Count == 4, TimeSpan.FromSeconds(10)), $"{results.Count} results");
         Assert.Equal([("defer", 0), ("defer again", Einval), ("answer", 0), ("answer again", Einval)], results.ToArray());
         Assert.True(c.QuietFor(200));                       // one answer only
     }
@@ -204,6 +207,9 @@ public sealed unsafe class ExchangeTests
         Assert.Equal("created", Encoding.UTF8.GetString(response.Body));
         Assert.Equal("1", response.Fields.Single(f => f.Name == "x-one").Value);
         Assert.Equal("second value", response.Fields.Single(f => f.Name == "x-two").Value);
+        // The 201 can reach the client before the responder thread queues its Respond's 0 (CI's
+        // coverage run met it once in six suites): wait for all five results, then compare.
+        Assert.True(SpinWait.SpinUntil(() => results.Count == 5, TimeSpan.FromSeconds(10)), $"{results.Count} results");
         Assert.Equal([-(int)ParseError.Status, -(int)ParseError.Status, -(int)ParseError.FramingField, -(int)ParseError.FramingField, 0], results.ToArray());
     }
 
