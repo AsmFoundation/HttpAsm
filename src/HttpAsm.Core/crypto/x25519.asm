@@ -11,8 +11,12 @@
 ; The ladder is RFC 7748 5's, step for step: the scalar clamped (low three bits and bit 255
 ; cleared, bit 254 set), u's bit 255 masked and non-canonical u accepted as they are (the
 ; arithmetic is modulo p), 255 steps from bit 254 down, each a conditional swap by mask (swap =
-; k_t XOR the previous bit) and the differential addition and doubling, then x2 / z2 with
-; z2^(p - 2) by ref10's addition chain (254 squarings, 11 multiplications), fully reduced.
+; k_t XOR the previous bit) and the differential addition and doubling, then x2 / z2, fully
+; reduced. z2 is inverted by ha_modinv256 (crypto/inverse.asm: safegcd, constant time) on z2
+; fully reduced: 2.11 us where RFC 7748's z2^(p - 2) by ref10's addition chain (254 squarings,
+; each waiting for the last, and 11 multiplications: this file's until Ed25519 brought the
+; routine here) takes 3.76 us at v3 and 4.03 us at v1. A z2 of 0 (a small-order point's) comes
+; back 0, as z2^(p - 2) did, so the result is still all zeros then.
 ; Constant time: the bits steer masks only; the one address that moves, the scalar's qword,
 ; follows the public bit number.
 ;
@@ -24,29 +28,15 @@ default rel
 %include "httpasm_core.inc"
 %include "crypto/fe25519.inc"
 
+extern ha_modinv256                         ; crypto/inverse.asm: x^-1 mod M (safegcd)
+
 section .rodata
 align 32
 x25519_base: db 9                           ; the base point's u-coordinate, little-endian
              times 31 db 0
+FE25519_INVERSE_RECORD                      ; fe25519_mod_p, for ha_modinv256
 
 section .text
-
-; X25519_SQR_N F, out, a, n: out = a^(2^n) in the field F (frame offsets out and a), n >= 1: the
-; inversion's runs of squarings, counted in the frame (the field macros take every register).
-; A run of two is written out: as a loop it would go round once, and its jump back would never
-; be taken (a branch edge the coverage gate rightly calls dead).
-%macro X25519_SQR_N 4
-    %1_SQR      rbp + %2, rbp + %3
-  %if %4 == 2
-    %1_SQR      rbp + %2, rbp + %2
-  %elif %4 > 2
-    mov         dword [rbp + XF_CNT], %4 - 1
-%%again:
-    %1_SQR      rbp + %2, rbp + %2
-    dec         dword [rbp + XF_CNT]
-    jnz         %%again
-  %endif
-%endmacro
 
 ; -----------------------------------------------------------------------------
 ; X25519_ROUTINE name, F, S: int name(uint8_t out[32], const uint8_t scalar[32],
@@ -76,8 +66,7 @@ section .text
   %xdefine XF_OUT (XF_K + 32)               ; where the result goes
   %xdefine XF_BIT (XF_OUT + 8)              ; the ladder's bit number, 254 down to 0
   %xdefine XF_SWAP (XF_BIT + 8)             ; the previous bit as a mask
-  %xdefine XF_CNT (XF_SWAP + 8)             ; X25519_SQR_N's counter
-  %xdefine FE51_T19 (XF_CNT + 8)            ; FE51's scratch: 40 octets
+  %xdefine FE51_T19 (XF_SWAP + 8)           ; FE51's scratch: 40 octets
   %xdefine XF_END (FE51_T19 + 40)
   %xdefine XF_FRAME (((XF_END + 15) & -16) + 8)    ; six pushes + this: rsp 16-aligned
 
@@ -167,29 +156,16 @@ align 16
     mov         r8, [rbp + XF_SWAP]
     %2_CSWAP    r8, rbp + XF_X2, rbp + XF_X3
     %2_CSWAP    r8, rbp + XF_Z2, rbp + XF_Z3
-    ; z2^(p - 2) = z2^(2^255 - 21) (Fermat), ref10's addition chain.
-    %2_SQR      rbp + XF_A, rbp + XF_Z2                     ; z^2
-    X25519_SQR_N %2, XF_B, XF_A, 2                          ; z^8
-    %2_MUL      rbp + XF_B, rbp + XF_Z2, rbp + XF_B         ; z^9
-    %2_MUL      rbp + XF_A, rbp + XF_A, rbp + XF_B          ; z^11
-    %2_SQR      rbp + XF_C, rbp + XF_A                      ; z^22
-    %2_MUL      rbp + XF_B, rbp + XF_B, rbp + XF_C          ; z^(2^5 - 1)
-    X25519_SQR_N %2, XF_C, XF_B, 5
-    %2_MUL      rbp + XF_B, rbp + XF_C, rbp + XF_B          ; z^(2^10 - 1)
-    X25519_SQR_N %2, XF_C, XF_B, 10
-    %2_MUL      rbp + XF_C, rbp + XF_C, rbp + XF_B          ; z^(2^20 - 1)
-    X25519_SQR_N %2, XF_D, XF_C, 20
-    %2_MUL      rbp + XF_C, rbp + XF_D, rbp + XF_C          ; z^(2^40 - 1)
-    X25519_SQR_N %2, XF_C, XF_C, 10
-    %2_MUL      rbp + XF_B, rbp + XF_C, rbp + XF_B          ; z^(2^50 - 1)
-    X25519_SQR_N %2, XF_C, XF_B, 50
-    %2_MUL      rbp + XF_C, rbp + XF_C, rbp + XF_B          ; z^(2^100 - 1)
-    X25519_SQR_N %2, XF_D, XF_C, 100
-    %2_MUL      rbp + XF_C, rbp + XF_D, rbp + XF_C          ; z^(2^200 - 1)
-    X25519_SQR_N %2, XF_C, XF_C, 50
-    %2_MUL      rbp + XF_C, rbp + XF_C, rbp + XF_B          ; z^(2^250 - 1)
-    X25519_SQR_N %2, XF_C, XF_C, 5
-    %2_MUL      rbp + XF_C, rbp + XF_C, rbp + XF_A          ; z^(2^255 - 21)
+    ; z2^-1: z2 fully reduced (ha_modinv256 takes values below p, and a z2 of 0 in any form must
+    ; come back 0) into XF_A as four qwords, inverted in place, loaded back as XF_C.
+    %2_PACK     rbp + XF_Z2
+    FE_CANON
+    FE64_STORE  rbp + XF_A
+    lea         rdi, [rbp + XF_A]
+    lea         rsi, [rel fe25519_mod_p]
+    call        ha_modinv256                ; (keeps rbp; wipes its own frame)
+    lea         rdx, [rbp + XF_A]
+    %2_LOAD_U   rbp + XF_C
     %2_MUL      rbp + XF_T, rbp + XF_X2, rbp + XF_C         ; x2 / z2
     %2_PACK     rbp + XF_T
     FE_CANON

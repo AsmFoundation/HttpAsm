@@ -386,6 +386,13 @@ adjacent), 97.5k at v3 and 111k at v1. The field's parts alone (scratchpad xx/mi
 product 48 cycles chained and 26 four at a time, a square 40 and 22, an addition 13; v1's
 product 46 and 40.
 
+Then (with Ed25519, 2026-11-27) z2's inversion by safegcd (`crypto/inverse.asm`) instead of
+Fermat's chain: `bench.sh ab 9ba6d8d --filter '*/x25519*'`, 41 rounds, three processes: the
+tiers suite's shared secret 1.055x, 1.057x, 1.057x at v1 and 1.048x, 1.047x, 1.051x at v3
+(proven at every tier: 37.8 and 32.3 us), a key share 1.052x, 1.065x, 1.056x (proven: 64.5 us,
+OpenSSL 87.5). The rivals suite's shared secret gave 1.044x, 1.057x, 1.059x, not proven: its
+first process ran disturbed (its median 17% over its fastest, the interval 0.95-1.10).
+
 **2026-11-27: ChaCha20-Poly1305.** `httpasm_chacha20_poly1305_seal` in the TLS 1.3 shape (a
 new nonce and a 5-octet AAD per record; the key is raw octets) beside OpenSSL 3.0.13's EVP
 driven the same way (the key set once, per record the nonce, the AAD, the text, the final, the

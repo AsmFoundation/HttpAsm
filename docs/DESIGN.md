@@ -983,7 +983,8 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      the result is all zeros, a small-order point that TLS 1.3 must refuse, RFC 9846 7.4.2)
      and `httpasm_x25519_public_key` (the scalar times u = 9). One Montgomery ladder, RFC 7748
      5's step for step (scalar clamped, u's bit 255 masked and non-canonical u taken modulo p,
-     swaps by mask, x2 / z2 by Fermat with ref10's addition chain), expanded over two fields:
+     swaps by mask, x2 / z2 by Fermat with ref10's addition chain, until Ed25519 brought
+     `ha_modinv256`, below), expanded over two fields:
      v3 (BMI2 and ADX) four 64-bit limbs kept below 2^256 (modulo 2^256 - 38 = 2p), sixteen
      mulx a product in two carry chains (adcx on CF, adox on OF; OpenSSL's fe64 arrangement),
      ten for a square; v1 five 51-bit limbs with mul, the 19-folded products summed per limb
@@ -1001,9 +1002,13 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      `tests/native/tiers` (every tier equal to v1, inputs against the guard page). Measured
      (benchmarks/bench.sh, 9 rounds): 33.8 us a shared secret at v3, 1.20x v1, 1.18x OpenSSL
      3.0.13's EVP derive alone (40.2 us); a TLS 1.3 key share (the public key and the shared
-     secret) 68.3 us, 1.28x OpenSSL's per-handshake EVP sequence (87.3 us). Next lever: the
-     public key from a precomputed table of base-point multiples (edwards25519's fixed-base
-     method, with Ed25519).
+     secret) 68.3 us, 1.28x OpenSSL's per-handshake EVP sequence (87.3 us). Then z2 inverted by
+     safegcd (`ha_modinv256`, `crypto/inverse.asm`, on z2 fully reduced so a small-order point's
+     0 still comes back 0) in place of the chain: 2.11 us against 3.76 at v3 and 4.03 at v1;
+     `bench.sh ab` against 9ba6d8d, three processes: a shared secret 1.047-1.051x at v3 and
+     1.055-1.057x at v1 (the tiers suite, proven at every tier), a key share 1.052-1.065x
+     (proven); 32.3 us a shared secret at v3, 37.8 at v1. Next lever: the public key from a
+     precomputed table of base-point multiples (edwards25519's fixed-base method, Ed25519's).
    - **Randomness** (2026-11-27), `src/HttpAsm/random.asm` (the OS-side library: the core makes
      no system call): `httpasm_random(buffer, length)`, getrandom(2) with no flags (the urandom
      source: it blocks only until the kernel's pool is first initialized, at boot). Short reads
