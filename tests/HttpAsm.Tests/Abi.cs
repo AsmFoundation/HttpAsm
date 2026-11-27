@@ -686,4 +686,16 @@ public enum ParseError
 
     /// <summary>HPACK: a limit too large, or memory too small.</summary>
     HpackLimit = 33,
+
+    /// <summary>HTTP/2: a pseudo-field unknown, repeated, a response's, after a regular field, or in trailers.</summary>
+    H2Pseudo = 34,
+
+    /// <summary>HTTP/2: :method, :scheme or :path (CONNECT: :authority) missing or empty.</summary>
+    H2Missing = 35,
+
+    /// <summary>HTTP/2: a connection-specific field, or TE other than "trailers".</summary>
+    H2ConnectionField = 36,
+
+    /// <summary>HTTP/2: :authority empty or not uri-host [ ":" port ], a CONNECT's without a port of 1-65535, or a Host naming another authority.</summary>
+    H2Authority = 37,
 }

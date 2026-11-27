@@ -1054,6 +1054,280 @@ static int response_variety(long randoms)
     return 0;
 }
 
+/* ---- httpasm_h2_request, httpasm_h2_trailers: HTTP/2's request rules (h2_request.asm) --------
+ * Two checks have versions: h2_name (an HTTP/2 field name: tchars but A-Z; octet by octet at v1,
+ * 16 octets a step from v2 by ha_span_v2 with ha_ltchar_lo) and the :path (octet by octet at v1,
+ * runs of target octets between percent-encodings from v2, ha_span_v2 with ha_target_lo). Every
+ * tier must give v1's answer: the return, the request record, and each record as the rules leave
+ * it (its id, its trailer flag). One string of each list, a name or the :path, ends against the
+ * guard page, so a version that reads past a string dies with SIGSEGV. */
+
+#define H2_FIELDS 40
+
+/* h2_result: everything one check hands back. The request's pointers point into the strings
+ * and into h2_records, which every tier's check reuses, so equal results have equal pointers. */
+typedef struct h2_result {
+    int ret;
+    httpasm_request request;
+    httpasm_field fields[H2_FIELDS];
+} h2_result;
+
+/* The records a check is handed: a fresh copy of the list per tier (the rules write ids and
+ * flags into them). */
+static httpasm_field h2_records[H2_FIELDS];
+
+/* How many lists v1 accepted: printed with the total, so a generator that drifts into refusing
+ * everything (which would compare little) shows. */
+static long h2_accepted;
+
+/* h2_check: one header list at every tier, as a request's (trailers 0) or as a trailer
+ * section's (trailers 1).
+ *   list, count  the records (count <= H2_FIELDS), their strings placed by the caller.
+ * Returns 0 when every tier agrees with v1; 1, after reporting, otherwise. Leaves the last tier
+ * set. */
+static int h2_check(const httpasm_field *list, uint32_t count, int trailers)
+{
+    static h2_result expected, actual;
+    for (size_t t = 0; t < TIERS; t++) {
+        uint64_t features = httpasm_cpu_limit(caps[t]);
+        h2_result *r = t == 0 ? &expected : &actual;
+        memset(r, 0, sizeof *r);
+        memcpy(h2_records, list, count * sizeof list[0]);
+        r->ret = trailers ? httpasm_h2_trailers(h2_records, count) : httpasm_h2_request(h2_records, count, &r->request);
+        memcpy(r->fields, h2_records, count * sizeof list[0]);
+        if (t == 0) {
+            h2_accepted += r->ret == 0;
+            continue;
+        }
+        if (actual.ret != expected.ret || memcmp(&actual.request, &expected.request, sizeof actual.request) != 0
+            || memcmp(actual.fields, expected.fields, count * sizeof actual.fields[0]) != 0) {
+            fprintf(stderr, "httpasm_h2_%s at %s (features %#llx) differs from v1: returned %d (error %u), v1 %d (error %u); %u records:\n",
+                    trailers ? "trailers" : "request", cap_names[t], (unsigned long long)features, actual.ret, actual.request.error,
+                    expected.ret, expected.request.error, count);
+            for (uint32_t i = 0; i < count; i++) {
+                dump("  name", list[i].name, list[i].name_length);
+                dump("  value", list[i].value, list[i].value_length);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* h2_name_octet: a random octet an HTTP/2 field name may hold (a tchar but A-Z): mostly lower-case
+ * letters, then "-", digits, and every other punctuation tchar now and then. */
+static uint8_t h2_name_octet(void)
+{
+    static const char octets[] = "abcdefghijklmnopqrstuvwxyz-0123456789!#$%&'*+.^_`|~";
+    unsigned r = (unsigned)(rng() % 100);
+    if (r < 85)
+        return (uint8_t)octets[rng() % 26];
+    if (r < 95)
+        return (uint8_t)octets[26 + rng() % 11];
+    return (uint8_t)octets[rng() % (sizeof octets - 1)];
+}
+
+/* h2_flaw: an octet an HTTP/2 field name may not hold, of every kind the checks tell apart: an
+ * upper-case letter (A, Z and between), a non-tchar in the visible range, SP, a CTL, DEL,
+ * obs-text. */
+static uint8_t h2_flaw(void)
+{
+    static const uint8_t flaws[] = { 'A', 'Z', 'M', '@', ':', '"', '(', ')', ',', '/', ';', '<', '=', '>', '?', '[', '\\', ']', '{', '}',
+                                     ' ', 0x00, 0x09, 0x1F, 0x7F, 0x80, 0xC1, 0xFF };
+    return flaws[rng() % sizeof flaws];
+}
+
+/* h2_path_text: writes a :path of n octets (n >= 1) to p: "/" then target octets, a
+ * percent-encoding now and then (valid, with a non-HEXDIG, or cut by the value's end), and, when
+ * flawed is nonzero, one octet a target may not hold at a random place past the "/". */
+static void h2_path_text(uint8_t *p, size_t n, int flawed)
+{
+    static const char hex[] = "0123456789abcdefABCDEF";
+    p[0] = '/';
+    for (size_t i = 1; i < n; i++) {
+        if (rng() % 12 == 0) {
+            p[i] = '%';
+            if (i + 1 < n)
+                p[i + 1] = rng() % 100 ? (uint8_t)hex[rng() % 22] : (uint8_t)'g';
+            if (i + 2 < n)
+                p[i + 2] = rng() % 100 ? (uint8_t)hex[rng() % 22] : (uint8_t)':';
+            i += 2;
+        } else {
+            p[i] = target_octet();
+        }
+    }
+    if (flawed && n > 1) {
+        static const uint8_t bad[] = { ' ', '"', '<', '>', '\\', '^', '`', '{', '|', '}', '#', 0x00, 0x09, 0x7F, 0x80, 0xFF };
+        p[1 + rng() % (n - 1)] = bad[rng() % sizeof bad];
+    }
+}
+
+/* h2_put: a record for name and value (pointers to strings the caller keeps). */
+static httpasm_field h2_put(const uint8_t *name, size_t name_length, const uint8_t *value, size_t value_length)
+{
+    httpasm_field f;
+    memset(&f, 0, sizeof f);
+    f.name = name;
+    f.name_length = (uint32_t)name_length;
+    f.value = value;
+    f.value_length = (uint32_t)value_length;
+    return f;
+}
+
+/* h2_tiers: HTTP/2 header lists at every tier. First, every name length 1-70 with no flaw or a
+ * flaw at each place, and every :path length 1-70 with a percent-encoding (or a flaw) at each
+ * place, each string ending against the guard page; then `randoms` requests (and trailer
+ * sections) of up to 30 regular fields: names of 1-70 octets, some known (their rules run),
+ * some flawed, an empty one now and then, a :path of up to 300 octets or "*", pseudo-fields
+ * sometimes missing, repeated or after a regular field, and the guard page behind a name or the
+ * :path. Returns 0 when every list agreed at every tier, 1 at the first that did not. */
+static int h2_tiers(long randoms)
+{
+    static uint8_t arena[16384];
+    static httpasm_field list[H2_FIELDS];
+    static const char *const known[][2] = {
+        { "accept", "text/html" }, { "user-agent", "Mozilla/5.0 (X11; Linux x86_64)" }, { "content-length", "12" },
+        { "te", "trailers" }, { "host", "example.com" }, { "cookie", "a=b" }, { "expect", "100-continue" },
+        { "content-type", "text/plain" }, { "accept-encoding", "gzip, br" },
+    };
+    long checked = 0;
+    const uint8_t *m = (const uint8_t *)"GET", *s = (const uint8_t *)"https", *a = (const uint8_t *)"example.com";
+    /* Every name length, the name against the guard page, clean or with one flaw at each place. */
+    for (size_t n = 1; n <= 70; n++) {
+        for (size_t flaw = 0; flaw <= n; flaw++) {
+            uint8_t *name = page_end - n;
+            for (size_t i = 0; i < n; i++)
+                name[i] = h2_name_octet();
+            if (flaw > 0)
+                name[flaw - 1] = h2_flaw();
+            uint32_t c = 0;
+            list[c++] = h2_put((const uint8_t *)":method", 7, m, 3);
+            list[c++] = h2_put((const uint8_t *)":scheme", 7, s, 5);
+            list[c++] = h2_put((const uint8_t *)":authority", 10, a, 11);
+            list[c++] = h2_put((const uint8_t *)":path", 5, (const uint8_t *)"/", 1);
+            list[c++] = h2_put(name, n, (const uint8_t *)"v", 1);
+            if (h2_check(list, c, 0) || h2_check(list + 4, 1, 1))
+                return 1;
+            checked += 2;
+        }
+    }
+    /* Every :path length, against the guard page, with a percent-encoding or a flaw at each place. */
+    for (size_t n = 1; n <= 70; n++) {
+        for (size_t at = 0; at <= n; at++) {
+            uint8_t *path = page_end - n;
+            path[0] = '/';
+            for (size_t i = 1; i < n; i++)
+                path[i] = target_octet();
+            if (at > 0 && at < n) {
+                if (rng() % 3 == 0) {
+                    path[at] = h2_flaw();               /* an octet a target may not hold, or a letter */
+                } else {
+                    path[at] = '%';                     /* its HEXDIG inside the value, or cut by its end */
+                    if (at + 1 < n)
+                        path[at + 1] = rng() % 8 ? (uint8_t)"0123456789abcdefABCDEF"[rng() % 22] : (uint8_t)'z';
+                    if (at + 2 < n)
+                        path[at + 2] = rng() % 8 ? (uint8_t)"0123456789abcdefABCDEF"[rng() % 22] : (uint8_t)'%';
+                }
+            }
+            uint32_t c = 0;
+            list[c++] = h2_put((const uint8_t *)":method", 7, m, 3);
+            list[c++] = h2_put((const uint8_t *)":scheme", 7, s, 5);
+            list[c++] = h2_put((const uint8_t *)":authority", 10, a, 11);
+            list[c++] = h2_put((const uint8_t *)":path", 5, path, n);
+            if (h2_check(list, c, 0))
+                return 1;
+            checked++;
+        }
+    }
+    /* Varied requests and trailer sections. */
+    for (long k = 0; k < randoms; k++) {
+        size_t used = 0;
+        uint32_t c = 0;
+        static const char *const methods[] = { "GET", "GET", "POST", "OPTIONS", "CONNECT", "HEAD", "get" };
+        const char *method = methods[rng() % (sizeof methods / sizeof methods[0])];
+        size_t path_length = rng() % 10 == 0 ? 1 : 1 + (size_t)(rng() % (rng() % 4 == 0 ? 300 : 70));
+        uint8_t *path = arena + used;
+        if (rng() % 20 == 0) {
+            path[0] = '*';
+            path_length = 1;
+        } else {
+            h2_path_text(path, path_length, rng() % 15 == 0);
+        }
+        used += path_length;
+        int pseudo_late = rng() % 30 == 0;              /* a pseudo-field after a regular one */
+        if (rng() % 40 != 0)
+            list[c++] = h2_put((const uint8_t *)":method", 7, (const uint8_t *)method, strlen(method));
+        if (rng() % 40 != 0 && strcmp(method, "CONNECT") != 0)
+            list[c++] = h2_put((const uint8_t *)":scheme", 7, s, 5);
+        if (rng() % 8 != 0)
+            list[c++] = h2_put((const uint8_t *)":authority", 10, a, 11);
+        if ((rng() % 40 != 0 && strcmp(method, "CONNECT") != 0) || rng() % 4 == 0)
+            list[c++] = h2_put((const uint8_t *)":path", 5, path, path_length);
+        if (rng() % 50 == 0 && c > 0) {                 /* a repeated pseudo-field */
+            list[c] = list[c - 1];
+            c++;
+        }
+        size_t regular = (size_t)(rng() % 31);
+        for (size_t i = 0; i < regular && c < H2_FIELDS - 1 && used < sizeof arena - 600; i++) {
+            if (rng() % 4 == 0) {
+                const char *const *pair = known[rng() % (sizeof known / sizeof known[0])];
+                list[c++] = h2_put((const uint8_t *)pair[0], strlen(pair[0]), (const uint8_t *)pair[1], strlen(pair[1]));
+                continue;
+            }
+            if (rng() % 150 == 0) {                     /* connection-specific: refused in HTTP/2 */
+                list[c++] = h2_put((const uint8_t *)"connection", 10, (const uint8_t *)"close", 5);
+                continue;
+            }
+            size_t n = rng() % 200 == 0 ? 0 : 1 + (size_t)(rng() % (rng() % 4 == 0 ? 70 : 24));
+            uint8_t *name = arena + used;
+            for (size_t j = 0; j < n; j++)
+                name[j] = h2_name_octet();
+            if (n > 0 && rng() % 50 == 0)               /* rare per field, so most lists reach their end */
+                name[rng() % n] = h2_flaw();
+            used += n;
+            size_t v = (size_t)(rng() % 80);
+            uint8_t *value = arena + used;
+            field_value_valid(value, v);
+            if (v > 0 && (value[0] == ' ' || value[0] == '\t'))
+                value[0] = 'x';                         /* HTTP/2 refuses whitespace at a value's ends */
+            if (v > 0 && (value[v - 1] == ' ' || value[v - 1] == '\t'))
+                value[v - 1] = 'y';
+            used += v;
+            list[c++] = h2_put(name, n, value, v);
+        }
+        if (pseudo_late && c > 1)
+            list[c++] = h2_put((const uint8_t *)":path", 5, path, path_length);
+        /* The guard page behind one string: the :path, or one regular name. */
+        if (c > 0) {
+            uint32_t victim = (uint32_t)(rng() % c);
+            int use_value = list[victim].name_length > 0 && list[victim].name[0] == ':';
+            size_t length = use_value ? list[victim].value_length : list[victim].name_length;
+            const uint8_t *from = use_value ? list[victim].value : list[victim].name;
+            if (length > 0 && length <= 512) {
+                uint8_t *moved = page_end - length;
+                memmove(moved, from, length);
+                if (use_value)
+                    list[victim].value = moved;
+                else
+                    list[victim].name = moved;
+            }
+        }
+        if (h2_check(list, c, 0))
+            return 1;
+        checked++;
+        if (k % 4 == 0) {                               /* the regular fields as a trailer section */
+            uint32_t first = 0;
+            while (first < c && list[first].name_length > 0 && list[first].name[0] == ':')
+                first++;
+            if (h2_check(list + first, c - first, 1))
+                return 1;
+            checked++;
+        }
+    }
+    printf("httpasm_h2_request, httpasm_h2_trailers: %ld header lists (%ld accepted), every tier agrees with v1\n", checked, h2_accepted);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1302,6 +1576,8 @@ int main(int argc, char **argv)
         failed = parse_variety(randoms / 20);
     if (!failed)
         failed = response_variety(randoms / 20);
+    if (!failed)
+        failed = h2_tiers(randoms / 4);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

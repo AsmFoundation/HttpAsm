@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: phase H step 4, HTTP/2's request rules.** SDE's profile of `httpasm_h2_request` on
+the browser request's 18 fields put 30% of its 5,133 instructions in `h2_name`, which checked
+each field name octet by octet, and 512 in the `:path`'s octet loop. From v2 both run through
+`ha_span_v2` (`ha_token_length`'s 16-octet body, now a routine taking its class's nibble table):
+names with `ha_ltchar_lo` (a tchar but A-Z), the `:path` by runs of target octets between
+percent-encodings. The pseudo-field names are compared by two loads instead of `repe cmpsb`.
+
+| Case | Instructions, before -> after | A/B against 3555a3e (3 processes) |
+|---|---:|---:|
+| h2_request, 18 fields, best tier | 5,133 -> 3,706 | 1.133-1.159x faster |
+| h2_request, 18 fields, v1 | 5,650 -> 5,692 | 0.966-0.973x (slower, proven) |
+
+v1's code is v1's but for a tier test per name and the new pseudo-field compare. Its first
+measurement was 0.90-0.92x: both of its loops had moved, and starting each on a 32-octet window
+(the padding jumped over, never run) brought it to 0.97x; the rest is the tier test. What is left
+at the best tier: the per-field loop and the pseudo-field rules (1,221), the value checks
+(1,186, SSE2 already: `HA_FIELD_VALUE_SCAN`), the spans (520), the field lookups (477).
+
 **2026-11-27: phase H step 4, the one-pass response head.** The client's parser kept the classic
 flow: the head's end searched line by line (`ha_h1_head_end`), then the status-line, then every
 field line read again. From v2 up a head searched from its start is now read once, as requests

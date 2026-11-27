@@ -46,14 +46,24 @@ RQ_REGULAR      equ 0x10
 
 ; -----------------------------------------------------------------------------
 ; h2_name: whether rdi[0..rsi) is a lower-case token (RFC9113-8.2.1-3.1, RFC 9110 5.1).
-;   Out: ZF set when it is. Clobbers rax, rcx, rdx and the flags.
+;   In: rdi, rsi (kept). Out: ZF set when it is. Clobbers rax, rcx, rdx, xmm0-xmm6 and the flags.
+;   Two versions, the same answer for every name (HA_CPU_PICK1 after the empty check):
+;     v1  one class-table lookup per octet: HA_CC_TCHAR set and HA_CC_UPPER clear;
+;     v2  ha_span_v2 with ha_ltchar_lo (tables.asm: computed from HA_IS_LTCHAR, the same
+;         predicate, and proven for all 256 octets), 16 octets a step: the name is valid when
+;         the span is the whole name. A browser request's 18 names cost 1,548 instructions at v1.
+;   Memory: v1 reads the name only; v2 as ha_span_v2 (within the name, or 16 octets inside the
+;   page of its first octet), so a name anywhere in the caller's memory is safe.
 ; -----------------------------------------------------------------------------
 align 16
 h2_name:
     test    rsi, rsi
     jz      .bad
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .v2
     lea     rdx, [rel ha_char_class]
     xor     ecx, ecx
+    jmp     .octet                          ; over the padding: the loop starts a 32-octet window
+align 32
 .octet:
     movzx   eax, byte [rdi + rcx]
     movzx   eax, byte [rdx + rax]
@@ -67,6 +77,11 @@ h2_name:
     ret
 .bad:
     or      eax, 1                          ; ZF clear
+    ret
+.v2:
+    movdqa  xmm3, [rel ha_ltchar_lo]
+    call    ha_span_v2                      ; rax = the leading octets a name may hold
+    cmp     rax, rsi                        ; ZF set exactly when that is all of it
     ret
 
 ; -----------------------------------------------------------------------------
@@ -101,17 +116,34 @@ h2_value:
 
 ; -----------------------------------------------------------------------------
 ; name_is: whether the name of the record at r12 is the cl-octet string at rdx (exactly).
-;   Out: ZF set when it is. Clobbers rcx, rsi, rdi and the flags.
+;   In: r12, rdx, cl = 4-16 (the pseudo-field names: 5, 7 and 10 octets). Out: ZF set when it
+;   is. Clobbers rax, rcx, rsi and the flags.
+;   Two overlapping loads per side cover any length from 4 to 16: the first and the last 4
+;   octets up to 8, the first and the last 8 beyond (each octet compared at least once). It
+;   replaced repe cmpsb, microcode whose start-up cost was most of each compare; every load
+;   stays inside the name and the string, whose lengths are equal by then.
 ; -----------------------------------------------------------------------------
 align 16
 name_is:
     movzx   ecx, cl
     cmp     ecx, [r12 + httpasm_field.name_length]
     jne     .out                            ; ZF clear
-    mov     rsi, rdx
-    mov     rdi, [r12 + httpasm_field.name]
-    repe    cmpsb                           ; the lengths are equal and not 0
+    mov     rsi, [r12 + httpasm_field.name]
+    cmp     ecx, 8
+    ja      .long
+    mov     eax, [rsi]
+    cmp     eax, [rdx]
+    jne     .out
+    mov     eax, [rsi + rcx - 4]
+    cmp     eax, [rdx + rcx - 4]
 .out:
+    ret
+.long:
+    mov     rax, [rsi]
+    cmp     rax, [rdx]
+    jne     .out
+    mov     rax, [rsi + rcx - 8]
+    cmp     rax, [rdx + rcx - 8]
     ret
 
 ; -----------------------------------------------------------------------------
@@ -410,10 +442,15 @@ httpasm_h2_request:
     mov     byte [rbx + httpasm_request.target_form], HTTPASM_TARGET_ASTERISK
     jmp     .authority_check
 .origin:
-    ; The octets of an HTTP/1.1 request-target, percent-encodings complete.
+    ; The octets of an HTTP/1.1 request-target, percent-encodings complete. Two versions, the
+    ; same answer for every :path (HA_CPU_PICK1): v1 octet by octet below; v2 by runs
+    ; (.origin_v2).
+    HA_CPU_PICK1 HTTPASM_CPU_V2, .origin_v2
     lea     r8, [rel ha_char_class]
     lea     r9, [rel ha_hex_value]
     xor     edx, edx
+    jmp     .path_octet                     ; over the padding: the loop starts a 32-octet window
+align 32
 .path_octet:
     movzx   eax, byte [rdi + rdx]
     test    byte [r8 + rax], HA_CC_TARGET
@@ -434,8 +471,39 @@ httpasm_h2_request:
     inc     edx
     cmp     edx, esi
     jb      .path_octet
+.origin_done:
     mov     byte [rbx + httpasm_request.target_form], HTTPASM_TARGET_ORIGIN
     jmp     .authority_check
+
+.origin_v2:
+    ; v2: runs of target octets but "%" (ha_span_v2 with ha_target_lo, 16 octets a step), each
+    ; run's stop a "%" whose two HEXDIG lie inside the value, or a refusal; then the next run
+    ; from past the HEXDIG. v1's answer exactly: it takes every HA_CC_TARGET octet (the run
+    ; class and "%": tables.asm computes both from HA_IS_TARGET) and checks each "%" the same
+    ; way. rdi and rsi walk the value (the request keeps its own copy of both); r9 and xmm3
+    ; survive ha_span_v2. A :path of 63 octets cost 512 instructions octet by octet.
+    lea     r9, [rel ha_hex_value]
+    movdqa  xmm3, [rel ha_target_lo]
+.path_run:                                  ; rdi: the run's first octet; rsi: octets left (> 0)
+    call    ha_span_v2
+    cmp     rax, rsi
+    je      .origin_done                    ; target octets to the end
+    cmp     byte [rdi + rax], '%'
+    jne     .bad_target                     ; an octet a target may not hold
+    lea     rcx, [rax + 2]
+    cmp     rcx, rsi
+    jae     .bad_target                     ; two HEXDIG must follow, inside the value
+    movzx   ecx, byte [rdi + rax + 1]
+    cmp     byte [r9 + rcx], 0xFF
+    je      .bad_target
+    movzx   ecx, byte [rdi + rax + 2]
+    cmp     byte [r9 + rcx], 0xFF
+    je      .bad_target
+    lea     rdi, [rdi + rax + 3]            ; past the percent-encoding
+    sub     rsi, rax
+    sub     rsi, 3
+    jnz     .path_run
+    jmp     .origin_done                    ; it ended the value
 
 .connect:
     ; CONNECT names only the authority to connect to (RFC 9113 8.5).

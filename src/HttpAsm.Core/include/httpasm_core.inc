@@ -58,6 +58,8 @@ extern ha_tchar_hi          ; 16 bytes: tchar by high nibble; an octet is a tcha
                             ; it pairs with ha_target_lo as well
 extern ha_target_lo         ; 16 bytes: request-target octets but "%", by low nibble (pairs with
                             ; ha_tchar_hi): what a vector target scan passes over
+extern ha_ltchar_lo         ; 16 bytes: tchars but A-Z (an HTTP/2 field name's octets), by low
+                            ; nibble (pairs with ha_tchar_hi)
 %endif
 
 ; -----------------------------------------------------------------------------
@@ -68,6 +70,9 @@ extern ha_method_lookup     ; eax = HTTPASM_METHOD_* of method rdi[0..rsi), 0 if
 extern ha_find_lf           ; rax = offset of the first LF in rdi[0..rsi), rsi if none
 extern ha_token_length      ; rax = the leading tchars of rdi[0..rsi) (rsi when all are); keeps
                             ; rdi, rsi; clobbers rcx, rdx, xmm0-xmm6 (semantics/fields.asm)
+extern ha_span_v2           ; v2 and up: rax = the leading octets of rdi[0..rsi) in the class of
+                            ; the low-nibble table in xmm3 (paired with ha_tchar_hi); keeps rdi,
+                            ; rsi, xmm3; clobbers rcx, rdx, the other xmm0-xmm6 (fields.asm)
 extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
                             ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 

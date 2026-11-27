@@ -29,6 +29,12 @@ default rel
 ; every target octet but "%", whose two HEXDIG the scan must check (RFC 3986 2.1).
 %define HA_IS_TARGET_RUN(c) (HA_IS_TARGET(c) && (c) != 0x25)
 
+; HA_IS_LTCHAR(c): a tchar other than A-Z, what an HTTP/2 field name is made of (a token,
+; RFC9113-8.2.1-3.1 refusing 0x41-0x5A in it). h2_name's scalar version tests the same pair of
+; class bits (HA_CC_TCHAR set, HA_CC_UPPER clear); the nibble table ha_ltchar_lo is computed
+; from this definition, so the two versions cannot disagree.
+%define HA_IS_LTCHAR(c) (HA_IS_TCHAR(c) && ((c) < 0x41 || (c) > 0x5A))
+
 section .rodata
 
 ; -----------------------------------------------------------------------------
@@ -236,6 +242,57 @@ ha_target_lo:
     %endrep
     %if ((lo_bits & hi_bit) != 0) != (HA_IS_TARGET_RUN(c) != 0)
         %error the target nibble table disagrees with HA_IS_TARGET_RUN at octet c
+    %endif
+    %assign c c + 1
+%endrep
+
+; -----------------------------------------------------------------------------
+; ha_ltchar_lo: HA_IS_LTCHAR as a pshufb table by low nibble, paired with ha_tchar_hi (every
+; such octet is a tchar, so it lies in rows 0x20-0x7F): an octet may stand in an HTTP/2 field
+; name exactly when its two entries share a bit. Rows 4 and 5 lose their letters here, which a
+; row bit per row allows (A-O and P-Z are columns of their own rows). Checked for all 256 octets
+; below; a wrong table does not assemble.
+; -----------------------------------------------------------------------------
+align 16                            ; movdqa loads it
+global ha_ltchar_lo:data hidden (ha_ltchar_lo.end - ha_ltchar_lo)
+ha_ltchar_lo:
+%assign l 0
+%rep 16
+    %assign bits 0
+    %assign h 2
+    %rep 6
+        %if HA_IS_LTCHAR(h * 16 + l)
+            %assign bits bits | (1 << (h - 2))
+        %endif
+        %assign h h + 1
+    %endrep
+    db      bits
+    %assign l l + 1
+%endrep
+.end:
+
+; The proof, as for tchar: the tables agree with HA_IS_LTCHAR octet for octet. h2_name's scalar
+; version tests the class table's HA_CC_TCHAR without HA_CC_UPPER, bits set above from
+; HA_IS_TCHAR and from the A-Z range: HA_IS_LTCHAR's two terms, so both versions test the same
+; predicate.
+%assign c 0
+%rep 256
+    %assign h c >> 4
+    %assign l c & 15
+    %assign hi_bit 0
+    %if h >= 2 && h <= 7
+        %assign hi_bit 1 << (h - 2)
+    %endif
+    %assign lo_bits 0
+    %assign r 2
+    %rep 6
+        %if HA_IS_LTCHAR(r * 16 + l)
+            %assign lo_bits lo_bits | (1 << (r - 2))
+        %endif
+        %assign r r + 1
+    %endrep
+    %if ((lo_bits & hi_bit) != 0) != (HA_IS_LTCHAR(c) != 0)
+        %error the lower-case tchar nibble table disagrees with HA_IS_LTCHAR at octet c
     %endif
     %assign c c + 1
 %endrep

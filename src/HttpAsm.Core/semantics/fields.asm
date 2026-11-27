@@ -29,14 +29,12 @@ httpasm_token_length:
 ; (httpasm_token_length's contract; the core's writers and lookups call it to check a whole
 ; name, where a token inside a value keeps HA_TOKEN_SCAN inline).
 ;   In: rdi = p, rsi = n; both kept. Out: rax. Clobbers rcx, rdx, xmm0-xmm6 and the flags.
-;   Memory: v1 reads p[0..result] at most. v2 reads 16 octets a step inside p[0..n) (the last
-;   step overlaps the one before); a token shorter than 16 octets is read as 16 octets within
-;   the 4 KiB page of its first octet (from p, or ending at p + n when p is within 16 octets of
-;   its page's end), which can never fault; lanes outside p[0..n) are ignored.
+;   Memory: v1 reads p[0..result] at most. v2 is ha_span_v2's (below): 16 octets a step inside
+;   p[0..n), a token shorter than 16 octets read within its first octet's page.
 ;
 ;   Two versions, the same index for every input (HA_CPU_PICK1 at the entry):
 ;     v1  HA_TOKEN_SCAN, one class-table lookup per octet (5 instructions an octet);
-;     v2  HA_NIBBLE_CLASSIFY with ha_tchar_lo/_hi, 16 octets a step.
+;     v2  ha_span_v2 with ha_tchar_lo, 16 octets a step.
 ; -----------------------------------------------------------------------------
 global ha_token_length:function hidden (ha_token_length.end - ha_token_length)
 align 16
@@ -45,10 +43,30 @@ ha_token_length:
     HA_TOKEN_SCAN rdi, rsi, rax, rcx, rdx
     ret
 .v2:
+    movdqa  xmm3, [rel ha_tchar_lo]
+    jmp     ha_span_v2
+.end:
+
+; -----------------------------------------------------------------------------
+; ha_span_v2: the number of leading octets of rdi[0..rsi) in a nibble-table class, rsi when all
+; are: the class whose low-nibble table the caller put in xmm3 (ha_tchar_lo: tchar, for
+; ha_token_length; ha_ltchar_lo: a tchar but A-Z, an HTTP/2 field name; ha_target_lo: a
+; request-target octet but "%", a run of an HTTP/2 :path), each paired with ha_tchar_hi. One
+; routine for every such scan, so they share one proven body: HA_NIBBLE_CLASSIFY, 16 octets a
+; step. v2 and up only (pshufb): a caller picks it with HA_CPU_PICK1 and keeps its own v1.
+;   In: rdi = p, rsi = n, xmm3 = the low-nibble table; all three kept. Out: rax.
+;   Clobbers rcx, rdx, xmm0-xmm2, xmm4-xmm6 and the flags. Calls nothing, uses no stack.
+;   Memory: reads 16 octets a step inside p[0..n) (the last step overlaps the one before); a
+;   span shorter than 16 octets is read as 16 octets within the 4 KiB page of its first octet
+;   (from p, or ending at p + n when p is within 16 octets of its page's end), which can never
+;   fault; lanes outside p[0..n) are ignored.
+; -----------------------------------------------------------------------------
+global ha_span_v2:function hidden (ha_span_v2.end - ha_span_v2)
+align 16
+ha_span_v2:
     xor     eax, eax
     test    rsi, rsi
     jz      .out                            ; nothing to read
-    movdqa  xmm3, [rel ha_tchar_lo]
     movdqa  xmm4, [rel ha_tchar_hi]
     movdqa  xmm5, [rel ha_x16_0f]
     pxor    xmm2, xmm2
@@ -64,9 +82,9 @@ ha_token_length:
     cmp     rdx, rsi
     jbe     .step
     cmp     rax, rsi
-    je      .out                            ; n was a multiple of 16: every octet a tchar
+    je      .out                            ; n was a multiple of 16: every octet in the class
     ; 1-15 octets left: the last 16 of p[0..n), overlapping the step before, whose octets are
-    ; known tchars; its lanes below rax are shifted out of the mask.
+    ; known to be in the class; its lanes below rax are shifted out of the mask.
     mov     rdx, rsi
     sub     rdx, 16                         ; where it starts
     movdqu  xmm0, [rdi + rdx]
@@ -75,7 +93,7 @@ ha_token_length:
     HA_NIBBLE_CLASSIFY xmm0, xmm1, xmm6, xmm3, xmm4, xmm5, xmm2, edx
     shr     edx, cl                         ; lane 0 is octet rax now
     test    edx, edx
-    jz      .all                            ; the rest are tchars too
+    jz      .all                            ; the rest are in the class too
     bsf     edx, edx
     add     rax, rdx
     ret
