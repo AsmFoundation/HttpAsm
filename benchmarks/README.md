@@ -197,19 +197,20 @@ is the verification's key) at 2048, 3072 and 4096 bits, beside OpenSSL 3.0.13's 
 (the key from EVP_PKEY_fromdata with n, e, d and the five CRT numbers, the key and the context
 made once; OpenSSL blinds and checks each result under e, ours checks without blinding). PSS
 draws a 32-octet salt each call (ours with `httpasm_random`, OpenSSL from its DRBG): a TLS 1.3
-server's CertificateVerify. 5 rounds; the ratio is the paired estimate:
+server's CertificateVerify. The 2048-bit rows 41 rounds, the others 5; the ratio is the
+paired estimate:
 
 | Case | v3 (mulx, adcx/adox, AVX2) | v1 (mul, SSE2) | OpenSSL 3.0.13 | |
 |---|---:|---:|---:|---|
-| PKCS#1 v1.5, 2048 | 618 us | 1.44 ms | 701 us | 1.13x OpenSSL [1.10-1.16] |
+| PKCS#1 v1.5, 2048 | 611 us | 1.40 ms | 693 us | 1.13x OpenSSL [1.12-1.15] |
 | PKCS#1 v1.5, 3072 | 2.10 ms | 4.48 ms | 2.11 ms | parity [0.98-1.02] |
 | PKCS#1 v1.5, 4096 | 4.77 ms | 10.89 ms | 4.85 ms | parity [0.94-1.00] |
-| PSS, 2048 | 613 us | 1.41 ms | 697 us | 1.12x OpenSSL [1.11-1.14] |
+| PSS, 2048 | 613 us | 1.40 ms | 701 us | 1.14x OpenSSL [1.13-1.15] |
 | PSS, 3072 | 2.17 ms | 4.53 ms | 2.17 ms | parity [0.97-1.08] |
 | PSS, 4096 | 4.84 ms | 11.10 ms | 4.92 ms | parity [0.97-1.01] |
-| key init, 2048 / 3072 / 4096 | 0.60 / 2.01 / 4.55 ms | 1.36 / 4.34 / 10.42 ms | | |
+| key init, 2048 / 3072 / 4096 | 0.59 / 2.01 / 4.55 ms | 1.34 / 4.34 / 10.42 ms | | |
 
-The tiers suite: v3 2.30x v1 at 2048 bits [2.29-2.39]. The first version (the verification's
+The tiers suite: v3 2.31x v1 at 2048 bits [2.29-2.34]. The first version (the verification's
 generic square and product in the exponentiation) signed in 743 us at 2048 bits, 0.92x
 OpenSSL's 686, and its v3 was 1.91x v1. Where the time goes at 2048 bits: two 1024-bit
 exponentiations (k = 16), each 1,051 squares, 201 products and 171 reads of the 64-entry table;
@@ -225,9 +226,15 @@ cycles at k = 16 from a chain of dependent imuls):
   is set, one pass masked by mulx instead of a subtraction, a borrow and a select: 587 -> 573
   and 716 -> 709;
 - the table read sixteen limbs a pass (four ymm) instead of eight: 340 -> 300 cycles at k = 16,
-  and a few percent at 3072 and 4096 bits, which read through the same routine.
+  and a few percent at 3072 and 4096 bits, which read through the same routine (743 -> 618 us
+  at 2048 bits for these three, f1f6ce5);
+- 5-bit windows up to k = 16 (a 32-entry table: half the table's operations and half each
+  gather, a fifth more products): about 2%, by `bench.sh ab f1f6ce5` at 41 rounds in three
+  processes (PSS 1.017x, 1.020x, 1.022x: proven; PKCS#1 1.014x to 1.023x, two of three); by the
+  measured operations it would break even at k = 24 and lose at k = 32, which keep 6 bits.
 Tried and not kept: the product in CIOS order with both rows straight (731 cycles against 709);
-two table entries a step (no faster). OpenSSL 3.0.13 at these sizes runs x86_64-mont5's
+two table entries a step (no faster); a window's squares in one call as OpenSSL's power5 does
+(575 cycles a square against 568: the calls' pushes and pops overlap the work around them). OpenSSL 3.0.13 at these sizes runs x86_64-mont5's
 bn_power5 (five squares and a product in one call, mulx with adcx/adox, 5-bit windows); at 3072
 and 4096 bits both sides sit at the same multiply-accumulate floor, where the generic routines'
 overhead is a small part of products of 24 and 32 limbs, hence parity there.

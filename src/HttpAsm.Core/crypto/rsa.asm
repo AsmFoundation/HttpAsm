@@ -1426,7 +1426,8 @@ PK_SIZE     equ httpasm_rsa_private_key_size
 
 ; The signing frame: the verification's (RV_*: rsa_public_op, the hashes and the encodings work on
 ; it as they are), then the CRT's own buffers.
-RS_TABLE    equ RV_FRAME                    ; x^0 .. x^63, Montgomery forms (64 entries of k limbs)
+RS_TABLE    equ RV_FRAME                    ; x^0 .. x^(2^w - 1), Montgomery forms (32 or 64
+                                            ; entries of k limbs: room for 64 of 64 limbs)
 RS_M        equ RS_TABLE + 32768            ; m, 128 limbs (zero above its own)
 RS_X        equ RS_M + 1024                 ; the base x R mod the prime (k limbs)
 RS_ACC      equ RS_X + 512                  ; the running power
@@ -1448,7 +1449,9 @@ RS_K        equ RS_RRR + 8                  ; the primes' limbs
 RS_COUNT    equ RS_K + 8                    ; rsa_prime_rr's squares left
 RS_PSQR     equ RS_COUNT + 8                ; the power's square (its address: rsa_pick_power)
 RS_PMUL     equ RS_PSQR + 8                 ; the power's product
-RS_FRAME    equ (RS_PMUL + 8 + 63) & ~63
+RS_WIN      equ RS_PMUL + 8                 ; the power's window width in bits (rsa_pick_power)
+RS_ENTRIES  equ RS_WIN + 8                  ; its table's entries, 2^RS_WIN
+RS_FRAME    equ (RS_ENTRIES + 8 + 63) & ~63
 RS_BELOW    equ 4096                        ; the callees' stack under the frame that the wipe
                                             ; covers: the deepest, a square of 128 limbs (the
                                             ; fault check's), takes about 2.2 KiB
@@ -1592,7 +1595,9 @@ rsa_mod_sub:
 ;   flags the borrow chain needs) instead of the subtraction, the borrow and the select of the
 ;   full reduction (587 -> 573 a square, 716 -> 709 a product).
 ; Measured and not kept: the product in CIOS order (each round's product row, then its reduction
-; row, both straight: 731 cycles against 709 for the whole product first, then the reduction).
+; row, both straight: 731 cycles against 709 for the whole product first, then the reduction);
+; a window's squares in one call, OpenSSL's power5 way (575 cycles a square against 568: the
+; calls' pushes and pops overlap the work around them).
 ; So their results are fit for each other and for the reduction alone (ha_bn_redc_v3 takes any t
 ; below R to a value below n: (t + M n) / R <= n, the last subtraction removing n itself), which
 ; is how rsa_crt leaves the power; NOT for Garner's steps, which need values below p (those keep
@@ -1893,17 +1898,19 @@ ha_bn_mul_plain_v1:
 
 ; =============================================================================
 ; The table read. void ha_rsa_gather_vN(uint64_t *out, const uint64_t *table, uint32_t index,
-; size_t k): out = entry index of 64 (entry j at table + 8kj; k a multiple of 8), in constant
+; size_t k, size_t entries): out = entry index of the table's entries (32 or 64: rsa_power's
+; window; entry j at table + 8kj; k a multiple of 8), in constant
 ; time: every entry is read and ANDed with a mask that is all ones only for the index (a compare
 ; of a running counter with it), the masked entries ORed; no address depends on the index. v3:
-; sixteen limbs a pass over the 64 entries in four ymm (vpcmpeqq; one pass at k = 16: 300 cycles
+; sixteen limbs a pass over the entries in four ymm (vpcmpeqq; one pass of 64 at k = 16: 300 cycles
 ; against 340 for two passes of eight, scratchpad rsa/k16; two entries a step: no faster), then a
 ; pass of eight in two ymm when k leaves eight; v1: eight limbs a pass in four xmm (SSE2's pcmpeqd
 ; on the index in every dword).
-; Clobbers rax, rcx, rdx, rsi, rdi, r8-r10, the vector registers used.
+; Clobbers rax, rcx, rdx, rsi, rdi, r8-r11, the vector registers used.
 ; =============================================================================
 align 16
 ha_rsa_gather_v3:
+    mov         r11, r8                     ; the entries, each pass's count
     vmovd       xmm15, edx
     vpbroadcastq ymm15, xmm15               ; the index in every lane
     vpcmpeqd    ymm12, ymm12, ymm12         ; -1 in every lane: the counter's step (subtracted)
@@ -1917,7 +1924,7 @@ ha_rsa_gather_v3:
     vpxor       xmm3, xmm3, xmm3
     vpxor       xmm13, xmm13, xmm13         ; the counter j = 0
     mov         r9, rsi                     ; this pass's sixteen limbs of entry 0
-    mov         r10d, 64
+    mov         r10, r11
 .entry16:
     vpcmpeqq    ymm4, ymm13, ymm15          ; all ones where j = index
     vpand       ymm5, ymm4, [r9]
@@ -1947,7 +1954,7 @@ ha_rsa_gather_v3:
     vpxor       ymm1, ymm1, ymm1
     vpxor       ymm13, ymm13, ymm13         ; the counter j = 0
     mov         r9, rsi                     ; their limbs of entry 0
-    mov         r10d, 64
+    mov         r10, r11
 .entry:
     vpcmpeqq    ymm2, ymm13, ymm15          ; all ones where j = index
     vpand       ymm3, ymm2, [r9]
@@ -1966,6 +1973,7 @@ ha_rsa_gather_v3:
 
 align 16
 ha_rsa_gather_v1:
+    mov         r11, r8                     ; the entries, each pass's count
     movd        xmm15, edx
     pshufd      xmm15, xmm15, 0             ; the index in every dword
     pcmpeqd     xmm12, xmm12                ; -1 in every dword: the counter's step
@@ -1978,7 +1986,7 @@ ha_rsa_gather_v1:
     pxor        xmm3, xmm3
     pxor        xmm13, xmm13                ; j = 0 in every dword
     mov         r9, rsi
-    mov         r10d, 64
+    mov         r10, r11
 .entry:
     movdqa      xmm4, xmm13
     pcmpeqd     xmm4, xmm15                 ; all ones where j = index (every dword alike)
@@ -2176,10 +2184,24 @@ rsa_digit:
 ; RS_PMUL, the square and product rsa_power runs: ha_bn_sqr16_v3 and ha_bn_mul16_v3 when k is 16
 ; and the v3 versions were picked (RSA-2048's primes; their results are below R, not below the
 ; prime, which the power's table and windows take and its final reduction undoes), else the
-; picked ones themselves. Clobbers rax, rcx, rdx.
+; picked ones themselves; and RS_WIN, RS_ENTRIES: windows of 5 bits (32 entries) up to k = 16,
+; of 6 (64) above. The width trades the table's operations and each window's gather (both
+; halve a bit narrower) against a product per window (a fifth more at 5 bits): at k = 16 5 bits
+; save about 17,000 cycles an exponentiation (measured operations: a square 573, a product 709,
+; a 64-entry gather 300), at k = 24 the two are even, at k = 32 6 bits win by about 35,000. The
+; width depends on k alone: public. Clobbers rax, rcx, rdx.
 ; -----------------------------------------------------------------------------
 align 16
 rsa_pick_power:
+    mov         eax, 5
+    mov         ecx, 6
+    cmp         qword [rbp + RS_K], 16      ; (k is public: the key's size)
+    cmova       eax, ecx
+    mov         [rbp + RS_WIN], rax
+    mov         ecx, eax
+    mov         eax, 1
+    shl         eax, cl
+    mov         [rbp + RS_ENTRIES], rax
     mov         rax, [rbp + RV_SQR]
     mov         rcx, [rbp + RV_MUL]
     cmp         qword [rbp + RS_K], 16      ; (k is public: the key's size)
@@ -2196,14 +2218,14 @@ rsa_pick_power:
 
 ; -----------------------------------------------------------------------------
 ; rsa_power: the frame's RS_X (x R mod p, below p), RS_PRIME, RS_PRIME0, RS_EXP (k limbs), RS_RR,
-; RS_K, RS_PSQR, RS_PMUL -> RS_ACC = x^exp R mod p (Montgomery form, below R: at k = 16 the
-; almost-Montgomery operations leave it there, not below p), in constant time. The table x^0 ..
-; x^63 in Montgomery forms: x^0 = R mod p (the reduction of R^2), x^1 = x, an even entry the
-; square of its half, an odd one the even below it times x. Then the exponent's 64k bits from the
-; top in windows of 6 (the first one 64k mod 6 bits, or 6): each window 6 squares and a product
-; with the entry its digit names, read by gather. The windows' positions depend only on k, so the
-; exponent's own length stays secret; the table's 62 operations and every window run whatever the
-; exponent. Frame routine (rbp).
+; RS_K, RS_PSQR, RS_PMUL, RS_WIN, RS_ENTRIES -> RS_ACC = x^exp R mod p (Montgomery form, below
+; R: at k = 16 the almost-Montgomery operations leave it there, not below p), in constant time.
+; The table x^0 .. x^(2^w - 1) (w = RS_WIN, 5 or 6) in Montgomery forms: x^0 = R mod p (the
+; reduction of R^2), x^1 = x, an even entry the square of its half, an odd one the even below it
+; times x. Then the exponent's 64k bits from the top in windows of w (the first one 64k mod w
+; bits, or w): each window w squares and a product with the entry its digit names, read by gather.
+; The windows' positions depend only on k, so the exponent's own length stays secret; the table's
+; 2^w - 2 operations and every window run whatever the exponent. Frame routine (rbp).
 ; -----------------------------------------------------------------------------
 align 16
 rsa_power:
@@ -2255,17 +2277,17 @@ rsa_power:
     call        [rbp + RS_PMUL]
 .entered:
     inc         ebx
-    cmp         ebx, 64
+    cmp         rbx, [rbp + RS_ENTRIES]
     jne         .entry
-    ; the first window: the top 64k mod 6 bits (or 6)
+    ; the first window: the top 64k mod w bits (or w)
     mov         rax, r14
     shl         rax, 6
     xor         edx, edx
-    mov         ecx, 6
-    div         rcx                         ; (k is public)
+    mov         rcx, [rbp + RS_WIN]
+    div         rcx                         ; (k and w are public)
     test        edx, edx
     jnz         .width
-    mov         edx, 6
+    mov         edx, ecx
 .width:
     mov         r15, r14
     shl         r15, 6
@@ -2277,12 +2299,13 @@ rsa_power:
     lea         rsi, [rbp + RS_TABLE]
     mov         edx, eax
     mov         rcx, r14
+    mov         r8, [rbp + RS_ENTRIES]
     call        [rbp + RS_GATHER]
 .window:
     test        r15, r15
     jz          .done
-    sub         r15, 6
-    mov         ebx, 6
+    sub         r15, [rbp + RS_WIN]
+    mov         rbx, [rbp + RS_WIN]
 .square:
     lea         rdi, [rbp + RS_ACC]
     lea         rsi, [rbp + RS_ACC]
@@ -2292,13 +2315,14 @@ rsa_power:
     call        [rbp + RS_PSQR]
     dec         ebx
     jnz         .square
-    mov         ecx, 6
+    mov         rcx, [rbp + RS_WIN]
     mov         rsi, r15
     call        rsa_digit
     lea         rdi, [rbp + RS_TMP]
     lea         rsi, [rbp + RS_TABLE]
     mov         edx, eax
     mov         rcx, r14
+    mov         r8, [rbp + RS_ENTRIES]
     call        [rbp + RS_GATHER]
     lea         rdi, [rbp + RS_ACC]
     lea         rsi, [rbp + RS_ACC]

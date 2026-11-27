@@ -1150,10 +1150,11 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      *Signing:* the encoding (RFC 8017 9.2's 00 01 FF.. 00 DigestInfo digest; 9.1.1's maskedDB,
      H and bc, the salt given), then CRT: per prime m R^-1 as the reduction of m's low k limbs
      plus its high k limbs (m < p q < p R keeps the high half below the prime), times R^3 into
-     Montgomery form; the exponentiation by fixed 6-bit windows over the exponent's whole width
-     64k (the window positions depend on k alone), the 64-entry table built whatever the
-     exponent, every window's entry read by a constant-time gather (all 64 entries ANDed with a
-     compare mask: v3 AVX2 sixteen limbs a pass, v1 SSE2 eight); at k = 16 (RSA-2048's primes)
+     Montgomery form; the exponentiation by fixed windows over the exponent's whole width 64k,
+     5 bits up to k = 16 and 6 above (width and positions depend on k alone), the table (32 or
+     64 entries) built whatever the exponent, every window's entry read by a constant-time
+     gather (every entry ANDed with a compare mask: v3 AVX2 sixteen limbs a pass, v1 SSE2
+     eight); at k = 16 (RSA-2048's primes)
      v3 runs the power on a square and a product of its own, straight lines instead of a call per
      row and a loop per 8-limb group, with "almost Montgomery" results (below R, not below p: n
      subtracted once when t's top limb is set, so one masked pass ends each operation), which
@@ -1177,21 +1178,25 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      50, which takes v3's k = 16 path: each key equal at every tier with each of its seven
      numbers against the guard page, both signatures equal at every tier, verified, the octets
      after them untouched). *Measured* against OpenSSL 3.0.13's EVP (the key kept, the context
-     made once; OpenSSL blinds and checks each result under e): PKCS#1 v1.5 at 2048 bits 618 us
-     against OpenSSL's 701 (1.13x), at 3072 2.10 ms and 4096 4.77 ms (parity); PSS 613 against
-     697 us at 2048 bits (1.12x, a salt drawn with httpasm_random each call), parity above; v3
-     2.30x v1; the init 0.60 ms at 2048 bits (its test signature is most of it). The first
+     made once; OpenSSL blinds and checks each result under e): PKCS#1 v1.5 at 2048 bits 611 us
+     against OpenSSL's 693 (1.13x, 41 rounds), at 3072 2.10 ms and 4096 4.77 ms (parity); PSS
+     613 against 701 us at 2048 bits (1.14x, a salt drawn with httpasm_random each call),
+     parity above; v3 2.31x v1; the init 0.59 ms at 2048 bits (its test signature is most of
+     it). The first
      version (the generic square and product in the power) took 743 us, 0.92x OpenSSL: at k = 16
      the calls per row and per group were a fifth of a square (705 cycles, now 573) and a tenth
      of a product (795, now 709), which now sit at the floor of about 1.4 cycles a
      multiply-accumulate; at 3072 and 4096 bits the rows are long enough that the generic ones
      sit there too, as OpenSSL's bn_power5 (mulx and adcx/adox, 5-bit windows) does. Measured and
      not kept: the k = 16 product in CIOS order (731 cycles against 709), two table entries a
-     gather step. Next lever: 5-bit windows at k = 16 (a 32-entry table: half the gather, half
-     the table's operations, a fifth more products; about 2% by the measured operations).
-     Weighed and not taken: the fault check per prime at k = 16 instead of under n at k = 32
-     (about 17,500 cycles, 1%, for a second check path in place of the public key's, which
-     would also need s < n checked apart).
+     gather step, a window's squares in one call (OpenSSL's power5 way: 575 cycles a square
+     against 568). 5-bit windows up to k = 16 (a 32-entry table: half the gather and half the
+     table's operations for a fifth more products) took about 2% (`bench.sh ab`, 41 rounds,
+     three processes: PSS 1.017-1.022x, proven; PKCS#1 1.014-1.023x); by the measured
+     operations k = 24 would break even and k = 32 lose 35,000 cycles an exponentiation, so 6
+     bits stay there. Weighed and not taken: the fault check per prime at k = 16 instead of
+     under n at k = 32 (about 17,500 cycles, 1%, for a second check path in place of the public
+     key's, which would also need s < n checked apart).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

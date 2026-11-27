@@ -604,12 +604,13 @@ typedef struct httpasm_rsa_private_key {
  * 4096 bits, p q is not n, dp is not below p, dq not below q, qinv not below p, or a test signature
  * made with the key does not verify under e (inconsistent numbers). The primes' sizes need not
  * match. Constant time in the secrets; about one signature's worth (the test signature is most
- * of it: 0.60 ms at 2048 bits), so prepare a key once and keep it. */
+ * of it: 0.59 ms at 2048 bits), so prepare a key once and keep it. */
 int httpasm_rsa_private_key_init(httpasm_rsa_private_key *key, const httpasm_rsa_private_numbers *numbers);
 
 /* RSASSA-PKCS1-v1_5 signature (RFC 8017 8.2.1) of a digest of the hash named (HTTPASM_HASH_*),
  * signature_length octets: the modulus' length. CRT with constant-time exponentiation (fixed
- * 6-bit windows over the primes' whole width, every table entry read), checked against faults
+ * windows over the primes' whole width, 5 bits up to 1024-bit primes and 6 above, every table
+ * entry read), checked against faults
  * by verifying it under e before it is returned. It needs about 48 KiB of stack (the window
  * table of 64 entries at 4096 bits each, whatever the key's size), all of it zeroed before it
  * returns, as httpasm_rsa_private_key_init does: a thread that signs must have that room. Returns
