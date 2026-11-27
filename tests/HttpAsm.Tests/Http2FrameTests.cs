@@ -2234,27 +2234,33 @@ public sealed class Http2FrameTests
     /// error must be found with output still waiting, which back-pressure normally prevents (no
     /// frame is handled while the output holds more than HA_OUTPUT_HIGH, and none is read
     /// while it waits for the socket). So the three frames come in one send and are handled
-    /// together: /a's 2 MB answer, which the socket takes whole (its loopback send buffer
-    /// autotunes to 2.2-2.6 MB); /b's 1,000,000 octets, under HA_OUTPUT_HIGH, so the next frame
-    /// is still handled; and DATA on stream 0, a connection error. The socket takes only the
-    /// start of /b; the client, with a 16 KiB receive buffer, reads nothing for a second; the
-    /// server closes at its 400 ms deadline; then the client finds /a whole, /b cut short, and
-    /// the end.
+    /// together: /a's 32 KiB and /b's 900,000 octets, both answers together under
+    /// HA_OUTPUT_HIGH (1 MiB), so the third frame is still handled; and DATA on stream 0, a
+    /// connection error. The client advertises 1 KiB segments and a 16 KiB receive buffer,
+    /// which keep the server's send buffer near 96 KiB (measured: six 16 KiB DATA frames
+    /// arrive): three times /a, a tenth of /a and /b together. (It once relied on
+    /// loopback's autotuning, 2.2-2.6 MB, with a 2 MB /a and a 1 MB /b; under other load on the
+    /// machine the buffer grew past 3 MB, took both answers whole, and the test failed:
+    /// autotuning can reach tcp_wmem's 4 MB.) The client, with a 16 KiB receive buffer, reads
+    /// nothing for two seconds, five of the server's 400 ms windows (one second once let a
+    /// late sweep miss the close in one run of 30); the server closes at its window's end; then
+    /// the client finds /a
+    /// whole, /b cut short, and the end.
     /// </summary>
     [Fact]
     [Requirement("RFC9113-5.4.1-2#2")]
     public void ClosesAConnectionEndingInErrorAtItsWindowsEnd()
     {
         Platform.RequireLinuxX64();
-        byte[] a = new byte[2_000_000], b = new byte[1_000_000];
+        byte[] a = new byte[32_768], b = new byte[900_000];
         using var server = new TestServer(x => x.Respond(200, x.Target == "/a" ? a : b), idleMs: 400);
-        using var c = new H2Connection(server.Port, 16 << 10, (4, 0x7FFFFFFF));   // every stream's window open
+        using var c = H2Connection.WithSmallSegments(server.Port, 16 << 10, 1024, (4, 0x7FFFFFFF));   // every stream's window open
         c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);                          // and the connection's
         c.SendFrames(
             (Headers, EndHeaders | EndStream, 1, c.RequestBlock("GET", "/a")),
             (Headers, EndHeaders | EndStream, 3, c.RequestBlock("GET", "/b")),
             (Data, 0, 0, [(byte)'x']));                             // DATA on stream 0: PROTOCOL_ERROR
-        Thread.Sleep(1000);                                         // nothing read: the deadline closes it
+        Thread.Sleep(2000);                                         // nothing read: the deadline closes it
 
         long received = 0;
         try
