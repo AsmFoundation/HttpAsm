@@ -435,6 +435,40 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_p384_verify")]
     internal static partial int P384Verify(byte* publicKey, byte* digest, nuint digestLength, byte* signature);
 
+    /// <summary>int httpasm_p521_public_key(public_key[133], private_key[66]).</summary>
+    /// <param name="publicKey">Receives 04 || x || y of d G; all zeros when d is refused.</param>
+    /// <param name="privateKey">d, 66 big-endian octets.</param>
+    /// <returns>0, or -1 when d is 0 or n or more.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p521_public_key")]
+    internal static partial int P521PublicKey(byte* publicKey, byte* privateKey);
+
+    /// <summary>int httpasm_p521_ecdh(shared[66], private_key[66], peer_key[133]).</summary>
+    /// <param name="shared">Receives the x-coordinate of d Q; all zeros when refused.</param>
+    /// <param name="privateKey">d, 66 big-endian octets.</param>
+    /// <param name="peerKey">Q, 133 octets: 04 || x || y.</param>
+    /// <returns>0, or -1 when d is out of range or Q is no uncompressed point of the curve.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p521_ecdh")]
+    internal static partial int P521Ecdh(byte* shared, byte* privateKey, byte* peerKey);
+
+    /// <summary>int httpasm_p521_sign(signature[132], private_key[66], digest, digest_length, entropy).</summary>
+    /// <param name="signature">Receives r || s; all zeros when the key is refused.</param>
+    /// <param name="privateKey">d, 66 big-endian octets.</param>
+    /// <param name="digest">The message's digest (any hash; its leftmost 521 bits count).</param>
+    /// <param name="digestLength">Its length (0 allowed).</param>
+    /// <param name="entropy">66 octets mixed into RFC 6979's nonce, or null for RFC 6979's own.</param>
+    /// <returns>0, or -1 when d is 0 or n or more.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p521_sign")]
+    internal static partial int P521Sign(byte* signature, byte* privateKey, byte* digest, nuint digestLength, byte* entropy);
+
+    /// <summary>int httpasm_p521_verify(public_key[133], digest, digest_length, signature[132]).</summary>
+    /// <param name="publicKey">Q, 133 octets: 04 || x || y.</param>
+    /// <param name="digest">The message's digest.</param>
+    /// <param name="digestLength">Its length.</param>
+    /// <param name="signature">r || s, 132 octets.</param>
+    /// <returns>0 when the signature is valid, else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_p521_verify")]
+    internal static partial int P521Verify(byte* publicKey, byte* digest, nuint digestLength, byte* signature);
+
     /// <summary>void httpasm_ed25519_public_key(public_key[32], private_key[32]).</summary>
     /// <param name="publicKey">Receives A, the encoding of a B (RFC 8032 5.1.5).</param>
     /// <param name="privateKey">The 32-octet seed (any value).</param>

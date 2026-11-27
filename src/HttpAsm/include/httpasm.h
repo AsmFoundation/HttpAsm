@@ -653,6 +653,50 @@ int httpasm_p384_verify(const uint8_t public_key[HTTPASM_P384_POINT], const uint
                         size_t digest_length, const uint8_t signature[HTTPASM_P384_SIGNATURE]);
 
 /* ------------------------------------------------------------------------------------------
+ * NIST P-521 (SP 800-186; TLS's secp521r1): ECDH for TLS 1.3's secp521r1 key share, ECDSA (FIPS
+ * 186-5) for ecdsa_secp521r1_sha512 and the certificates that use it. P-256's functions at
+ * 66-octet scalars and coordinates (ceil(521 / 8)); the same versions (v3: mulx with adcx/adox
+ * and AVX2 table scans; v1: mul and SSE2) and the same constant-time rules.
+ * Stack: up to about 10 KiB (10,112 octets: a signature at the best tier, measured by
+ * tests/native/stack; 8,912 at v1), touched a page at a time on the way down (no stack clash).
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_P521_SCALAR    66       /* octets of a private key, a shared secret, r or s */
+#define HTTPASM_P521_POINT     133      /* octets of a public key: 04 || x || y (SEC 1, uncompressed) */
+#define HTTPASM_P521_SIGNATURE 132      /* octets of a signature: r || s (IEEE P1363's form) */
+#define HTTPASM_P521_ENTROPY   66       /* octets of a signature's optional entropy */
+
+/* The public key of a private key d (66 big-endian octets, 1 <= d < n): 04 || x || y of d G.
+ * Returns 0; or -1 when d is 0 or n or more (out is then all zeros): any value with a bit set
+ * above bit 520 (the first octet above 01) is n or more. To make a key, draw 66 random octets,
+ * clear the first octet's seven high bits, and retry while this fails (about once in 2^260). */
+int httpasm_p521_public_key(uint8_t public_key[HTTPASM_P521_POINT],
+                            const uint8_t private_key[HTTPASM_P521_SCALAR]);
+
+/* ECDH: shared = the x-coordinate of d Q (66 big-endian octets), for a private key d and a peer's
+ * public key Q. Returns 0; or -1 when d is out of range or Q is not a point of the curve in
+ * uncompressed form (a first octet other than 04, a coordinate p or more, the curve equation
+ * failing: RFC 9846 4.2.8.2's checks); shared is all zeros then. */
+int httpasm_p521_ecdh(uint8_t shared[HTTPASM_P521_SCALAR], const uint8_t private_key[HTTPASM_P521_SCALAR],
+                      const uint8_t peer_key[HTTPASM_P521_POINT]);
+
+/* ECDSA: signs a message digest (digest_length octets, any hash: its leftmost 521 bits are used,
+ * as FIPS 186-5 6.4.1 says, so SHA-512's 64 octets are taken whole) with a private key. The nonce
+ * is RFC 6979's deterministic k (HMAC-SHA512: exactly RFC 6979's for a SHA-512 digest), with
+ * entropy[0..66) mixed in as RFC 6979 3.6's extra input when entropy is not NULL (pass 66 random
+ * octets: a hedged signature). Returns 0; or -1 when the private key is out of range (signature
+ * is then all zeros). */
+int httpasm_p521_sign(uint8_t signature[HTTPASM_P521_SIGNATURE],
+                      const uint8_t private_key[HTTPASM_P521_SCALAR], const uint8_t *digest,
+                      size_t digest_length, const uint8_t *entropy);
+
+/* ECDSA: verifies signature (r || s) over a digest (as httpasm_p521_sign takes it) under a public
+ * key. Returns 0 when valid; -1 otherwise: r or s not in [1, n - 1], the key not an uncompressed
+ * point of the curve, or the equation failing. */
+int httpasm_p521_verify(const uint8_t public_key[HTTPASM_P521_POINT], const uint8_t *digest,
+                        size_t digest_length, const uint8_t signature[HTTPASM_P521_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
  * Ed25519 (RFC 8032 5.1, pure EdDSA): TLS 1.3's ed25519 signature scheme and Ed25519
  * certificates (RFC 8410). Versions: mulx with adcx/adox and AVX2 table scans on four 64-bit
  * limbs, and mul with SSE2 on five 51-bit limbs; signing is constant time in the key and r,

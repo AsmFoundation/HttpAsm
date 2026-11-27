@@ -285,6 +285,13 @@ HTTPASM_P384_POINT              equ 97      ; octets of a public key: 04, x, y
 HTTPASM_P384_SIGNATURE          equ 96      ; octets of a signature: r, s (IEEE P1363's form)
 HTTPASM_P384_ENTROPY            equ 48      ; octets of a signature's optional entropy
 
+; P-521 (SP 800-186; crypto/p521.asm): P-256's forms at 66-octet scalars and coordinates
+; (ceil(521 / 8): the first octet of a scalar or a coordinate below p holds one bit, 0 or 1).
+HTTPASM_P521_SCALAR             equ 66      ; octets of a private key, a shared secret, r or s
+HTTPASM_P521_POINT              equ 133     ; octets of a public key: 04, x, y
+HTTPASM_P521_SIGNATURE          equ 132     ; octets of a signature: r, s (IEEE P1363's form)
+HTTPASM_P521_ENTROPY            equ 66      ; octets of a signature's optional entropy
+
 ; Ed25519 (RFC 8032 5.1; crypto/ed25519.asm): private keys (the 32-octet seed) and public keys
 ; are 32 octets, signatures R || S 64.
 HTTPASM_ED25519_KEY             equ 32      ; octets of a private key (seed) or a public key

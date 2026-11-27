@@ -83,6 +83,10 @@
     X(httpasm_p384_ecdh)            \
     X(httpasm_p384_sign)            \
     X(httpasm_p384_verify)          \
+    X(httpasm_p521_public_key)      \
+    X(httpasm_p521_ecdh)            \
+    X(httpasm_p521_sign)            \
+    X(httpasm_p521_verify)          \
     X(httpasm_ed25519_public_key)   \
     X(httpasm_ed25519_private_key_init) \
     X(httpasm_ed25519_sign)         \
@@ -342,6 +346,30 @@ void bench_p384_sign(const bench_build *b, const bench_case *c, long calls);
 /* bench_p384_verify: httpasm_p384_verify of a valid signature (made before the loop): a TLS
  * client's work per P-384 signature in a certificate chain. */
 void bench_p384_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* The P-521 cases' input (bench_p521_input, suite_rivals.c): a private key (66 octets), RFC 6979
+ * A.2.7's public key as the peer's (133), a SHA-512 digest (64), entropy (66). */
+const uint8_t *bench_p521_input(void);
+
+/* bench_p521_ecdh: httpasm_p521_ecdh of the input's key and peer point (the variable base, the
+ * peer's point checked every call). */
+void bench_p521_ecdh(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p521_public_key: httpasm_p521_public_key of the input's key (the fixed base). */
+void bench_p521_public_key(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p521_share: a TLS 1.3 secp521r1 key share's work per handshake: a private key drawn
+ * (httpasm_random, the first octet's seven high bits cleared, again when refused), its public key,
+ * the shared secret with the peer's. */
+void bench_p521_share(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p521_sign: httpasm_p521_sign of the input's digest with the input's entropy (a hedged
+ * RFC 6979 signature: two HMAC-SHA512 blocks a candidate). */
+void bench_p521_sign(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_p521_verify: httpasm_p521_verify of a valid signature (made before the loop): a TLS
+ * client's work per P-521 signature in a certificate chain. */
+void bench_p521_verify(const bench_build *b, const bench_case *c, long calls);
 
 /* The Ed25519 cases' input (bench_ed25519_input, suite_rivals.c): a private key (the 32-octet
  * seed), then a TLS 1.3 server CertificateVerify's signed content (130 octets: 64 spaces, the

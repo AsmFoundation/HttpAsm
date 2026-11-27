@@ -1567,6 +1567,86 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      us against 191.6 (4.9x), signature 44.3 against 205.6 (4.6x), verification 176.6 against
      230.4 (1.30x: 446 doublings dominate it; next to try there: doublings without T when no
      addition follows).
+   - **P-521** (2026-11-27), `crypto/p521.asm` over `include/crypto/p521.inc`:
+     `httpasm_p521_public_key`, `httpasm_p521_ecdh`, `httpasm_p521_sign`, `httpasm_p521_verify`
+     (66-octet scalars, 133-octet SEC 1 points, 132-octet r || s): TLS 1.3's secp521r1 key share
+     and ecdsa_secp521r1_sha512, the last group and signature scheme of RFC 9846's lists that M2's
+     primitives lacked. P-384's design (formulas, Booth recodings, table scans, Straus
+     verification with wNAF digits, the x(R) check without an inversion, RFC 6979 nonces hedged
+     with the caller's entropy, the validation) over a new field. *The field:* p = 2^521 - 1
+     reduces a product by its form, and the values are plain (no Montgomery form: no conversion
+     in or out, plain constants): the 1042-bit t splits at bit 521 (hi by nine shrd), w = hi + lo
+     + 1, and one pass masks the top limb to 9 bits and adds c - 1 (c = w's bit 521: 0 or all
+     ones), which gives the fully reduced value with no branch (hi + lo = 2p never occurs for a
+     product of values below p). Sums take the same tail; a difference that borrows masks the top
+     limb and subtracts 1; halving and doubling (4x, 8x too) are rotations of the 521-bit string
+     (2^521 = 1 mod p), which keep values below p; negation is the complement, masked so that 0
+     stays 0. A generic Montgomery product at nine limbs would add 81 multiplications. *The
+     products are called routines* (p521_fmul_v3/_v1, p521_fsqr_v3/_v1, hidden globals): about
+     300 instructions each, so the point formulas with every product written out would pass the
+     L1 instruction and decoded-micro-op caches (P-384's object holds about 312 KB of code beside
+     its table; P-521's 72 KB). v3: rows of mulx with adcx/adox over a window of ten limbs that
+     turns through ten registers, the row's lowest limb retired to the frame's scratch (F9_SCR:
+     nothing secret lands below the frame, which is wiped); squares by the triangle (36 products,
+     t_k and t_(k+9) sharing a register, then one pass doubling on CF and adding the nine squares
+     on OF: 45 mulx against 81). v1: mul, one carry chain, the row's multiplier a memory operand
+     (the window, rax, rdx and the carry take all fourteen registers); squares through the
+     product. Measured (TSC ticks a call; this host's core runs at about the TSC's rate, a chain
+     of imuls shows): a product 117.5 at throughput and 153 chained, a square 95 and 126; v1's
+     product 204; a sum 15, a rotation 10. The independent product is within about 5% of its
+     port bound (81 mulx on port 1, about 190 adcx/adox/adc on ports 0 and 6). *Windows:* 5-bit
+     Booth digits for the variable base (105 windows; the top one, bits 519..524, never
+     negative), 6-bit for the fixed base (87 windows of 32 affine points: 400,896 octets in
+     `include/generated/p521_table.inc`, written and proven by `specs/p521.cs`, which CI runs with
+     --check; P-384's 7 bits would make 691,200). *The doubling case P-256 and P-384 never meet:*
+     the variable base's last addition adds d0 P to (k - d0) P, equal when k = 2 d0 (mod n) with
+     k - d0 a multiple of 32: for d0 < 0, k = n + 2 d0 with d0 = -n (mod 32). P-256's n gives
+     d0 = -17 and P-384's -19, outside Booth's [-16, 16]; P-521's n is 9 mod 32, so d0 = -9 and
+     the key n - 18 meets it (the Python model searched every digit: n - 18 is the only one).
+     add-2007-bl gives garbage there (H = r = 0, Z3 = 0), so window 0's addition is
+     p521_add_last: the sum by selection, then the addend doubled, and the double taken by mask
+     when H = r = 0 with neither input at infinity (one doubling more a shared secret). The
+     fixed base cannot meet it (below window 86 the partial sum is below 2^(6i - 1) in magnitude
+     and the addend at least 2^(6i); at the top window it would need k above n). *Inversion:*
+     P-384's divsteps at nine signed 62-bit limbs, 25 batches of 62 (Theorem 11.2's bound for
+     inputs below 2^521: 1505 divsteps). *Scalars:* Montgomery products modulo n (CIOS with t in
+     the frame, the window sliding a qword a round; R = 2^576; mul at both versions). *RFC 6979*
+     with HMAC-SHA512 (the commit before this one added it): qlen = 521 > hlen = 512, so a
+     candidate is two HMAC blocks, k their first 66 octets shifted right 7 (bits2int), as a
+     digest of 66 octets or more is. Designed in a Python model first (scratchpad p521/model.py:
+     the field's limb arithmetic, the divsteps at nine limbs, CIOS modulo n, the windows' digits
+     and the scalar multiplications with these formulas and selections, which found n - 18, and
+     RFC 6979 A.2.7's SHA-512 signature exactly), then the field checked alone (scratchpad
+     p521/h: every routine at both versions, in place too, against Python integers) before the
+     whole: the assembly passed every vector on its first run, and the one failing test had a
+     wrong helper (a 66-octet digest is shifted by bits2int, so the equal-points test passes
+     e << 7). *Proven by* P521Tests (11, at v3 and v1): the curve's constants against .NET's
+     explicit nistP521; RFC 6979 A.2.7 read from the pinned text (values on three lines: the key
+     pair, both SHA-512 signatures exactly, all ten verified, each k's point); NIST's CAVP P-521
+     records (KAS ECC CDH 25; FIPS 186-4 KeyPair 10, PKV 12, SigGen 60 with each k's point,
+     SigVer 75); Wycheproof's ECDH tests on raw points (661: 632 valid, 16 invalid-curve points
+     refused with zeros, 13 compressed or empty encodings never valid) and its ECDSA P1363 tests
+     with SHA-512 (318: 231 valid, 14 of other sizes), both pinned at 65ca494; .NET's
+     ECDiffieHellman and ECDsa on 40 random keys both ways; a BigInteger model (Jacobian, RFC
+     6979 with HMACSHA512) on 100 scalars from the edges (n - 18 among them) and digests of 0 to
+     100 octets; the doubling case itself (the digit and the multiple checked, then ECDH at
+     n - 18 and its neighbours against the model on eight peers and against .NET); the
+     verification's equal and opposite points; refusals of every invalid key (0, n, 2^521, the 66
+     octets all ones), point (x or y of p, 2^521, 2^528 - 1; off the curve; every first octet
+     but 04) and signature. `tests/native/tiers`: 400 rounds at every tier equal to v1's, n - 18
+     among the keys, each of the four inputs against the guard page in turn. `tests/native/stack`:
+     10,112 octets deep (a signature at the best tier; 8,912 at v1). The coverage gate: crypto/p521.asm 128 of 131 markers and 148 of 154 branch sides ran (1,070 tests in each of the six suite runs), the rest signing's nine retry markers, listed as rare.
+     RFC 6979's retry after a candidate of n or more has no test: P-521's n is within 2^261 of
+     2^521 (a rare condition in the gate's list, with r = 0 and s = 0). *Measured* against OpenSSL
+     3.0.13, whose P-521 is its dedicated 64-bit code (ecp_nistp521.c: faster than its generic
+     P-384, 3,089 ECDH a second against 1,352), 41 rounds: a shared secret 262.7 us against 356.9
+     (1.36x), a public key 57.5 against 201.3 (3.50x), a key share 325.6 against 873.3 (2.68x), a
+     signature 70.6 against 297.3 (4.21x), a verification 290.3 against 570.0 (1.96x); v3 1.4x to
+     1.7x v1. Next to try (the products being near their port bound, each a few percent): the
+     doubling's serial tail (alpha, alpha^2, X3, alpha (4 beta - X3): three products and five
+     small operations in a row) overlapped with the next doubling's independent start (Z3^2 as
+     soon as Z3 is known); the variable base's table made affine by one batched inversion
+     (mixed additions: five products fewer a window); dbl-2001-b's 3M + 5S.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

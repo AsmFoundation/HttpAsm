@@ -203,6 +203,11 @@ fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp2
 fetch wycheproof/ecdh_secp384r1_ecpoint_test.json "$wycheproof/ecdh_secp384r1_ecpoint_test.json" ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3
 fetch wycheproof/ecdsa_secp384r1_sha384_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha384_p1363_test.json" e27344bf6daae75fa19663620883809f91c79fc4b4420eff9eae8036b34476be
 fetch wycheproof/ecdsa_secp384r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp384r1_sha512_p1363_test.json" d994c43b997760ce51c4bbae4a974bf9f9c61db2c4b0e454c3999179de7aae46
+#   P-521 (P521Tests): ECDH on raw points (661: edge-case scalars and coordinates, the
+#   invalid-curve points, compressed and malformed encodings) and ECDSA with SHA-512 in IEEE
+#   P1363 form (318: arithmetic edge cases, r and s out of range, the special public keys).
+fetch wycheproof/ecdh_secp521r1_ecpoint_test.json "$wycheproof/ecdh_secp521r1_ecpoint_test.json" 87aba8739c96de2bde8c75b60ffea09d0493192c4d9543d1d969e5e998931f35
+fetch wycheproof/ecdsa_secp521r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp521r1_sha512_p1363_test.json" d294cbe0485dff0a2c53f6b363103ddb81c444e7e5ee44df56549ea92b873840
 #   Ed25519 (Ed25519Tests): 210 verifications - malleable S, non-canonical and invalid encodings
 #   of R and A, truncated and padded signatures, Tink's overflow cases, and the small- and
 #   mixed-order public keys whose signatures either policy may take ("acceptable").

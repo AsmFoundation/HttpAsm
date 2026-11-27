@@ -1517,6 +1517,212 @@ static bench_rival p384_share_rivals[] = { { openssl_name, openssl_p384_share } 
 static bench_rival p384_sign_rivals[] = { { openssl_name, openssl_p384_sign } };
 static bench_rival p384_verify_rivals[] = { { openssl_name, openssl_p384_verify } };
 
+/* ---- P-521: ECDH, the public key, a key share, ECDSA's signature and verification. */
+
+/* The P-521 cases' input: a private key, RFC 6979 A.2.7's public key as the peer's, a SHA-512
+ * digest (of "sample"), entropy (see bench.h). */
+static const uint8_t p521_input[66 + 133 + 64 + 66] = {
+    0x01, 0x57, 0x74, 0x91, 0xAE, 0xCB, 0xE8, 0x05, 0x22, 0x3F, 0x5C, 0x79, 0x96, 0xB3, 0xD0, 0xED,
+    0x0A, 0x27, 0x44, 0x61, 0x7E, 0x9B, 0xB8, 0xD5, 0xF2, 0x0F, 0x2C, 0x49, 0x66, 0x83, 0xA0, 0xBD,
+    0xDA, 0xF7, 0x14, 0x31, 0x4E, 0x6B, 0x88, 0xA5, 0xC2, 0xDF, 0xFC, 0x19, 0x36, 0x53, 0x70, 0x8D,
+    0xAA, 0xC7, 0xE4, 0x01, 0x1E, 0x3B, 0x58, 0x75, 0x92, 0xAF, 0xCC, 0xE9, 0x06, 0x23, 0x40, 0x5D,
+    0x7A, 0x97, 0x04, 0x01, 0x89, 0x45, 0x50, 0xD0, 0x78, 0x59, 0x32, 0xE0, 0x0E, 0xAA, 0x23, 0xB6,
+    0x94, 0xF2, 0x13, 0xF8, 0xC3, 0x12, 0x1F, 0x86, 0xDC, 0x97, 0xA0, 0x4E, 0x5A, 0x71, 0x67, 0xDB,
+    0x4E, 0x5B, 0xCD, 0x37, 0x11, 0x23, 0xD4, 0x6E, 0x45, 0xDB, 0x6B, 0x5D, 0x53, 0x70, 0xA7, 0xF2,
+    0x0F, 0xB6, 0x33, 0x15, 0x5D, 0x38, 0xFF, 0xA1, 0x6D, 0x2B, 0xD7, 0x61, 0xDC, 0xAC, 0x47, 0x4B,
+    0x9A, 0x2F, 0x50, 0x23, 0xA4, 0x00, 0x49, 0x31, 0x01, 0xC9, 0x62, 0xCD, 0x4D, 0x2F, 0xDD, 0xF7,
+    0x82, 0x28, 0x5E, 0x64, 0x58, 0x41, 0x39, 0xC2, 0xF9, 0x1B, 0x47, 0xF8, 0x7F, 0xF8, 0x23, 0x54,
+    0xD6, 0x63, 0x0F, 0x74, 0x6A, 0x28, 0xA0, 0xDB, 0x25, 0x74, 0x1B, 0x5B, 0x34, 0xA8, 0x28, 0x00,
+    0x8B, 0x22, 0xAC, 0xC2, 0x3F, 0x92, 0x4F, 0xAA, 0xFB, 0xD4, 0xD3, 0x3F, 0x81, 0xEA, 0x66, 0x95,
+    0x6D, 0xFE, 0xAA, 0x2B, 0xFD, 0xFC, 0xF5, 0x39, 0xA5, 0xE0, 0x4A, 0xAF, 0xF7, 0x45, 0x5D, 0x98,
+    0x50, 0xC6, 0x05, 0x36, 0x4F, 0x51, 0x4C, 0x11, 0x32, 0x4C, 0xE6, 0x40, 0x16, 0x96, 0x0D, 0x23,
+    0xD5, 0xDC, 0x57, 0xD3, 0xFF, 0xD8, 0xF4, 0x9A, 0x73, 0x94, 0x68, 0xAB, 0x80, 0x49, 0xBF, 0x18,
+    0xEE, 0xF8, 0x20, 0xCD, 0xB1, 0xAD, 0x6C, 0x90, 0x15, 0xF8, 0x38, 0x55, 0x6B, 0xC7, 0xFA, 0xD4,
+    0x13, 0x8B, 0x23, 0xFD, 0xF9, 0x86, 0xC7, 0x5C, 0x5B, 0x52, 0x49, 0x40, 0x7F, 0x76, 0x6D, 0x64,
+    0x63, 0x1A, 0x11, 0x08, 0x07, 0x3E, 0x35, 0x2C, 0x2B, 0x22, 0xD9, 0xD0, 0xCF, 0xC6, 0xFD, 0xF4,
+    0xF3, 0xEA, 0xE1, 0x98, 0x97, 0x8E, 0x85, 0xBC, 0xBB, 0xB2, 0xA9, 0xA0, 0x5F, 0x56, 0x4D, 0x44,
+    0x43, 0x7A, 0x71, 0x68, 0x67, 0x1E, 0x15, 0x0C, 0x0B, 0x02, 0x39, 0x30, 0x2F, 0x26, 0xDD, 0xD4,
+    0xD3, 0xCA, 0xC1, 0xF8, 0xF7, 0xEE, 0xE5, 0x9C, 0x9B,
+};
+
+/* bench_p521_input: see bench.h. */
+const uint8_t *bench_p521_input(void)
+{
+    return p521_input;
+}
+
+/* bench_p521_ecdh: see bench.h. */
+void bench_p521_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[66];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p521_ecdh(out, c->data, c->data + 66);
+    bench_sink = out[0];
+}
+
+/* bench_p521_public_key: see bench.h. */
+void bench_p521_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t out[133];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p521_public_key(out, c->data);
+    bench_sink = out[1];
+}
+
+/* bench_p521_share: see bench.h. */
+void bench_p521_share(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t key[66], public_key[133], out[66];
+    for (long i = 0; i < calls; i++) {
+        do {
+            b->api.httpasm_random(key, sizeof key);
+            key[0] &= 1;
+        } while (b->api.httpasm_p521_public_key(public_key, key) != 0);
+        b->api.httpasm_p521_ecdh(out, key, c->data + 66);
+    }
+    bench_sink = out[0] + public_key[1];
+}
+
+/* bench_p521_sign: see bench.h. */
+void bench_p521_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t signature[132];
+    for (long i = 0; i < calls; i++)
+        b->api.httpasm_p521_sign(signature, c->data, c->data + 199, 64, c->data + 263);
+    bench_sink = signature[0];
+}
+
+/* bench_p521_verify: see bench.h. */
+void bench_p521_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t public_key[133], signature[132];
+    b->api.httpasm_p521_public_key(public_key, c->data);
+    b->api.httpasm_p521_sign(signature, c->data, c->data + 199, 64, NULL);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_p521_verify(public_key, c->data + 199, 64, signature);
+    bench_sink = (uint8_t)sum;
+}
+
+/* OpenSSL at P-521: the same calls as the P-384 rivals, the curve "P-521" (which method OpenSSL
+ * runs for it, its 64-bit nistp521 code or the generic one, depends on how it was built:
+ * benchmarks/README.md's entry says what this host's does). */
+
+/* openssl_p521_peer: an EVP_PKEY of the input's peer point, through the encoded form, on the
+ * parameters of `like`. */
+static void *openssl_p521_peer(void *like, const uint8_t *point)
+{
+    void *peer = openssl_pkey_new();
+    if (peer != NULL && (openssl_copy_parameters(peer, like) != 1 || openssl_set1_encoded(peer, point, 133) != 1)) {
+        openssl_pkey_free(peer);
+        return NULL;
+    }
+    return peer;
+}
+
+/* openssl_p521_ecdh: the derive alone (key, peer and context made once). */
+static void openssl_p521_ecdh(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-521");
+    void *peer = key ? openssl_p521_peer(key, c->data + 66) : NULL;
+    void *ctx = peer ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char out[66] = { 0 };
+    if (ctx != NULL && openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = 66;
+            openssl_derive(ctx, out, &length);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(peer);
+    openssl_pkey_free(key);
+    bench_sink = out[0];
+}
+
+/* openssl_p521_public_key: a key generated and its encoded public key taken, each call. */
+static void openssl_p521_public_key(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    (void)c;
+    unsigned char first = 0;
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-521");
+        unsigned char *encoded = NULL;
+        if (key != NULL && openssl_get1_encoded(key, &encoded) == 133)
+            first = encoded[1];
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = first;
+}
+
+/* openssl_p521_share: a key share as OpenSSL's TLS 1.3 code makes one per handshake. */
+static void openssl_p521_share(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char out[66] = { 0 };
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_q_keygen(NULL, NULL, "EC", "P-521");
+        unsigned char *encoded = NULL;
+        openssl_get1_encoded(key, &encoded);
+        void *peer = openssl_p521_peer(key, c->data + 66);
+        void *ctx = openssl_pkey_ctx_new(key, NULL);
+        size_t length = 66;
+        if (openssl_derive_init(ctx) == 1 && openssl_set_peer(ctx, peer) == 1)
+            openssl_derive(ctx, out, &length);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(peer);
+        openssl_crypto_free(encoded, "", 0);
+        openssl_pkey_free(key);
+    }
+    bench_sink = out[0];
+}
+
+/* openssl_p521_sign: EVP_PKEY_sign of the input's digest under a key made once (a random nonce
+ * from OpenSSL's generator each call, DER out). */
+static void openssl_p521_sign(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-521");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[160] = { 0 };
+    if (ctx != NULL && openssl_sign_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++) {
+            size_t length = sizeof signature;
+            openssl_sign(ctx, signature, &length, c->data + 199, 64);
+        }
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = signature[4];
+}
+
+/* openssl_p521_verify: EVP_PKEY_verify of a valid signature (made before the loop). */
+static void openssl_p521_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    void *key = openssl_q_keygen(NULL, NULL, "EC", "P-521");
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    unsigned char signature[160] = { 0 };
+    size_t length = sizeof signature;
+    int sum = 0;
+    if (ctx != NULL && openssl_sign_init(ctx) == 1 && openssl_sign(ctx, signature, &length, c->data + 199, 64) == 1 &&
+        openssl_verify_init(ctx) == 1) {
+        for (long i = 0; i < calls; i++)
+            sum += openssl_verify(ctx, signature, length, c->data + 199, 64);
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival p521_ecdh_rivals[] = { { openssl_name, openssl_p521_ecdh } };
+static bench_rival p521_public_key_rivals[] = { { openssl_name, openssl_p521_public_key } };
+static bench_rival p521_share_rivals[] = { { openssl_name, openssl_p521_share } };
+static bench_rival p521_sign_rivals[] = { { openssl_name, openssl_p521_sign } };
+static bench_rival p521_verify_rivals[] = { { openssl_name, openssl_p521_verify } };
+
 /* ---- Ed25519: the public key, a signature, a verification. */
 
 /* The Ed25519 cases' input (see bench.h): the seed, then the CertificateVerify content, built on
@@ -3088,6 +3294,32 @@ void bench_suite_rivals(void)
         c.ours = p384_cases[i].ours;
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = p256 ? p384_cases[i].rivals : NULL;  /* (P-256's loading brought the functions) */
+        c.rival_count = p256 ? 1 : 0;
+        bench_add(&c);
+    }
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } p521_cases[] = {
+        { "p521_ecdh", "shared secret", bench_p521_ecdh, p521_ecdh_rivals },
+        { "p521_public_key", "public key", bench_p521_public_key, p521_public_key_rivals },
+        { "p521_key_share", "key drawn + public key + shared secret", bench_p521_share, p521_share_rivals },
+        { "p521_sign", "ECDSA signature (SHA-512 digest)", bench_p521_sign, p521_sign_rivals },
+        { "p521_verify", "ECDSA verification", bench_p521_verify, p521_verify_rivals },
+    };
+    for (size_t i = 0; i < sizeof p521_cases / sizeof p521_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call, no octets to rate */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = p521_cases[i].name;
+        c.input = p521_cases[i].input;
+        c.data = p521_input;
+        c.length = sizeof p521_input;
+        c.octets = 0;
+        c.ours = p521_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = p256 ? p521_cases[i].rivals : NULL;  /* (P-256's loading brought the functions) */
         c.rival_count = p256 ? 1 : 0;
         bench_add(&c);
     }

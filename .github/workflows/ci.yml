@@ -17,6 +17,9 @@
 #      of order (p - 1) / 2, must match the committed include. And specs/ed448.cs --check:
 #      Ed448's constants and its fixed-base table (1,440 points, each checked by another route;
 #      the 4-isogeny's image of B is u = 5, X448's base point) must match the committed include.
+#      And specs/p521.cs --check: P-521's constants (p = 2^521 - 1 and n prime, G of order n)
+#      and its fixed-base table (2,784 points, each by another route) must match the committed
+#      include.
 #   2. dotnet build HttpAsm.slnx -c Release: the core, libhttpasm.so and the tests.
 #      AsmFoundation.Sdk's bundled toolchain (NASM, lld, from nuget.org) assembles and links on
 #      this runner, as it does on Windows and macOS.
@@ -113,6 +116,9 @@ jobs:
 
       - name: Ed448's constants and fixed-base table are proven and current
         run: dotnet run specs/ed448.cs -- --check
+
+      - name: P-521's constants and fixed-base table are proven and current
+        run: dotnet run specs/p521.cs -- --check
 
       - name: Build (core, libhttpasm.so, tests)
         run: dotnet build HttpAsm.slnx -c Release

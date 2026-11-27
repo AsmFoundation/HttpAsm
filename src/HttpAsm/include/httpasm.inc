@@ -110,6 +110,10 @@ extern httpasm_p384_public_key      ; int (public_key[97], private_key[48]): 0, 
 extern httpasm_p384_ecdh            ; int (shared[48], private_key[48], peer_key[97]): 0, -1 (key or point refused; zeros)
 extern httpasm_p384_sign            ; int (signature[96], private_key[48], digest, length, entropy[48] or NULL): 0, -1
 extern httpasm_p384_verify          ; int (public_key[97], digest, length, signature[96]): 0 valid, -1 not
+extern httpasm_p521_public_key      ; int (public_key[133], private_key[66]): 0, -1 when the key is not in [1, n)
+extern httpasm_p521_ecdh            ; int (shared[66], private_key[66], peer_key[133]): 0, -1 (key or point refused; zeros)
+extern httpasm_p521_sign            ; int (signature[132], private_key[66], digest, length, entropy[66] or NULL): 0, -1
+extern httpasm_p521_verify          ; int (public_key[133], digest, length, signature[132]): 0 valid, -1 not
 extern httpasm_ed25519_public_key   ; void (public_key[32], private_key[32]): A of the seed
 extern httpasm_ed25519_private_key_init ; void (httpasm_ed25519_private_key *key, private_key[32]): a mod L, prefix, A
 extern httpasm_ed25519_sign         ; void (signature[64], const httpasm_ed25519_private_key *key, message, length)

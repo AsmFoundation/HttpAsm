@@ -287,6 +287,33 @@ static void add_p384(void)
     }
 }
 
+/* add_p521: the tiers cases of P-521, as add_p384's: a shared secret (the variable base) and a
+ * signature (the fixed base, two inversions, HMAC-SHA512's DRBG), each at every tier: v1's mul and
+ * SSE2 scans against v3's mulx, adcx/adox and AVX2 scans (the v2 tier runs v1's code, v4 v3's). */
+static void add_p521(void)
+{
+    static const struct {
+        const char *name, *input;
+        bench_batch ours;
+    } cases[] = {
+        { "p521_ecdh", "shared secret", bench_p521_ecdh },
+        { "p521_sign", "ECDSA signature", bench_p521_sign },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = cases[i].name;
+        c.input = cases[i].input;
+        c.data = bench_p521_input();
+        c.length = 66 + 133 + 64 + 66;
+        c.octets = 0;
+        c.ours = cases[i].ours;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_ed25519: the tiers cases of Ed25519: a signature (SHA-512 twice and the fixed base by
  * table scans) and a verification (the decompression's exponentiation and the double scalar
  * multiplication), each at every tier: v1's mul on 51-bit limbs and SSE2 scans against v3's
@@ -402,6 +429,7 @@ void bench_suite_tiers(void)
     add_x25519();
     add_p256();
     add_p384();
+    add_p521();
     add_ed25519();
     add_rsa();
     for (size_t i = 0; i < sizeof field_value; i++)

@@ -1,11 +1,11 @@
 /*
  * stack.c - proves that HttpAsm's functions whose frames pass a page touch their stack at most
  * 4032 octets apart on the way down (crypto/mlkem.asm's MK_ENTER, httpasm_core.inc's
- * HA_STACK_DOWN in crypto/p384.asm and crypto/rsa.asm), so that a thread whose stack is nearly
+ * HA_STACK_DOWN in crypto/p384.asm, crypto/p521.asm and crypto/rsa.asm), so that a thread whose stack is nearly
  * spent faults on its guard page instead of the frame stepping over the guard into whatever is
  * mapped below it (a stack clash: the class of CVE-2017-1000364). Every function with a frame
  * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
- * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-384's and P-256's,
+ * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-521's, P-384's and P-256's,
  * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it) and Ed448's - at
  * v1 and at the best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
@@ -64,6 +64,7 @@ static uint8_t seed[64], msg[32], digest32[32], digest48[48], ed_message[130];
 static uint8_t mk_ek[3][1568], mk_dk[3][3168], mk_ct[3][1568];
 static uint8_t p256_key[32], p256_peer[65], p256_public[65], p256_signature[64];
 static uint8_t p384_key[48], p384_peer[97], p384_public[97], p384_signature[96];
+static uint8_t p521_key[66], p521_peer[133], p521_public[133], p521_signature[132], digest64[64];
 static uint8_t ed_seed[32], ed_public[32], ed_signature[64], x_scalar[32], x_point[32];
 static httpasm_ed25519_private_key ed_key;
 static uint8_t rsa_octets[7][256];
@@ -170,6 +171,10 @@ static void run_p384_public_key(void) { result = httpasm_p384_public_key(out, p3
 static void run_p384_ecdh(void) { result = httpasm_p384_ecdh(out, p384_key, p384_peer); out_n = 48; }
 static void run_p384_sign(void) { result = httpasm_p384_sign(out, p384_key, digest48, 48, NULL); out_n = 96; }
 static void run_p384_verify(void) { result = httpasm_p384_verify(p384_public, digest48, 48, p384_signature); out_n = 0; }
+static void run_p521_public_key(void) { result = httpasm_p521_public_key(out, p521_key); out_n = 133; }
+static void run_p521_ecdh(void) { result = httpasm_p521_ecdh(out, p521_key, p521_peer); out_n = 66; }
+static void run_p521_sign(void) { result = httpasm_p521_sign(out, p521_key, digest64, 64, NULL); out_n = 132; }
+static void run_p521_verify(void) { result = httpasm_p521_verify(p521_public, digest64, 64, p521_signature); out_n = 0; }
 static void run_ed_public_key(void) { httpasm_ed25519_public_key(out, ed_seed); out_n = 32; result = 0; }
 static void run_ed_key_init(void)
 {
@@ -257,6 +262,8 @@ static const stack_call calls[] = {
     { "p256 sign", run_p256_sign }, { "p256 verify", run_p256_verify },
     { "p384 public_key", run_p384_public_key }, { "p384 ecdh", run_p384_ecdh },
     { "p384 sign", run_p384_sign }, { "p384 verify", run_p384_verify },
+    { "p521 public_key", run_p521_public_key }, { "p521 ecdh", run_p521_ecdh },
+    { "p521 sign", run_p521_sign }, { "p521 verify", run_p521_verify },
     { "ed25519 public_key", run_ed_public_key }, { "ed25519 private_key_init", run_ed_key_init },
     { "ed25519 sign", run_ed_sign }, { "ed25519 verify", run_ed_verify },
     { "x25519 public_key", run_x25519_public_key }, { "x25519", run_x25519 },
@@ -534,6 +541,20 @@ static int prepare(void)
         || httpasm_p256_sign(p256_signature, p256_key, digest32, 32, NULL) != 0
         || httpasm_p384_public_key(p384_public, p384_key) != 0 || httpasm_p384_public_key(p384_peer, other) != 0
         || httpasm_p384_sign(p384_signature, p384_key, digest48, 48, NULL) != 0) {
+        fprintf(stderr, "stack: a curve refused its own key\n");
+        return 1;
+    }
+    uint8_t p521_other[66];
+    for (size_t k = 0; k < 66; k++) {
+        p521_key[k] = (uint8_t)(0x44 + k);
+        p521_other[k] = (uint8_t)(0x55 + 3 * k);
+    }
+    p521_key[0] = 1;                    /* below 2^521, and below n */
+    p521_other[0] = 0;
+    for (size_t k = 0; k < 64; k++)
+        digest64[k] = (uint8_t)(0x6F ^ (5 * k));
+    if (httpasm_p521_public_key(p521_public, p521_key) != 0 || httpasm_p521_public_key(p521_peer, p521_other) != 0
+        || httpasm_p521_sign(p521_signature, p521_key, digest64, 64, NULL) != 0) {
         fprintf(stderr, "stack: a curve refused its own key\n");
         return 1;
     }

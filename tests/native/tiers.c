@@ -2190,6 +2190,121 @@ static int p384_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_p521_*: by versions (crypto/p521.asm) ---------------------------------------------
+ * p384_tiers' check at P-521's sizes: v1 (mul, SSE2 table scans) against v3 (mulx with
+ * adcx/adox, AVX2 scans, with ADX); every tier must give v1's public key, shared secret,
+ * signature and verdicts, return values included. Each round puts another of the four inputs
+ * (the key, the peer's point, the digest, the entropy) against the guard page, the others below
+ * it: an over-read of any of them faults. Outputs are followed by canaries. */
+
+/* p521_tiers: `randoms` rounds: a private key (66 random octets with the first octet's seven
+ * high bits clear, every so often 1, n - 1, n - 18 (the variable base's doubling case: the
+ * header of crypto/p521.asm) or a refused one: 0, all ones), a peer's point (v1's public key of
+ * another random key, every so often with a flipped octet: refused), a digest of 0 to 100 random
+ * octets (bits2int shifts those of 66 octets and more), entropy every other round; then public
+ * key, ECDH, signature and its verification (and a tampered one's) at every tier. Returns 0 when
+ * every tier agrees with v1, 1 at the first difference. */
+static int p521_tiers(long randoms)
+{
+    static const uint8_t n_minus_1[66] = {
+        0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFA, 0x51, 0x86, 0x87, 0x83, 0xBF, 0x2F, 0x96, 0x6B, 0x7F, 0xCC, 0x01, 0x48, 0xF7, 0x09,
+        0xA5, 0xD0, 0x3B, 0xB5, 0xC9, 0xB8, 0x89, 0x9C, 0x47, 0xAE, 0xBB, 0x6F, 0xB7, 0x1E, 0x91, 0x38,
+        0x64, 0x08,
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t length = (size_t)(rng() % 101);
+        size_t sizes[4] = { 66, 133, length, 66 };          /* key, peer, digest, entropy */
+        uint8_t *spots[4];
+        uint8_t *end = page_end;
+        for (size_t k = 0; k < 4; k++) {                    /* input i % 4 ends at the guard page */
+            size_t which = ((size_t)i + k) % 4;
+            end -= sizes[which];
+            spots[which] = end;
+            end -= 16;
+        }
+        uint8_t *key = spots[0], *peer = spots[1], *digest = spots[2], *entropy = spots[3];
+        for (size_t k = 0; k < 66; k++) {
+            key[k] = (uint8_t)rng();
+            entropy[k] = (uint8_t)rng();
+        }
+        key[0] &= 1;
+        for (size_t k = 0; k < length; k++)
+            digest[k] = (uint8_t)rng();
+        if (i % 10 == 1)
+            memcpy(key, n_minus_1, 66);
+        if (i % 10 == 2) {
+            memset(key, 0, 66);
+            key[65] = 1;
+        }
+        if (i % 10 == 3) {
+            memcpy(key, n_minus_1, 66);
+            key[64] = 0x63;                                 /* n - 18: n ends in 64 09, n - 18 in 63 F7 */
+            key[65] = 0xF7;
+        }
+        if (i % 25 == 4)
+            memset(key, 0, 66);                             /* refused: 0 */
+        if (i % 25 == 5)
+            memset(key, 0xFF, 66);                          /* refused: past n */
+        uint8_t other[66];
+        for (size_t k = 0; k < 66; k++)
+            other[k] = (uint8_t)rng();
+        other[0] &= 1;
+        httpasm_cpu_limit(caps[0]);
+        if (httpasm_p521_public_key(peer, other) != 0)
+            memcpy(peer, (uint8_t[133]){ 4 }, 133);         /* (a refused draw: an invalid point) */
+        if (i % 9 == 6)
+            peer[1 + rng() % 132] ^= (uint8_t)(1 + rng() % 255);  /* off the curve, or past p */
+        const uint8_t *extra = i % 2 ? entropy : NULL;
+        uint8_t expected_public[133], expected_shared[66], expected_signature[132];
+        int expected[5] = { 0 };
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            uint8_t public_key[133 + 16], shared[66 + 16], signature[132 + 16];
+            memset(public_key, 0xC3, sizeof public_key);
+            memset(shared, 0xC3, sizeof shared);
+            memset(signature, 0xC3, sizeof signature);
+            int results[5];
+            results[0] = httpasm_p521_public_key(public_key, key);
+            results[1] = httpasm_p521_ecdh(shared, key, peer);
+            results[2] = httpasm_p521_sign(signature, key, digest, length, extra);
+            results[3] = results[0] == 0 ? httpasm_p521_verify(public_key, digest, length, signature) : -1;
+            uint8_t tampered[132];
+            memcpy(tampered, signature, 132);
+            tampered[rng() % 132] ^= (uint8_t)(1 << (rng() % 8));
+            results[4] = results[0] == 0 ? httpasm_p521_verify(public_key, digest, length, tampered) : -1;
+            for (size_t k = 0; k < 16; k++) {
+                if (public_key[133 + k] != 0xC3 || shared[66 + k] != 0xC3 || signature[132 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_p521_* at %s wrote past an output\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            if (results[3] != results[0] || results[4] != -1) {
+                fprintf(stderr, "httpasm_p521_verify at %s: own signature %d, tampered %d\n", cap_names[t], results[3], results[4]);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_public, public_key, 133);
+                memcpy(expected_shared, shared, 66);
+                memcpy(expected_signature, signature, 132);
+                memcpy(expected, results, sizeof expected);
+            } else if (memcmp(public_key, expected_public, 133) != 0 || memcmp(shared, expected_shared, 66) != 0
+                       || memcmp(signature, expected_signature, 132) != 0 || memcmp(results, expected, 3 * sizeof(int)) != 0) {
+                fprintf(stderr, "httpasm_p521_* at %s (features %#llx) differs from v1\n", cap_names[t], (unsigned long long)features);
+                dump("key", key, 66);
+                dump("peer", peer, 133);
+                dump("digest", digest, length);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_p521_*: %ld rounds of public key, ECDH, signature and verification at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_ed25519_*: by versions (crypto/ed25519.asm) ---------------------------------------
  * v1 (mul on 51-bit limbs, SSE2 table scans) against v3 (mulx with adcx/adox on 64-bit limbs,
  * AVX2 scans, with ADX). Every tier must give v1's public key, prepared key, signature and
@@ -3200,6 +3315,8 @@ int main(int argc, char **argv)
         failed = p256_tiers(randoms / 1000);
     if (!failed)
         failed = p384_tiers(randoms / 1000);
+    if (!failed)
+        failed = p521_tiers(randoms / 2000);
     if (!failed)
         failed = ed25519_tiers(randoms / 500);
     if (!failed)

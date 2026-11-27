@@ -191,6 +191,29 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: P-521 (secp521r1).** P-384's five cases at P-521 (bench_p521_*: a shared secret,
+a public key, a key share, a signature of a SHA-512 digest hedged with entropy, a verification),
+beside OpenSSL 3.0.13's EVP_PKEY at "P-521". Unlike its P-384, OpenSSL runs dedicated 64-bit
+code here (ecp_nistp521.c: Ubuntu builds it with enable-ec_nistp_64_gcc_128; `openssl speed`
+gives 3,089 P-521 ECDH a second against 1,352 at P-384). 41 rounds, the A/A controls 0.997x to 1.012x:
+
+| Case | v3 | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| shared secret | 262.7 us | 439.3 us | 356.9 us | 1.36x OpenSSL |
+| public key | 57.5 us | 85.3 us | 201.3 us | 3.50x OpenSSL |
+| key share | 325.6 us | 531.4 us | 873.3 us | 2.68x OpenSSL |
+| signature | 70.6 us | 99.7 us | 297.3 us | 4.21x OpenSSL |
+| verification | 290.3 us | 484.3 us | 570.0 us | 1.96x OpenSSL |
+
+The field's routines alone (scratchpad p521/h/bench.c, TSC ticks a call, this host's core at
+about the TSC's rate, measured by a chain of imuls): a product 117.5 at throughput and 153
+chained, a square 95 and 126 (v3); v1's product 204, its square the same (through the
+product); a sum 15, a difference 16, a rotation 10; the scalars' Montgomery product 377. The
+independent product is within about 5% of its port bound (81 mulx on port 1; about 190 adcx,
+adox and adc on ports 0 and 6), so the shared secret, about 530 doublings and 110 additions of these
+products, leads OpenSSL least; the fixed base's cases, a table read per window and no
+doubling, lead it most.
+
 **2026-11-27: HMAC-SHA512.** `rivals/hmac_sha512/*` (41 rounds, every A/A control within 1.6%)
 beside OpenSSL 3.0.13's `HMAC()` with `EVP_sha512()`, under a 64-octet key (RFC 6979's K at
 P-521, whose nonces it draws):
