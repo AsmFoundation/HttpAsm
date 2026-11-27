@@ -250,8 +250,8 @@ uint32_t httpasm_abi_version(void);
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
- * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx; 0 for any other
- * value. */
+ * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
+ * 13 httpasm_hmac_sha384_ctx; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -364,8 +364,9 @@ void httpasm_sha512(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA512
 void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA384_DIGEST]);
 
 /* ------------------------------------------------------------------------------------------
- * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256. Every
- * buffer that held key octets is wiped before a function returns, and finals wipe their context.
+ * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and
+ * SHA-384, TLS 1.3's two hashes. Every buffer that held key octets is wiped before a function
+ * returns, and finals wipe their context.
  * ------------------------------------------------------------------------------------------ */
 
 /* A running HMAC-SHA256 (224 octets): the inner and outer hashes, each past its key block. The
@@ -396,6 +397,36 @@ void httpasm_hkdf_sha256_extract(const uint8_t *salt, size_t salt_length, const 
 /* HKDF-Expand: okm[0..length) from the pseudorandom key and info (RFC 5869 2.3). Returns 0, or
  * -1 when length exceeds 255 * 32 = 8160 octets (nothing is written then). */
 int httpasm_hkdf_sha256_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
+                               size_t info_length, uint8_t *okm, size_t length);
+
+/* A running HMAC-SHA384 (416 octets): as httpasm_hmac_sha256_ctx, over SHA-384's hashes (the
+ * key schedule of TLS_AES_256_GCM_SHA384). */
+typedef struct httpasm_hmac_sha384_ctx {
+    httpasm_sha512_ctx inner;
+    httpasm_sha512_ctx outer;
+} httpasm_hmac_sha384_ctx;
+
+/* Starts an HMAC-SHA384 under key[0..n) (any length: a key longer than 128 octets is hashed
+ * first). */
+void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n);
+
+/* Feeds n octets of the message. */
+void httpasm_hmac_sha384_update(httpasm_hmac_sha384_ctx *h, const uint8_t *data, size_t n);
+
+/* Writes the 48-octet MAC and wipes h. Compare MACs with a constant-time comparison. */
+void httpasm_hmac_sha384_final(httpasm_hmac_sha384_ctx *h, uint8_t mac[HTTPASM_SHA384_DIGEST]);
+
+/* The MAC of data[0..n) under the key, at once. */
+void httpasm_hmac_sha384(const uint8_t *key, size_t key_length, const uint8_t *data, size_t n,
+                         uint8_t mac[HTTPASM_SHA384_DIGEST]);
+
+/* HKDF-Extract: prk = HMAC-SHA384(salt, ikm). An empty salt is 48 zeros (RFC 5869 2.2). */
+void httpasm_hkdf_sha384_extract(const uint8_t *salt, size_t salt_length, const uint8_t *ikm,
+                                 size_t ikm_length, uint8_t prk[HTTPASM_SHA384_DIGEST]);
+
+/* HKDF-Expand over SHA-384 (RFC 5869 2.3). Returns 0, or -1 when length exceeds
+ * 255 * 48 = 12240 octets (nothing is written then). */
+int httpasm_hkdf_sha384_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
                                size_t info_length, uint8_t *okm, size_t length);
 
 /* ------------------------------------------------------------------------------------------

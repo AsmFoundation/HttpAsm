@@ -253,6 +253,20 @@ internal struct HmacSha256Context
 }
 
 /// <summary>
+/// httpasm_hmac_sha384_ctx (httpasm.h): a running HMAC-SHA384, 416 octets: SHA-384's inner and
+/// outer hashes past their key blocks. Copying it after init MACs again under the same key.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct HmacSha384Context
+{
+    /// <summary>The inner hash, fed the message.</summary>
+    public Sha512Context Inner;
+
+    /// <summary>The outer hash, fed the inner digest at the end.</summary>
+    public Sha512Context Outer;
+}
+
+/// <summary>
 /// httpasm_sha512_ctx (httpasm.h): a running SHA-512 or SHA-384 hash, 208 octets. The two share
 /// the layout: only the start (<see cref="Native.Sha512Init"/> or <see cref="Native.Sha384Init"/>)
 /// and the final's length differ, so a context must be finished by the final of its own init.

@@ -191,6 +191,21 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: HMAC-SHA384 and HKDF-SHA384.** `rivals/hmac_sha384/*` (21 rounds, the host at
+9-14% other load, every A/A control within 1%) beside OpenSSL 3.0.13's `HMAC()` with
+`EVP_sha384()`, under a 48-octet key; `tiers/hkdf_sha384_expand/*`, a 48-octet output key from a
+48-octet secret with a 20-octet info:
+
+| Case | HttpAsm best | v1 | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| HMAC-SHA384, 64 octets | 941.7 ns | 1,107 ns | 2,251 ns | 2.39x OpenSSL |
+| HMAC-SHA384, 1 KiB | 2,607 ns | 3,191 ns | 3,909 ns | 1.50x OpenSSL |
+| HKDF-Expand, 48 octets | 985 ns | 1,148 ns | | 1.17x v1 |
+
+Four SHA-512 compressions make the 64-octet MAC (two for the key, one each for the inner and
+outer hash), about 235 ns each at v3. HMAC-SHA256 and HKDF-SHA256, now written by the same
+macro, measured as before (252.9 and 932.4 ns; HKDF 235.5 ns).
+
 **2026-11-27: SHA-512 and SHA-384.** `httpasm_sha512` and `httpasm_sha384` (one shot) on the
 hash cases' octets beside OpenSSL 3.0.13's `SHA512` and `SHA384` (its AVX2 + BMI2 code on this
 CPU), 21 rounds, the host at 2-14% other load, every A/A control within 1.5%:

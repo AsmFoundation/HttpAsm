@@ -59,7 +59,9 @@
     X(httpasm_hmac_sha256)          \
     X(httpasm_hkdf_sha256_expand)   \
     X(httpasm_sha512)               \
-    X(httpasm_sha384)
+    X(httpasm_sha384)               \
+    X(httpasm_hmac_sha384)          \
+    X(httpasm_hkdf_sha384_expand)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -206,6 +208,11 @@ void bench_hmac_sha256(const bench_build *b, const bench_case *c, long calls);
  * from a fixed 32-octet PRK, `calls` times: TLS 1.3's key schedule is made of such calls
  * (suite_rivals.c). */
 void bench_hkdf_expand(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
+ * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */
+void bench_hmac_sha384(const bench_build *b, const bench_case *c, long calls);
+void bench_hkdf384_expand(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hpack_block: the HPACK block of a browser request's 18 fields, Huffman-coded and indexing
  * nothing, built by the first build's encoder on the first call and shared by every suite

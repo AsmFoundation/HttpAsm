@@ -26,8 +26,8 @@ httpasm_abi_version:
 ;   a C program's header) can check its layout matches: 1 httpasm_field, 2 httpasm_request,
 ;   3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head, 6 httpasm_h1_chunked,
 ;   7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
-;   10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx; 0 for anything
-;   else.
+;   10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
+;   13 httpasm_hmac_sha384_ctx; 0 for anything else.
 ;   In: edi. Out: eax. Clobbers rcx and the flags.
 ; -----------------------------------------------------------------------------
 section .rodata
@@ -46,6 +46,7 @@ struct_sizes:
     dd httpasm_sha256_ctx_size
     dd httpasm_hmac_sha256_ctx_size
     dd httpasm_sha512_ctx_size
+    dd httpasm_hmac_sha384_ctx_size
 STRUCT_SIZES equ ($ - struct_sizes) / 4
 
 section .text

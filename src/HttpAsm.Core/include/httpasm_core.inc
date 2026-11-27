@@ -83,6 +83,10 @@ extern httpasm_sha256_final
 extern httpasm_sha256
 extern ha_sha512_blocks     ; SHA-512's (and SHA-384's) compression: state rdi (8 qwords), rdx
                             ; 128-octet blocks at rsi; keeps rdi, rbx, rbp, r12-r15 (crypto/sha512.asm)
+extern httpasm_sha384_init  ; the C ABI's SHA-384 (crypto/sha512.asm), for the core's HMAC and
+extern httpasm_sha512_update ; HKDF over SHA-384 (crypto/hmac.asm); the update is SHA-512's, which
+extern httpasm_sha384_final ; both hashes share
+extern httpasm_sha384
 extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
                             ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 

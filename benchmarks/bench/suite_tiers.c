@@ -132,6 +132,25 @@ static void add_hkdf_expand(void)
     bench_add(&c);
 }
 
+/* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
+ * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
+ * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
+ * tier: v1's scalar compression against v3's. */
+static void add_hkdf384_expand(void)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "hkdf_sha384_expand";
+    c.input = "48 octets, 20-octet info";
+    c.data = bench_sha_input();
+    c.length = 20;
+    c.octets = 48;
+    c.ours = bench_hkdf384_expand;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* add_hpack_decode: the tiers case of httpasm_hpack_decode on the rivals suite's block (bench.h):
  * the Huffman decoder's versions (v1's automaton, v2's table decoder) each against the tier below.
  * Left out, with a word on stderr, when the block cannot be made. */
@@ -167,6 +186,7 @@ void bench_suite_tiers(void)
     add_sha256();
     add_sha512();
     add_hkdf_expand();
+    add_hkdf384_expand();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

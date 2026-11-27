@@ -204,11 +204,15 @@ public sealed unsafe class HmacTests
         Assert.True(untouched.AsSpan().IndexOfAnyExcept((byte)0xEE) < 0, "Expand wrote past its refusal");
     }
 
-    /// <summary>An InlineData octet string: "XX*N" (the octet XX, N times), "hex:" and hex, or plain text or hex.</summary>
+    /// <summary>
+    /// An InlineData octet string: "XX*N" (the octet XX, N times), "hex:" and hex, or plain text
+    /// or hex. Shared with <see cref="HmacSha384Tests"/>, whose RFC 4231 cases are written alike.
+    /// </summary>
     /// <param name="spec">The string.</param>
     /// <param name="text">Whether a plain string is text (ASCII) rather than hex.</param>
     /// <returns>The octets.</returns>
-    private static byte[] Octets(string spec, bool text)
+    /// <exception cref="FormatException">A hex string (or an "XX*N" count) is malformed.</exception>
+    internal static byte[] Octets(string spec, bool text)
     {
         int star = spec.IndexOf('*');
         if (star == 2 && Uri.IsHexDigit(spec[0]) && Uri.IsHexDigit(spec[1]))

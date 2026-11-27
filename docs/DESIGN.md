@@ -864,6 +864,18 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      SHA512 extensions (Arrow Lake and later) wait for a CPU that can measure them. Next for
      HMAC: the key setup's two compressions (K0 ^ ipad, K0 ^ opad) are independent, so one
      interleaved pass could take them at the cost of about one.
+   - **HMAC-SHA384 and HKDF-SHA384** (2026-11-27), TLS_AES_256_GCM_SHA384's key schedule:
+     `crypto/hmac.asm` now writes each hash's six functions from one macro (names, block and
+     digest sizes, the context's size as literal move counts, so the coverage build's
+     preprocessor can expand it); the SHA-256 instance is instruction for instruction the code
+     it replaced (objdump compared). `httpasm_hmac_sha384_ctx` is two `httpasm_sha512_ctx`
+     (416 octets); HKDF-Expand refuses past 255 * 48 = 12,240 octets. Proven by RFC 4231's
+     seven SHA-384 examples, NIST's 300 [L=48] MACs (keys of 50 to 145 octets around the
+     128-octet block, tags of 24 to 48), Wycheproof's 174 HMAC and 83 HKDF tests (pinned at
+     65ca494 beside SHA-256's), and .NET's HMACSHA384 and HKDF to the limit, at every tier.
+     Against OpenSSL 3.0.13's `HMAC()` with `EVP_sha384()`: 2.39x on 64 octets (941.7 against
+     2,251 ns: four SHA-512 compressions), 1.50x on 1 KiB; HKDF-Expand of 48 octets from a
+     48-octet secret 985 ns, 1.17x v1.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

@@ -112,5 +112,7 @@ wycheproof=https://raw.githubusercontent.com/C2SP/wycheproof/65ca494727a52944c20
 mkdir -p "$tools/wycheproof"
 fetch wycheproof/hmac_sha256_test.json "$wycheproof/hmac_sha256_test.json" 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
 fetch wycheproof/hkdf_sha256_test.json "$wycheproof/hkdf_sha256_test.json" bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
+fetch wycheproof/hmac_sha384_test.json "$wycheproof/hmac_sha384_test.json" 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
+fetch wycheproof/hkdf_sha384_test.json "$wycheproof/hkdf_sha384_test.json" 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
 
 echo "$tools"
