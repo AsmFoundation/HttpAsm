@@ -7,9 +7,18 @@ namespace HttpAsm.Tests;
 /// <param name="output">Receives the coverage report.</param>
 public sealed class RegistryTests(ITestOutputHelper output)
 {
-    /// <summary>The documents specs/documents.json pins; the registry must hold rows of each.</summary>
+    /// <summary>
+    /// The documents specs/documents.json pins; the registry must hold rows of each. M2's are
+    /// TLS 1.3 (RFC 9846, which obsoleted RFC 8446 in July 2026, and the extensions M2 builds),
+    /// certificate compression with its codecs, and the cryptographic RFCs. The codecs' formats
+    /// (RFC 1950, 1951, 7932, 8878) are written without BCP 14 keywords or grammar blocks, so
+    /// they give no rows and are left out here: their proof is the formats' own test data, as
+    /// NIST's standards' is their vectors (docs/DESIGN.md section 5).
+    /// </summary>
     private static readonly string[] Documents =
-        ["RFC9110", "RFC9111", "RFC9112", "RFC9113", "RFC7541", "RFC8446", "RFC9000", "RFC9001", "RFC9002", "RFC9114", "RFC9204"];
+        ["RFC9110", "RFC9111", "RFC9112", "RFC9113", "RFC7541", "RFC9846", "RFC10024", "RFC9963", "RFC8449", "RFC7301", "RFC6066",
+         "RFC7919", "RFC9849", "RFC9180", "RFC9149", "RFC9850", "RFC9345", "RFC8879", "RFC7748", "RFC8032", "RFC8439", "RFC5869",
+         "RFC8017", "RFC9000", "RFC9001", "RFC9002", "RFC9114", "RFC9204"];
 
     /// <summary>A typo in a [Requirement] would claim a proof of nothing: every id must be a row.</summary>
     [Fact]

@@ -202,9 +202,15 @@ stays only if the difference is within noise.
 
 - **`specs/documents.json`** pins the official files by SHA-256: the prepped RFCXML v3 for RFCs
   from 2019 on, the text for older ones.
-  - Today: RFC 9110, 9111, 9112, 9113, 7541, 6585, 8446, 9000, 9001, 9002, 9114 and 9204.
-  - Each milestone adds its documents (section 7 lists M2's and M3's). M2 starts by replacing
-    RFC 8446 with RFC 9846, which obsoleted it in July 2026.
+  - Today: RFC 9110, 9111, 9112, 9113, 7541, 6585, 9000, 9001, 9002, 9114 and 9204 (M1, M4,
+    open), and M2's 22 (2026-11-27): TLS 1.3 itself, RFC 9846, in place of RFC 8446, which it
+    obsoleted in July 2026; RFC 10024, 9963, 8449, 7301, 6066, 7919, 9849, 9180, 9149, 9850 and
+    9345; certificate compression, RFC 8879, with its codecs' formats, RFC 1950, 1951, 7932 and
+    8878; and RFC 7748, 8032, 8439, 5869 and 8017.
+  - Each milestone adds its documents (section 7 lists M3's).
+  - The codecs' formats hold no BCP 14 keyword and no grammar block, so they give no rows:
+    like NIST's standards, they are proven by test data, their own and the reference
+    implementations'.
   - NIST's standards and the ITU-T's X.680 and X.690 are published as PDF, not RFCXML. Their
     requirements enter as rows per algorithm, parameter set and direction, each proven by the
     official test vectors.
@@ -218,8 +224,9 @@ stays only if the difference is within noise.
     HTML anchors with the same name. Several keywords in one paragraph get `#1`, `#2`.
   - Text RFCs, which have no such numbers, get `RFC7541-5.1-p3` (the section's third paragraph).
   - Grammar blocks are rows with the keyword `ABNF`.
-- **The registry today:** 2,542 BCP 14 requirements and 102 ABNF blocks in the 11 documents.
-  The keyword boilerplate is excluded.
+- **The registry today:** 3,089 BCP 14 requirements and 102 ABNF blocks in 29 documents (M2's
+  documents hold 1,015 of the rows; RFC 9846 has 500, RFC 8446 had 480). The keyword
+  boilerplate is excluded.
 - **Tests name their rows:** `[Requirement("RFC9110-5.5-5#1")]`. The test project:
   - fails on a name that is not a row;
   - reports, per document, how many rows the tests prove.
