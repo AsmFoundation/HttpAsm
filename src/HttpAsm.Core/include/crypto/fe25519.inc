@@ -1,7 +1,8 @@
 ; =============================================================================
 ; include/crypto/fe25519.inc - arithmetic in GF(2^255 - 19), the field of Curve25519 and
 ; edwards25519 (RFC 7748, RFC 8032), as macros the curve code expands in place: X25519's ladder
-; now, Ed25519's point formulas next. Two representations, one per version:
+; (crypto/x25519.asm) and Ed25519's point formulas (crypto/ed25519.asm, which also makes X25519's
+; public keys). Two representations, one per version:
 ;
 ;   FE64 (v3: BMI2 and ADX): four 64-bit limbs, a value below 2^256 kept reduced modulo
 ;     2^256 - 38 = 2p only (2^256 = 38 modulo p), fully reduced once, at the end. Products by

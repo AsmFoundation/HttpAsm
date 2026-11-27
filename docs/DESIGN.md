@@ -979,7 +979,7 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      times 5 as one lea (3% slower Poly1305). Kept: a short record's driver wipes only the frame
      octets its path wrote (11% faster on 64 octets at v3).
    - **X25519** (2026-11-27), `crypto/x25519.asm` over `include/crypto/fe25519.inc` (the field,
-     for Ed25519 next): `httpasm_x25519` (the shared secret; -1, with the zeros written, when
+     Ed25519's too): `httpasm_x25519` (the shared secret; -1, with the zeros written, when
      the result is all zeros, a small-order point that TLS 1.3 must refuse, RFC 9846 7.4.2)
      and `httpasm_x25519_public_key` (the scalar times u = 9). One Montgomery ladder, RFC 7748
      5's step for step (scalar clamped, u's bit 255 masked and non-canonical u taken modulo p,
