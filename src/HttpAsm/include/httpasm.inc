@@ -112,6 +112,15 @@ extern httpasm_ed25519_public_key   ; void (public_key[32], private_key[32]): A 
 extern httpasm_ed25519_private_key_init ; void (httpasm_ed25519_private_key *key, private_key[32]): a mod L, prefix, A
 extern httpasm_ed25519_sign         ; void (signature[64], const httpasm_ed25519_private_key *key, message, length)
 extern httpasm_ed25519_verify       ; int (public_key[32], message, length, signature[64]): 0 valid, -1 not
+extern httpasm_mlkem512_keypair     ; void (ek[800], dk[1632], seed[64])
+extern httpasm_mlkem512_encaps      ; int (c[768], shared[32], ek[800], m[32]): 0, -1 (ek's modulus check; zeros)
+extern httpasm_mlkem512_decaps      ; int (shared[32], dk[1632], c[768]): 0, -1 (dk's hash check; zeros)
+extern httpasm_mlkem768_keypair     ; void (ek[1184], dk[2400], seed[64])
+extern httpasm_mlkem768_encaps      ; int (c[1088], shared[32], ek[1184], m[32])
+extern httpasm_mlkem768_decaps      ; int (shared[32], dk[2400], c[1088])
+extern httpasm_mlkem1024_keypair    ; void (ek[1568], dk[3168], seed[64])
+extern httpasm_mlkem1024_encaps     ; int (c[1568], shared[32], ek[1568], m[32])
+extern httpasm_mlkem1024_decaps     ; int (shared[32], dk[3168], c[1568])
 extern httpasm_rsa_public_key_init  ; int (httpasm_rsa_public_key *key, n, n_length, e, e_length): 0, -1 refused
 extern httpasm_rsa_verify_pkcs1     ; int (key, hash, digest, signature, signature_length): 0 valid, -1 not
 extern httpasm_rsa_verify_pss       ; int (key, hash, digest, salt_length, signature, signature_length): 0 valid, -1 not

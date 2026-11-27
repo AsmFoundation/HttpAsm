@@ -84,6 +84,12 @@
     X(httpasm_ed25519_private_key_init) \
     X(httpasm_ed25519_sign)         \
     X(httpasm_ed25519_verify)       \
+    X(httpasm_mlkem768_keypair)     \
+    X(httpasm_mlkem768_encaps)      \
+    X(httpasm_mlkem768_decaps)      \
+    X(httpasm_mlkem1024_keypair)    \
+    X(httpasm_mlkem1024_encaps)     \
+    X(httpasm_mlkem1024_decaps)     \
     X(httpasm_rsa_public_key_init)  \
     X(httpasm_rsa_verify_pkcs1)     \
     X(httpasm_rsa_private_key_init) \
@@ -334,6 +340,24 @@ void bench_ed25519_sign(const bench_build *b, const bench_case *c, long calls);
 /* bench_ed25519_verify: httpasm_ed25519_verify of a valid signature (made before the loop): a
  * TLS client's work per Ed25519 signature, CertificateVerify's or a certificate's. */
 void bench_ed25519_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* The ML-KEM cases (suite_rivals.c): a case's data is 96 fixed octets (the seed d || z, then m)
+ * and its length the parameter set (768 or 1024). bench_mlkem_keypair: the key pair from the seed
+ * (a TLS 1.3 client's key share); bench_mlkem_encaps: the encapsulation to that key pair's ek (a
+ * server's); bench_mlkem_decaps: the decapsulation of that ciphertext (the client's again); the
+ * keys and the ciphertext made before the loop. */
+void bench_mlkem_keypair(const bench_build *b, const bench_case *c, long calls);
+void bench_mlkem_encaps(const bench_build *b, const bench_case *c, long calls);
+void bench_mlkem_decaps(const bench_build *b, const bench_case *c, long calls);
+
+/* mlkem-native 2.1.0's deterministic API, wrapped by rival_mlkem.c (compiled into the rivals'
+ * objects by bench.sh). Each returns 0 on success. */
+int rival_mlkem768_keypair(uint8_t *pk, uint8_t *sk, const uint8_t *seed);
+int rival_mlkem1024_keypair(uint8_t *pk, uint8_t *sk, const uint8_t *seed);
+int rival_mlkem768_encaps(uint8_t *ct, uint8_t *ss, const uint8_t *pk, const uint8_t *m);
+int rival_mlkem1024_encaps(uint8_t *ct, uint8_t *ss, const uint8_t *pk, const uint8_t *m);
+int rival_mlkem768_decaps(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
+int rival_mlkem1024_decaps(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 
 /* An RSA verification's input (bench_rsa_input, suite_rivals.c): a public key (n of `octets`
  * octets, e = 65537) with a SHA-256 digest and its valid RSASSA-PKCS1-v1_5 signature, from

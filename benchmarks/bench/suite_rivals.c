@@ -1573,6 +1573,130 @@ static bench_rival ed25519_public_key_rivals[] = { { openssl_name, openssl_ed255
 static bench_rival ed25519_sign_rivals[] = { { openssl_name, openssl_ed25519_sign } };
 static bench_rival ed25519_verify_rivals[] = { { openssl_name, openssl_ed25519_verify } };
 
+/* ---- ML-KEM: a key pair, an encapsulation, a decapsulation, at 768 and 1024. OpenSSL 3.0.13 has
+ * no ML-KEM (3.5 brought it): the rival is mlkem-native 2.1.0 (rival_mlkem.c), its AVX2 backend. */
+
+/* The cases' 96 octets: the seed d || z, then m (fixed, made on first use: single-threaded). */
+static uint8_t mlkem_input[96];
+static int mlkem_input_made;
+
+/* bench_mlkem_input: the cases' data (see bench.h). */
+static const uint8_t *bench_mlkem_input(void)
+{
+    if (!mlkem_input_made) {
+        for (size_t i = 0; i < sizeof mlkem_input; i++)
+            mlkem_input[i] = (uint8_t)(0xA7 ^ (53 * i));
+        mlkem_input_made = 1;
+    }
+    return mlkem_input;
+}
+
+/* The keys and ciphertexts the loops reuse (the largest set's sizes; the bench is single-threaded). */
+static uint8_t mlkem_ek[1568], mlkem_dk[3168], mlkem_ct[1568], mlkem_ss[32];
+
+/* mlkem_ours: one of HttpAsm's three functions of a case's set (op 0 key pair, 1 encapsulation,
+ * 2 decapsulation) on the shared buffers. */
+static void mlkem_ours(const bench_build *b, size_t set, int op, const uint8_t *data)
+{
+    if (op == 0) {
+        if (set == 768)
+            b->api.httpasm_mlkem768_keypair(mlkem_ek, mlkem_dk, data);
+        else
+            b->api.httpasm_mlkem1024_keypair(mlkem_ek, mlkem_dk, data);
+    } else if (op == 1) {
+        if (set == 768)
+            b->api.httpasm_mlkem768_encaps(mlkem_ct, mlkem_ss, mlkem_ek, data + 64);
+        else
+            b->api.httpasm_mlkem1024_encaps(mlkem_ct, mlkem_ss, mlkem_ek, data + 64);
+    } else {
+        if (set == 768)
+            b->api.httpasm_mlkem768_decaps(mlkem_ss, mlkem_dk, mlkem_ct);
+        else
+            b->api.httpasm_mlkem1024_decaps(mlkem_ss, mlkem_dk, mlkem_ct);
+    }
+}
+
+/* bench_mlkem_keypair, bench_mlkem_encaps, bench_mlkem_decaps: see bench.h (each prepares what its
+ * operation takes with HttpAsm's own functions, then times the operation alone). */
+void bench_mlkem_keypair(const bench_build *b, const bench_case *c, long calls)
+{
+    for (long i = 0; i < calls; i++)
+        mlkem_ours(b, c->length, 0, c->data);
+    bench_sink = mlkem_ek[0];
+}
+
+void bench_mlkem_encaps(const bench_build *b, const bench_case *c, long calls)
+{
+    mlkem_ours(b, c->length, 0, c->data);
+    for (long i = 0; i < calls; i++)
+        mlkem_ours(b, c->length, 1, c->data);
+    bench_sink = mlkem_ss[0];
+}
+
+void bench_mlkem_decaps(const bench_build *b, const bench_case *c, long calls)
+{
+    mlkem_ours(b, c->length, 0, c->data);
+    mlkem_ours(b, c->length, 1, c->data);
+    for (long i = 0; i < calls; i++)
+        mlkem_ours(b, c->length, 2, c->data);
+    bench_sink = mlkem_ss[0];
+}
+
+/* mlkem_rival: mlkem-native's function of the same operation on the same buffers. */
+static void mlkem_rival(size_t set, int op, const uint8_t *data)
+{
+    if (op == 0) {
+        if (set == 768)
+            rival_mlkem768_keypair(mlkem_ek, mlkem_dk, data);
+        else
+            rival_mlkem1024_keypair(mlkem_ek, mlkem_dk, data);
+    } else if (op == 1) {
+        if (set == 768)
+            rival_mlkem768_encaps(mlkem_ct, mlkem_ss, mlkem_ek, data + 64);
+        else
+            rival_mlkem1024_encaps(mlkem_ct, mlkem_ss, mlkem_ek, data + 64);
+    } else {
+        if (set == 768)
+            rival_mlkem768_decaps(mlkem_ss, mlkem_ct, mlkem_dk);
+        else
+            rival_mlkem1024_decaps(mlkem_ss, mlkem_ct, mlkem_dk);
+    }
+}
+
+/* rival_mlkem_keypair, rival_mlkem_encaps, rival_mlkem_decaps: the cases' mlkem-native contenders,
+ * prepared and timed as ours are. */
+static void rival_mlkem_keypair(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    for (long i = 0; i < calls; i++)
+        mlkem_rival(c->length, 0, c->data);
+    bench_sink = mlkem_ek[0];
+}
+
+static void rival_mlkem_encaps(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    mlkem_rival(c->length, 0, c->data);
+    for (long i = 0; i < calls; i++)
+        mlkem_rival(c->length, 1, c->data);
+    bench_sink = mlkem_ss[0];
+}
+
+static void rival_mlkem_decaps(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    mlkem_rival(c->length, 0, c->data);
+    mlkem_rival(c->length, 1, c->data);
+    for (long i = 0; i < calls; i++)
+        mlkem_rival(c->length, 2, c->data);
+    bench_sink = mlkem_ss[0];
+}
+
+static const char mlkem_native_name[] = "mlkem-native 2.1.0";
+static bench_rival mlkem_keypair_rivals[] = { { mlkem_native_name, rival_mlkem_keypair } };
+static bench_rival mlkem_encaps_rivals[] = { { mlkem_native_name, rival_mlkem_encaps } };
+static bench_rival mlkem_decaps_rivals[] = { { mlkem_native_name, rival_mlkem_decaps } };
+
 /* ---- RSA verification ------------------------------------------------------------------------
  * The vectors: a public key, a SHA-256 digest and its valid PKCS#1 v1.5 signature at each size,
  * Project Wycheproof's rsa_signature_{2048,3072,4096}_sha256_test.json, each one's first valid
@@ -2505,6 +2629,34 @@ void bench_suite_rivals(void)
         c.tiers = BENCH_TIERS_BEST_V1;
         c.rivals = p256 ? p384_cases[i].rivals : NULL;  /* (P-256's loading brought the functions) */
         c.rival_count = p256 ? 1 : 0;
+        bench_add(&c);
+    }
+    static const struct {
+        const char *name, *input;
+        size_t set;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } mlkem_cases[] = {
+        { "mlkem768_keypair", "key pair from a seed", 768, bench_mlkem_keypair, mlkem_keypair_rivals },
+        { "mlkem768_encaps", "encapsulation", 768, bench_mlkem_encaps, mlkem_encaps_rivals },
+        { "mlkem768_decaps", "decapsulation", 768, bench_mlkem_decaps, mlkem_decaps_rivals },
+        { "mlkem1024_keypair", "key pair from a seed", 1024, bench_mlkem_keypair, mlkem_keypair_rivals },
+        { "mlkem1024_encaps", "encapsulation", 1024, bench_mlkem_encaps, mlkem_encaps_rivals },
+        { "mlkem1024_decaps", "decapsulation", 1024, bench_mlkem_decaps, mlkem_decaps_rivals },
+    };
+    for (size_t i = 0; i < sizeof mlkem_cases / sizeof mlkem_cases[0]; i++) {
+        bench_case c;                       /* by hand: one operation a call; the length is the set */
+        memset(&c, 0, sizeof c);
+        c.suite = "rivals";
+        c.name = mlkem_cases[i].name;
+        c.input = mlkem_cases[i].input;
+        c.data = bench_mlkem_input();
+        c.length = mlkem_cases[i].set;
+        c.octets = 0;
+        c.ours = mlkem_cases[i].ours;
+        c.tiers = BENCH_TIERS_BEST_V1;
+        c.rivals = mlkem_cases[i].rivals;
+        c.rival_count = 1;
         bench_add(&c);
     }
     int ed25519 = openssl_load_ed25519() == 0;

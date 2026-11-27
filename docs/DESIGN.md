@@ -1333,6 +1333,42 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      KiB; SHAKE128 1.47x, 1.12x, 1.08x; v3 1.23-1.25x v1. The permutation takes about 774 cycles
      (32 a round, against about 26 for its 130 ALU operations on five ports). Next: four states
      at once in AVX2 lanes for ML-KEM's independent SHAKE128 streams.
+   - **ML-KEM** (2026-11-27, first step: v1), `crypto/mlkem.asm`: ML-KEM-512, -768 and -1024
+     (FIPS 203), for RFC 10024's X25519MLKEM768, SecP256r1MLKEM768 and SecP384r1MLKEM1024 and the
+     pure ML-KEM groups: `httpasm_mlkem{512,768,1024}_keypair` (from a 64-octet seed d || z),
+     `_encaps` (with the caller's 32-octet m; -1 and zeroed outputs when ek fails 7.2's modulus
+     check, which TLS answers with illegal_parameter) and `_decaps` (-1 and a zeroed key when dk
+     fails 7.3's hash check; a modified ciphertext gives J(z || c), implicit rejection). Every
+     function deterministic: the caller draws the randomness, which makes them testable against
+     fixed vectors. *v1, scalar*, the library's own reference: 16-bit coefficients modulo q = 3329
+     with Montgomery products (R = 2^16) and Barrett reduction as in the CRYSTALS-Kyber reference
+     code's design, written from FIPS 203's algorithms: the NTT and its inverse in FIPS 203's
+     coefficient order (the inverse ends times 1441 = R^2 / 128, undoing the R^-1 the base-case
+     products leave), base-case products summed over a vector in one pass, SampleNTT from
+     SHAKE128 (three blocks, then one at a time), SamplePolyCBD for eta 2 and 3 by bit masks,
+     Compress_d as ((2^d x + 1664) * 10321340) >> 35 (an exact division by q for every x below q
+     at d = 1, 4, 5, 10, 11: checked exhaustively), Decompress_d as (q y + 2^(d - 1)) >> d. The
+     zetas are computed by the preprocessor (17^BitRev7(i) R mod q); the hashes are
+     `crypto/sha3.asm`'s; the matrix is sampled a row (key generation) or a column (encryption)
+     at a time, never stored whole; constant time in every secret (the re-encryption compare by
+     OR of XORs, K' or J(z || c) by mask); up to about 10 KiB of stack, wiped. *Proven by*
+     Wycheproof's twelve ML-KEM files (65ca494, pinned): key generation from seeds (100 a set,
+     FIPS 203's), encapsulation (133 valid a set exactly; 108, 112 and 116 invalid keys refused
+     with zeros: FIPS 203's and CCTV's modulus overflows), decapsulation from seeds (160 to 162 a
+     set: implicit rejection, CCTV's strcmp case, malleable ciphertexts) and from expanded keys
+     (aws-lc's and reenc's: hash-check refusals); a model of FIPS 203 in C# (plain integers,
+     .NET's SHA-3 and SHAKE) on 40 random seeds a set, each ciphertext also with a bit flipped and
+     replaced by noise; the modulus check at every kind of place (q, q + 1, 4095 refused, q - 1
+     accepted, both halves of a pair, first, middle and last polynomial); the hash check on the
+     ek part and the stored hash; canaries after every output; `tests/native/tiers` (1,600 rounds,
+     each input against the guard page in turn). A scratch Python reference of FIPS 203
+     (scratchpad mlkem/mlkem_ref.py) passed all 2,268 Wycheproof cases first. *Measured* against
+     mlkem-native 2.1.0 (pq-code-package's, its AVX2 backend and four-way Keccak; OpenSSL 3.0.13
+     has no ML-KEM), 41 rounds: ML-KEM-768 key pair 31.3 us against 10.8, encapsulation 41.1
+     against 12.3, decapsulation 56.8 against 16.3; ML-KEM-1024 48.3 / 60.6 / 81.1 against 15.6 /
+     17.7 / 23.6: about 3x slower, as scalar against AVX2. Next: v3 in AVX2 (the NTT, its inverse
+     and the base-case products 16 coefficients a register, the sampling by shuffles, four Keccak
+     states at once for the matrix and the PRFs).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

@@ -303,6 +303,21 @@ struc httpasm_ed25519_private_key
     .public:            resb 32     ; A = a B, encoded (RFC 8032 5.1.2)
 endstruc
 
+; ML-KEM (FIPS 203; crypto/mlkem.asm): the keys and ciphertexts of each parameter set, the 64-octet
+; key generation seed (d || z), the 32-octet encapsulation message and shared secret.
+HTTPASM_MLKEM_SEED              equ 64
+HTTPASM_MLKEM_MESSAGE           equ 32
+HTTPASM_MLKEM_SHARED            equ 32
+HTTPASM_MLKEM512_EK             equ 800     ; encapsulation key: ByteEncode_12(t-hat) || rho
+HTTPASM_MLKEM512_DK             equ 1632    ; decapsulation key: s-hat || ek || H(ek) || z
+HTTPASM_MLKEM512_CT             equ 768     ; ciphertext: c1 || c2
+HTTPASM_MLKEM768_EK             equ 1184
+HTTPASM_MLKEM768_DK             equ 2400
+HTTPASM_MLKEM768_CT             equ 1088
+HTTPASM_MLKEM1024_EK            equ 1568
+HTTPASM_MLKEM1024_DK            equ 3168
+HTTPASM_MLKEM1024_CT            equ 1568
+
 ; Hash identifiers (the RSA signatures name their hash with these; SHA-1 and SHA-224 only where
 ; the caller brings the digest: PKCS#1 v1.5 verification of legacy certificates).
 HTTPASM_HASH_SHA1               equ 1

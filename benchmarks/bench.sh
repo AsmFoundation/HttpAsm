@@ -139,6 +139,16 @@ on_linux "b=$build; r='$repo'; t=\$r/tests/.tools; lib=\$r/src/HttpAsm/bin/$conf
     done
     touch \$b/rivals/done
   fi
+  mk=\$b/mlkem-native
+  [ -d \$mk/mlkem ] || { mkdir -p \$mk && tar -xzf \$t/mlkem-native-2.1.0.tar.gz -C \$mk --strip-components=1; } || exit 1
+  ex=\$mk/examples/monolithic_build_multilevel_native
+  if [ ! \$b/rivals/mlkem.done -nt \$r/benchmarks/bench/rival_mlkem.c ]; then
+    cc -O3 -march=native -w -DMLK_FORCE_X86_64 -I \$ex -I \$ex/mlkem_native -c \$r/benchmarks/bench/rival_mlkem.c \
+      -o \$b/rivals/mlkem_native.o &&
+    cc -O3 -march=native -w -DMLK_FORCE_X86_64 -DMLK_CONFIG_MULTILEVEL_WITH_SHARED -I \$ex -I \$ex/mlkem_native \
+      -c \$ex/mlkem_native/mlkem_native_asm.S -o \$b/rivals/mlkem_native_asm.o || exit 1
+    touch \$b/rivals/mlkem.done
+  fi
   cc -O2 -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I \$r/src/HttpAsm/include -I \$t/llhttp-9.4.4 \
     -I \$t/picohttpparser-dd573d8 -I \$ng/includes \$r/benchmarks/bench/bench.c \$r/benchmarks/bench/suite_*.c \
     \$b/rivals/*.o -ldl -Wl,-rpath,\$lib -o \$b/bench || exit 1

@@ -667,6 +667,60 @@ int httpasm_ed25519_verify(const uint8_t public_key[HTTPASM_ED25519_KEY], const 
                            size_t length, const uint8_t signature[HTTPASM_ED25519_SIGNATURE]);
 
 /* ------------------------------------------------------------------------------------------
+ * ML-KEM (FIPS 203): the post-quantum key encapsulation of TLS 1.3's hybrids (RFC 10024's
+ * X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024) and of the pure ML-KEM groups. Every
+ * function is deterministic: the caller draws the randomness (httpasm_random), which also makes
+ * them testable against fixed vectors. Constant time in every secret; the decapsulation's implicit
+ * rejection (a modified ciphertext gives an unrelated key, not an error) included.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_MLKEM_SEED     64       /* octets of a key generation seed: d || z (64 random) */
+#define HTTPASM_MLKEM_MESSAGE  32       /* octets of an encapsulation's m (32 random) */
+#define HTTPASM_MLKEM_SHARED   32       /* octets of the shared secret */
+#define HTTPASM_MLKEM512_EK    800      /* the encapsulation (public) key */
+#define HTTPASM_MLKEM512_DK    1632     /* the decapsulation (private) key */
+#define HTTPASM_MLKEM512_CT    768      /* the ciphertext */
+#define HTTPASM_MLKEM768_EK    1184
+#define HTTPASM_MLKEM768_DK    2400
+#define HTTPASM_MLKEM768_CT    1088
+#define HTTPASM_MLKEM1024_EK   1568
+#define HTTPASM_MLKEM1024_DK   3168
+#define HTTPASM_MLKEM1024_CT   1568
+
+/* Key generation (ML-KEM.KeyGen_internal, FIPS 203 Algorithm 16) from seed = d || z. The
+ * decapsulation key holds the secret and the encapsulation key: zero it when done. */
+void httpasm_mlkem512_keypair(uint8_t ek[HTTPASM_MLKEM512_EK], uint8_t dk[HTTPASM_MLKEM512_DK],
+                              const uint8_t seed[HTTPASM_MLKEM_SEED]);
+void httpasm_mlkem768_keypair(uint8_t ek[HTTPASM_MLKEM768_EK], uint8_t dk[HTTPASM_MLKEM768_DK],
+                              const uint8_t seed[HTTPASM_MLKEM_SEED]);
+void httpasm_mlkem1024_keypair(uint8_t ek[HTTPASM_MLKEM1024_EK], uint8_t dk[HTTPASM_MLKEM1024_DK],
+                               const uint8_t seed[HTTPASM_MLKEM_SEED]);
+
+/* Encapsulation (ML-KEM.Encaps_internal, Algorithm 17) to a peer's encapsulation key with the
+ * caller's 32 random octets m: the ciphertext to send and the shared secret. Returns 0; or -1
+ * when ek fails FIPS 203 7.2's modulus check (a coefficient of q or more: TLS must abort with an
+ * illegal_parameter alert), c and shared then all zeros. The length check is the caller's (the
+ * types carry the lengths). */
+int httpasm_mlkem512_encaps(uint8_t c[HTTPASM_MLKEM512_CT], uint8_t shared[HTTPASM_MLKEM_SHARED],
+                            const uint8_t ek[HTTPASM_MLKEM512_EK], const uint8_t m[HTTPASM_MLKEM_MESSAGE]);
+int httpasm_mlkem768_encaps(uint8_t c[HTTPASM_MLKEM768_CT], uint8_t shared[HTTPASM_MLKEM_SHARED],
+                            const uint8_t ek[HTTPASM_MLKEM768_EK], const uint8_t m[HTTPASM_MLKEM_MESSAGE]);
+int httpasm_mlkem1024_encaps(uint8_t c[HTTPASM_MLKEM1024_CT], uint8_t shared[HTTPASM_MLKEM_SHARED],
+                             const uint8_t ek[HTTPASM_MLKEM1024_EK], const uint8_t m[HTTPASM_MLKEM_MESSAGE]);
+
+/* Decapsulation (ML-KEM.Decaps_internal, Algorithm 18): the shared secret of a ciphertext. A
+ * ciphertext that is not the one encapsulated still gives a key, J(z || c), unrelated to the real
+ * one (implicit rejection: the handshake then fails at its Finished). Returns 0; or -1 when dk
+ * fails 7.3's hash check (the H(ek) it carries is not its ek's: a corrupted key, which RFC 10024
+ * 4.2 answers with an internal_error alert), shared then all zeros. */
+int httpasm_mlkem512_decaps(uint8_t shared[HTTPASM_MLKEM_SHARED], const uint8_t dk[HTTPASM_MLKEM512_DK],
+                            const uint8_t c[HTTPASM_MLKEM512_CT]);
+int httpasm_mlkem768_decaps(uint8_t shared[HTTPASM_MLKEM_SHARED], const uint8_t dk[HTTPASM_MLKEM768_DK],
+                            const uint8_t c[HTTPASM_MLKEM768_CT]);
+int httpasm_mlkem1024_decaps(uint8_t shared[HTTPASM_MLKEM_SHARED], const uint8_t dk[HTTPASM_MLKEM1024_DK],
+                             const uint8_t c[HTTPASM_MLKEM1024_CT]);
+
+/* ------------------------------------------------------------------------------------------
  * RSA signatures (RFC 8017): verification of RSASSA-PKCS1-v1_5 (certificates' sha256With-
  * RSAEncryption and its kin) and RSASSA-PSS with MGF1 (TLS 1.3's rsa_pss_rsae_*, rsa_pss_pss_*),
  * for moduli of 1024 to 8192 bits. Every input is public: these run in variable time. Products

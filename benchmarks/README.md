@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: ML-KEM, v1 (scalar).** A key pair from a fixed seed, an encapsulation to it with a
+fixed m, and the decapsulation of that ciphertext, at ML-KEM-768 and ML-KEM-1024. OpenSSL 3.0.13
+has no ML-KEM, so the rival is mlkem-native 2.1.0 (pq-code-package's, its multilevel native
+example built with -O3 -march=native: the AVX2 arithmetic backend and its four-way Keccak), called
+through its deterministic API (rival_mlkem.c) with the same inputs. 41 rounds:
+
+| Case | v3 tier (scalar ML-KEM, v3 SHA-3) | v1 | mlkem-native 2.1.0 | |
+|---|---:|---:|---:|---|
+| ML-KEM-768 key pair | 31.3 us | 34.5 us | 10.8 us | 2.9x slower |
+| ML-KEM-768 encapsulation | 41.1 us | 44.5 us | 12.3 us | 3.2x slower |
+| ML-KEM-768 decapsulation | 56.8 us | 61.2 us | 16.3 us | 3.4x slower |
+| ML-KEM-1024 key pair | 48.3 us | 53.9 us | 15.6 us | 3.1x slower |
+| ML-KEM-1024 encapsulation | 60.6 us | 66.3 us | 17.7 us | 3.3x slower |
+| ML-KEM-1024 decapsulation | 81.1 us | 87.9 us | 23.6 us | 3.4x slower |
+
+The first step is the scalar reference (every routine plain 16-bit arithmetic; only SHA-3 under it
+has a v3). Next: the arithmetic in AVX2 and four Keccak states at once.
+
 **2026-11-27: SHA-3 and SHAKE.** `httpasm_sha3_256` and 32 octets of `httpasm_shake128` of the
 hash cases' input (64 octets, 1 KiB, 16 KiB), beside OpenSSL 3.0.13's EVP (keccak1600-x86_64,
 its scalar code, here): SHA3-256 and SHAKE128 fetched once (EVP_MD_fetch) and one EVP_MD_CTX

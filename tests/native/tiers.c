@@ -2202,6 +2202,109 @@ static int ed25519_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_mlkem*: ML-KEM (crypto/mlkem.asm) ---------------------------------------------------
+ * Its arithmetic has one version for now; SHA-3 and SHAKE under it have v1 and v3. Every tier must
+ * give v1's keys, ciphertexts and shared secrets. Each round puts one input against the guard page
+ * in turn (the seed, the encapsulation key, the message, the decapsulation key, the ciphertext),
+ * so a read past one faults; outputs are followed by canaries. */
+
+/* mlkem_tiers: `randoms` rounds over the three parameter sets: a key pair from a random seed, an
+ * encapsulation (every so often to a key with a coefficient set to 4095: refused at every tier),
+ * the decapsulation, and the decapsulation of the ciphertext with a bit flipped (implicit rejection:
+ * a different key, the same at every tier). Returns 0 when every tier agrees with v1, 1 at the first
+ * difference. */
+static int mlkem_tiers(long randoms)
+{
+    typedef void (*keypair_fn)(uint8_t *, uint8_t *, const uint8_t *);
+    typedef int (*encaps_fn)(uint8_t *, uint8_t *, const uint8_t *, const uint8_t *);
+    typedef int (*decaps_fn)(uint8_t *, const uint8_t *, const uint8_t *);
+    static const struct {
+        const char *name;
+        size_t ek, dk, ct;
+        keypair_fn keypair;
+        encaps_fn encaps;
+        decaps_fn decaps;
+    } sets[3] = {
+        { "mlkem512", 800, 1632, 768, httpasm_mlkem512_keypair, httpasm_mlkem512_encaps, httpasm_mlkem512_decaps },
+        { "mlkem768", 1184, 2400, 1088, httpasm_mlkem768_keypair, httpasm_mlkem768_encaps, httpasm_mlkem768_decaps },
+        { "mlkem1024", 1568, 3168, 1568, httpasm_mlkem1024_keypair, httpasm_mlkem1024_encaps, httpasm_mlkem1024_decaps },
+    };
+    long checked = 0;
+    for (long i = 0; i < randoms; i++) {
+        size_t s = (size_t)(i % 3);
+        int guard = (int)(i / 3 % 5);
+        uint8_t *area = page_end - 4 * PAGE;        /* the inputs off the guard (8 KiB apart) */
+        uint8_t *seed = guard == 0 ? page_end - 64 : area;
+        uint8_t *m = guard == 2 ? page_end - 32 : area + 64;
+        uint8_t *ek_in = guard == 1 ? page_end - sets[s].ek : area + 128;
+        uint8_t *dk_in = guard == 3 ? page_end - sets[s].dk : area + 2048;
+        uint8_t *ct_in = guard == 4 ? page_end - sets[s].ct : area + 6144;
+        for (size_t k = 0; k < 64; k++)
+            seed[k] = (uint8_t)rng();
+        for (size_t k = 0; k < 32; k++)
+            m[k] = (uint8_t)rng();
+        int corrupt = i % 11 == 7;                  /* a coefficient of 4095: the modulus check refuses */
+        size_t flip = (size_t)(rng() % (sets[s].ct * 8));
+        uint8_t expected_ek[1568], expected_dk[3168], expected_ct[1568], expected_shared[32], expected_other[32];
+        int expected_result = 0;
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            static uint8_t ek[1568 + 16], dk[3168 + 16], ct[1568 + 16];
+            uint8_t shared[32 + 16], back[32 + 16], other[32 + 16];
+            memset(ek, 0xC3, sizeof ek);
+            memset(dk, 0xC3, sizeof dk);
+            memset(ct, 0xC3, sizeof ct);
+            memset(shared, 0xC3, sizeof shared);
+            memset(back, 0xC3, sizeof back);
+            memset(other, 0xC3, sizeof other);
+            sets[s].keypair(ek, dk, seed);
+            memcpy(ek_in, ek, sets[s].ek);
+            if (corrupt) {
+                ek_in[3 * (rng() % 128) + 1] |= 0xF0;   /* a pair's high 12-bit value at 0xFFx: 4080 or more */
+                ek_in[3 * 5 + 2] = 0xFF;
+            }
+            int result = sets[s].encaps(ct, shared, ek_in, m);
+            memcpy(dk_in, dk, sets[s].dk);
+            memcpy(ct_in, ct, sets[s].ct);
+            int back_result = sets[s].decaps(back, dk_in, ct_in);
+            ct_in[flip / 8] ^= (uint8_t)(1 << (flip % 8));
+            int other_result = sets[s].decaps(other, dk_in, ct_in);
+            for (size_t k = 0; k < 16; k++) {
+                if (ek[sets[s].ek + k] != 0xC3 || dk[sets[s].dk + k] != 0xC3 || ct[sets[s].ct + k] != 0xC3 ||
+                    shared[32 + k] != 0xC3 || back[32 + k] != 0xC3 || other[32 + k] != 0xC3) {
+                    fprintf(stderr, "httpasm_%s_* at %s wrote past an output\n", sets[s].name, cap_names[t]);
+                    return 1;
+                }
+            }
+            if (result != (corrupt ? -1 : 0) || back_result != 0 || other_result != 0 ||
+                (!corrupt && (memcmp(back, shared, 32) != 0 || memcmp(other, shared, 32) == 0))) {
+                fprintf(stderr, "httpasm_%s_* at %s: encaps %d, decaps %d (%s), flipped %d (%s)\n", sets[s].name, cap_names[t], result,
+                        back_result, memcmp(back, shared, 32) == 0 ? "same key" : "another key", other_result,
+                        memcmp(other, shared, 32) == 0 ? "same key" : "another key");
+                dump("seed", seed, 64);
+                return 1;
+            }
+            if (t == 0) {
+                memcpy(expected_ek, ek, sets[s].ek);
+                memcpy(expected_dk, dk, sets[s].dk);
+                memcpy(expected_ct, ct, sets[s].ct);
+                memcpy(expected_shared, shared, 32);
+                memcpy(expected_other, other, 32);
+                expected_result = result;
+            } else if (memcmp(ek, expected_ek, sets[s].ek) != 0 || memcmp(dk, expected_dk, sets[s].dk) != 0 ||
+                       memcmp(ct, expected_ct, sets[s].ct) != 0 || memcmp(shared, expected_shared, 32) != 0 ||
+                       memcmp(other, expected_other, 32) != 0 || result != expected_result) {
+                fprintf(stderr, "httpasm_%s_* at %s (features %#llx) differs from v1\n", sets[s].name, cap_names[t], (unsigned long long)features);
+                dump("seed", seed, 64);
+                return 1;
+            }
+            checked++;
+        }
+    }
+    printf("httpasm_mlkem*: %ld rounds of key pair, encapsulation and two decapsulations at every tier, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_rsa_*: RSA verification by versions (rsa.asm) ---------------------------------
  * v3 runs the Montgomery product, square and reduction with mulx and adcx/adox, eight limbs a
  * step; v1 and v2 run them with mul. A verification only says valid or not, so each round checks
@@ -2801,6 +2904,8 @@ int main(int argc, char **argv)
         failed = p384_tiers(randoms / 1000);
     if (!failed)
         failed = ed25519_tiers(randoms / 500);
+    if (!failed)
+        failed = mlkem_tiers(randoms / 500);
     if (!failed)
         failed = rsa_tiers(randoms / 1000);
     if (!failed)

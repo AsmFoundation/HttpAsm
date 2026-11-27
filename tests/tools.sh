@@ -70,6 +70,12 @@ fi
 #   file by file at the tag's commit 8164852 (raw files are byte-stable; generated archives
 #   are not promised to be).
 #   picohttpparser at dd573d8 (2026-10-27), h2o's HTTP/1.1 parser: its two files.
+#   mlkem-native 2.1.0 (2026-11-26), pq-code-package's ML-KEM (C with an AVX2 backend whose kernels
+#   are formally verified), the benchmark's ML-KEM rival: bench.sh builds its multilevel native
+#   example with -O3 -march=native. The tag's source archive (the release has no assets).
+fetch mlkem-native-2.1.0.tar.gz \
+  https://github.com/pq-code-package/mlkem-native/archive/refs/tags/v2.1.0.tar.gz \
+  ae8d178cc14c15721644898cbe36234a434568306e8d5e3000e36b538f41d598
 fetch nghttp2-1.71.0.tar.xz \
   https://github.com/nghttp2/nghttp2/releases/download/v1.71.0/nghttp2-1.71.0.tar.xz \
   c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
@@ -191,6 +197,25 @@ fetch wycheproof/ecdsa_secp384r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp3
 #   of R and A, truncated and padded signatures, Tink's overflow cases, and the small- and
 #   mixed-order public keys whose signatures either policy may take ("acceptable").
 fetch wycheproof/ed25519_test.json "$wycheproof/ed25519_test.json" ea80ffebac085e21cb9d3e903e7fa2b448d96702da5b31f061d0b83b430b74b3
+#   ML-KEM (MlKemTests), at 512, 768 and 1024: key generation from seeds (FIPS 203's), encapsulation
+#   (CCTV's modulus-overflow keys among them), decapsulation from seeds (CCTV's strcmp case, the
+#   implicit-rejection and malleable-ciphertext cases, wrong lengths) and from expanded keys
+#   (aws-lc's and reenc's: wrong lengths, keys whose hash does not match).
+for pin in \
+  mlkem_512_keygen_seed_test.json:877ae6f5550d0e802086e5812bdbd23c16afa31cd3bff9669cd9661d3fbf2d85 \
+  mlkem_768_keygen_seed_test.json:fde5abe284396f4cb3c4610b90d680f0b57782e94c3365c97aee59e24881ebe4 \
+  mlkem_1024_keygen_seed_test.json:cd9241bf5d65a78e005866ea2c660615c17f50caa9afc2b96fd1573cc65617b5 \
+  mlkem_512_encaps_test.json:85a69664f2e8243f5085f01fb22f9635b100b16a8935cf2b2ac94c127511a20c \
+  mlkem_768_encaps_test.json:9d4381f94c40853bba430245b94968b7390d9175aacd9f1ae4e250a71c78b713 \
+  mlkem_1024_encaps_test.json:da41e8daf57e40a6b334a722e3f56067817352f5583fdb2434da1a2cd611358e \
+  mlkem_512_test.json:18bc5455d5bf8226b3ab1d1deb51f3ed7c44b3d90039eb25416d40fa77e76f20 \
+  mlkem_768_test.json:c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90 \
+  mlkem_1024_test.json:17c5b764d78c05522f1980fcb41d82add573f11de5d13004ae0b83bf46d9c43a \
+  mlkem_512_semi_expanded_decaps_test.json:bb90c7997dc3695e52882608b7c79675a012c031dd50dc08e76c4775a762ad14 \
+  mlkem_768_semi_expanded_decaps_test.json:e4438ab7d4dd7b6ace7165e45aeed4403082f981f86300c8369f69d3d071060a \
+  mlkem_1024_semi_expanded_decaps_test.json:a4a7c88152df3d8d4b3f33aad584167dfaff67195cfde08aac4b981030b4d05c; do
+  fetch "wycheproof/${pin%%:*}" "$wycheproof/${pin%%:*}" "${pin##*:}"
+done
 #   RSA signatures (RsaTests): RSASSA-PKCS1-v1_5 at 2048 to 8192 bits with every SHA-2 hash this
 #   library takes (BER and malformed paddings, wrong hashes, the missing NULL, small and edge-case
 #   signatures), and RSASSA-PSS: MGF1 with the same hash at the salt lengths TLS 1.3 and the

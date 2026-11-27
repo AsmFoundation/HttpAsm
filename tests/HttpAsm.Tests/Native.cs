@@ -449,6 +449,78 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_ed25519_verify")]
     internal static partial int Ed25519Verify(byte* publicKey, byte* message, nuint length, byte* signature);
 
+    /// <summary>void httpasm_mlkem512_keypair(ek[800], dk[1632], seed[64]).</summary>
+    /// <param name="ek">Receives the encapsulation key.</param>
+    /// <param name="dk">Receives the decapsulation key.</param>
+    /// <param name="seed">d || z.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem512_keypair")]
+    internal static partial void MlKem512Keypair(byte* ek, byte* dk, byte* seed);
+
+    /// <summary>int httpasm_mlkem512_encaps(c[768], shared[32], ek[800], m[32]).</summary>
+    /// <param name="c">Receives the ciphertext; zeros when refused.</param>
+    /// <param name="shared">Receives the shared secret; zeros when refused.</param>
+    /// <param name="ek">The encapsulation key.</param>
+    /// <param name="m">The 32 random octets.</param>
+    /// <returns>0, or -1 when ek fails the modulus check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem512_encaps")]
+    internal static partial int MlKem512Encaps(byte* c, byte* shared, byte* ek, byte* m);
+
+    /// <summary>int httpasm_mlkem512_decaps(shared[32], dk[1632], c[768]).</summary>
+    /// <param name="shared">Receives the shared secret (implicit rejection's when c was not ek's); zeros when refused.</param>
+    /// <param name="dk">The decapsulation key.</param>
+    /// <param name="c">The ciphertext.</param>
+    /// <returns>0, or -1 when dk fails the hash check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem512_decaps")]
+    internal static partial int MlKem512Decaps(byte* shared, byte* dk, byte* c);
+
+    /// <summary>void httpasm_mlkem768_keypair(ek[1184], dk[2400], seed[64]).</summary>
+    /// <param name="ek">Receives the encapsulation key.</param>
+    /// <param name="dk">Receives the decapsulation key.</param>
+    /// <param name="seed">d || z.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem768_keypair")]
+    internal static partial void MlKem768Keypair(byte* ek, byte* dk, byte* seed);
+
+    /// <summary>int httpasm_mlkem768_encaps(c[1088], shared[32], ek[1184], m[32]).</summary>
+    /// <param name="c">Receives the ciphertext; zeros when refused.</param>
+    /// <param name="shared">Receives the shared secret; zeros when refused.</param>
+    /// <param name="ek">The encapsulation key.</param>
+    /// <param name="m">The 32 random octets.</param>
+    /// <returns>0, or -1 when ek fails the modulus check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem768_encaps")]
+    internal static partial int MlKem768Encaps(byte* c, byte* shared, byte* ek, byte* m);
+
+    /// <summary>int httpasm_mlkem768_decaps(shared[32], dk[2400], c[1088]).</summary>
+    /// <param name="shared">Receives the shared secret; zeros when refused.</param>
+    /// <param name="dk">The decapsulation key.</param>
+    /// <param name="c">The ciphertext.</param>
+    /// <returns>0, or -1 when dk fails the hash check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem768_decaps")]
+    internal static partial int MlKem768Decaps(byte* shared, byte* dk, byte* c);
+
+    /// <summary>void httpasm_mlkem1024_keypair(ek[1568], dk[3168], seed[64]).</summary>
+    /// <param name="ek">Receives the encapsulation key.</param>
+    /// <param name="dk">Receives the decapsulation key.</param>
+    /// <param name="seed">d || z.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem1024_keypair")]
+    internal static partial void MlKem1024Keypair(byte* ek, byte* dk, byte* seed);
+
+    /// <summary>int httpasm_mlkem1024_encaps(c[1568], shared[32], ek[1568], m[32]).</summary>
+    /// <param name="c">Receives the ciphertext; zeros when refused.</param>
+    /// <param name="shared">Receives the shared secret; zeros when refused.</param>
+    /// <param name="ek">The encapsulation key.</param>
+    /// <param name="m">The 32 random octets.</param>
+    /// <returns>0, or -1 when ek fails the modulus check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem1024_encaps")]
+    internal static partial int MlKem1024Encaps(byte* c, byte* shared, byte* ek, byte* m);
+
+    /// <summary>int httpasm_mlkem1024_decaps(shared[32], dk[3168], c[1568]).</summary>
+    /// <param name="shared">Receives the shared secret; zeros when refused.</param>
+    /// <param name="dk">The decapsulation key.</param>
+    /// <param name="c">The ciphertext.</param>
+    /// <returns>0, or -1 when dk fails the hash check.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_mlkem1024_decaps")]
+    internal static partial int MlKem1024Decaps(byte* shared, byte* dk, byte* c);
+
     /// <summary>int httpasm_rsa_public_key_init(key, n, n_length, e, e_length).</summary>
     /// <param name="key">Receives the key; all zeros when refused.</param>
     /// <param name="n">The modulus, big-endian (leading zero octets allowed).</param>
