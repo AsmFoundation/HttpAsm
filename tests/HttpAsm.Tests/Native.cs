@@ -292,6 +292,37 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_p256_verify")]
     internal static partial int P256Verify(byte* publicKey, byte* digest, nuint digestLength, byte* signature);
 
+    /// <summary>int httpasm_rsa_public_key_init(key, n, n_length, e, e_length).</summary>
+    /// <param name="key">Receives the key; all zeros when refused.</param>
+    /// <param name="n">The modulus, big-endian (leading zero octets allowed).</param>
+    /// <param name="nLength">Its length in octets.</param>
+    /// <param name="e">The public exponent, big-endian (leading zero octets allowed).</param>
+    /// <param name="eLength">Its length in octets.</param>
+    /// <returns>0, or -1 when n is even or outside 1024..8192 bits, or e is even, below 3 or above 2^64 - 1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_public_key_init")]
+    internal static partial int RsaPublicKeyInit(RsaPublicKey* key, byte* n, nuint nLength, byte* e, nuint eLength);
+
+    /// <summary>int httpasm_rsa_verify_pkcs1(key, hash, digest, signature, signature_length).</summary>
+    /// <param name="key">A key from <see cref="RsaPublicKeyInit"/>.</param>
+    /// <param name="hash">HTTPASM_HASH_*: 1 SHA-1, 2 SHA-224, 3 SHA-256, 4 SHA-384, 5 SHA-512.</param>
+    /// <param name="digest">The digest, that hash's length.</param>
+    /// <param name="signature">The signature, big-endian.</param>
+    /// <param name="signatureLength">Its length (the modulus' octets, or it fails).</param>
+    /// <returns>0 when valid (RFC 8017 8.2.2), else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_verify_pkcs1")]
+    internal static partial int RsaVerifyPkcs1(RsaPublicKey* key, int hash, byte* digest, byte* signature, nuint signatureLength);
+
+    /// <summary>int httpasm_rsa_verify_pss(key, hash, digest, salt_length, signature, signature_length).</summary>
+    /// <param name="key">A key from <see cref="RsaPublicKeyInit"/>.</param>
+    /// <param name="hash">3 SHA-256, 4 SHA-384 or 5 SHA-512 (MGF1 with the same hash); any other fails.</param>
+    /// <param name="digest">The digest, that hash's length.</param>
+    /// <param name="saltLength">The salt's length the signer used.</param>
+    /// <param name="signature">The signature, big-endian.</param>
+    /// <param name="signatureLength">Its length (the modulus' octets, or it fails).</param>
+    /// <returns>0 when valid (RFC 8017 8.1.2), else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_rsa_verify_pss")]
+    internal static partial int RsaVerifyPss(RsaPublicKey* key, int hash, byte* digest, nuint saltLength, byte* signature, nuint signatureLength);
+
     /// <summary>int httpasm_random(void *buffer, size_t length).</summary>
     /// <param name="buffer">Receives the random octets (anything when length is 0).</param>
     /// <param name="length">How many.</param>

@@ -279,6 +279,35 @@ HTTPASM_P256_POINT              equ 65      ; octets of a public key: 04, x, y
 HTTPASM_P256_SIGNATURE          equ 64      ; octets of a signature: r, s (IEEE P1363's form)
 HTTPASM_P256_ENTROPY            equ 32      ; octets of a signature's optional entropy
 
+; Hash identifiers (the RSA signatures name their hash with these; SHA-1 and SHA-224 only where
+; the caller brings the digest: PKCS#1 v1.5 verification of legacy certificates).
+HTTPASM_HASH_SHA1               equ 1
+HTTPASM_HASH_SHA224             equ 2
+HTTPASM_HASH_SHA256             equ 3
+HTTPASM_HASH_SHA384             equ 4
+HTTPASM_HASH_SHA512             equ 5
+
+; RSA (RFC 8017; crypto/rsa.asm): moduli of 1024 to 8192 bits.
+HTTPASM_RSA_MIN_BITS            equ 1024
+HTTPASM_RSA_MAX_BITS            equ 8192
+HTTPASM_RSA_LIMBS               equ 128     ; 64-bit limbs of the largest modulus
+
+; -----------------------------------------------------------------------------
+; httpasm_rsa_public_key: a public key ready for verification (crypto/rsa.asm), 2080 octets;
+; httpasm.h declares it opaque (a C caller only passes it), the struct size id 16 checks the
+; bindings' copies. Numbers are little-endian 64-bit limbs, zero above their own. A refused key
+; is all zeros (bits 0: every verification under it fails).
+; -----------------------------------------------------------------------------
+struc httpasm_rsa_public_key
+    .n:                 resq HTTPASM_RSA_LIMBS  ; the modulus
+    .rr:                resq HTTPASM_RSA_LIMBS  ; R^2 mod n, R = 2^(64 limbs)
+    .n0:                resq 1      ; -n^-1 mod 2^64 (Montgomery's constant)
+    .e:                 resq 1      ; the public exponent (odd, 3 or more)
+    .limbs:             resd 1      ; the limbs the operations run on: n's, rounded up to 8
+    .bits:              resd 1      ; n's bit length, 1024..8192
+    .reserved:          resq 1
+endstruc
+
 ; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's

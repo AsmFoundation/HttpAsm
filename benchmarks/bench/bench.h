@@ -73,7 +73,9 @@
     X(httpasm_p256_public_key)      \
     X(httpasm_p256_ecdh)            \
     X(httpasm_p256_sign)            \
-    X(httpasm_p256_verify)
+    X(httpasm_p256_verify)          \
+    X(httpasm_rsa_public_key_init)  \
+    X(httpasm_rsa_verify_pkcs1)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -268,6 +270,33 @@ void bench_p256_sign(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_p256_verify: httpasm_p256_verify of a valid signature (made before the loop). */
 void bench_p256_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* An RSA verification's input (bench_rsa_input, suite_rivals.c): a public key (n of `octets`
+ * octets, e = 65537) with a SHA-256 digest and its valid RSASSA-PKCS1-v1_5 signature, from
+ * Project Wycheproof's vectors. A case's data points at one; its length is the structure's size. */
+typedef struct bench_rsa_vector {
+    size_t octets;
+    uint8_t n[512];
+    uint8_t e[4];
+    size_t e_length;
+    uint8_t digest[32];
+    uint8_t signature[512];
+} bench_rsa_vector;
+
+/* bench_rsa_input: the 2048-, 3072- or 4096-bit vector (which = 0, 1, 2), decoded from the hex
+ * on first use; NULL for any other `which`. */
+const bench_rsa_vector *bench_rsa_input(size_t which);
+
+/* bench_rsa_verify: httpasm_rsa_verify_pkcs1 of the vector's signature under its key, the key
+ * prepared once before the loop (a key a program keeps: a CA's, a pinned peer's). */
+void bench_rsa_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_rsa_init_verify: the key prepared and the signature verified, each call: a TLS client's
+ * work per certificate, whose key verifies one signature. */
+void bench_rsa_init_verify(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_rsa_init: httpasm_rsa_public_key_init alone (n loaded, n0, R^2 mod n by long division). */
+void bench_rsa_init(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */

@@ -191,6 +191,52 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: RSA verification.** RSASSA-PKCS1-v1_5 with SHA-256 under Project Wycheproof's
+keys (e = 65537) at 2048, 3072 and 4096 bits, beside OpenSSL 3.0.13's EVP_PKEY_verify: with
+the key kept (ours prepared before the loop; OpenSSL's key and context made once, its
+Montgomery constants cached at the first call), and with the key made from n and e each call
+(ours `httpasm_rsa_public_key_init`; OpenSSL EVP_PKEY_fromdata, a context, the digest set,
+verify, both freed): a TLS client's work per certificate, whose key verifies one signature.
+5 rounds; the ratio is the paired estimate:
+
+| Case | v3 (mulx, adcx/adox) | v1 (mul) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| verify, key kept, 2048 | 15.8 us | 37.7 us | 20.2 us | 1.24x OpenSSL |
+| verify, key kept, 3072 | 34.6 us | 85.9 us | 43.9 us | 1.27x OpenSSL |
+| verify, key kept, 4096 | 61.4 us | 162.4 us | 76.7 us | 1.25x OpenSSL |
+| key made + verify, 2048 | 17.7 us | 39.4 us | 33.0 us | 1.85x OpenSSL |
+| key made + verify, 3072 | 38.3 us | 89.1 us | 57.9 us | 1.52x OpenSSL |
+| key made + verify, 4096 | 68.2 us | 167.5 us | 95.3 us | 1.39x OpenSSL |
+| key init alone, 2048 / 3072 / 4096 | 1.82 / 3.39 / 6.26 us | the same | | |
+
+The tiers suite: v3 2.38x v1 at 2048 bits [2.32-2.42]. The first version (CIOS products only,
+R^2 mod n by eleven squarings) ran a verification in 22.3 us at 2048 bits and a key init in
+13.2: 0.93x OpenSSL with the key kept. What moved it, each step measured (scratchpad rsa/,
+cycles at the core's 2.8 GHz, checked with a chain of dependent imuls):
+- the square: the products above the diagonal once, then doubled with the squares, then k
+  reduction rows: 1.5k^2 multiplies against the product's 2k^2. Rows of every length with a
+  single-limb lead-in: 2,474 cycles at k = 32 (1.18x the product); the triangle in blocks of
+  eight rows, each row's in-block part in straight lines and the rest whole 8-limb groups
+  through one routine the carry chains run through (call and ret keep the flags): 2,322
+  (1.28x), and 690 against 828 at k = 16;
+- the reduction alone to leave Montgomery form (k^2, where the product by 1 is 2k^2);
+- R^2 mod n by long division, one quotient digit per limb with mul: 1.8 us at 2048 bits
+  against 13.2 for the squarings (7x; 6.3 against 53.7 at 4096);
+- the octet conversions eight octets at a time (bswap) instead of a shift per octet.
+Tried and not kept, with the probes that explain why (scratchpad rsa/mb*.asm, units of 32 a
+loop): a product row (mulx, adcx from t, adox, a store) runs at 1.4 to 1.6 cycles a limb in
+every arrangement; two independent flag chains run at 1.03 cycles a pair, and so does either
+chain beside a mulx (1.01), but both chains with mulx run at 1.52, and both with any one
+port-1 and one port-5 instruction (imul and vpermq) at 1.48 - not a port conflict (mulx beside
+two shrx on ports 0 and 6 stays at 1.02). So: the high words in two registers taking turns
+(one mov a limb less: no change, 2,951 against 2,928 cycles at k = 32); two rows interleaved
+eight limbs at a time, so the scheduler always has independent chains (correct, and slower:
+3.29k^2 cycles against 2.85k^2); product scanning with one, two and three accumulators (1.67,
+1.48 and 1.41 cycles a multiply-accumulate, no better than the rows); a nop per limb, which
+had sped up the bare row (1.47 against 1.58) and slowed the whole product (3,098 against 2,930).
+The products sit at about 1.4 cycles a multiply-accumulate on this core whatever their shape;
+the time went into doing fewer of them.
+
 **2026-11-27: P-256 (secp256r1).** ECDH, the public key, a TLS 1.3 key share, ECDSA's
 signature and verification, beside OpenSSL 3.0.13's EVP_PKEY on P-256 (its ecp_nistz256
 assembly): the derive alone (a key made once, the peer's key and the context once: OpenSSL

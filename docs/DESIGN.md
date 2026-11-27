@@ -1089,6 +1089,53 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      third of the constant-time one's 2.16 us), the divsteps' 6-cycle step chain (both zeta
      outcomes computed ahead: about 4), and on CPUs with AVX-512 IFMA a 52-bit-limb field (no
      machine here to measure it on).
+   - **RSA verification** (2026-11-27), `crypto/rsa.asm`: `httpasm_rsa_public_key_init`,
+     `httpasm_rsa_verify_pkcs1` (RSASSA-PKCS1-v1_5: certificates' sha256WithRSAEncryption and
+     its kin, SHA-1 and SHA-224 for legacy chains) and `httpasm_rsa_verify_pss` (RSASSA-PSS with
+     MGF1 on the same hash, SHA-256, -384 or -512: TLS 1.3's rsa_pss_rsae_* and rsa_pss_pss_*),
+     for moduli of 1024 to 8192 bits and odd exponents from 3 to 2^64 - 1. *The key*
+     (`httpasm_rsa_public_key`, 2080 octets, struct size 16): n, R^2 mod n, -n^-1 mod 2^64, e,
+     k and the bit length; a refused key is all zeros and fails every verification (a
+     signature of length 0 too: its own octet count). *The arithmetic,* on k limbs (n's,
+     rounded up to 8): the Montgomery product (CIOS), the square (the products above the
+     diagonal once, eight rows at a time so each row's part past its block is whole 8-limb
+     groups, a shared routine the carry chains run through, call and ret keeping the flags;
+     then doubled with the squares added, then k reduction rows) and the reduction alone (out
+     of Montgomery form), each in two versions: v3 mulx with adcx/adox, v1 mul (its square and
+     reduction are products). All constant time, for the signing to share. The public
+     operation: s R by the product with R^2, square-and-multiply from the top, the reduction
+     at the end (65537: 16 squares, 2 products, 1 reduction). *R^2 mod n* by long division
+     (Knuth's algorithm D on the single-bit dividend 2^(128k + s), mul only, variable time: n is
+     public): 1.8 us at 2048 bits, where the first version's eleven squarings took 13.2; its
+     rare paths (the clamped digit, the clamp whose remainder passes 2^64, one and two
+     lowerings, a lowering stopped by the remainder, the add-back) each reached by a modulus
+     a model of the division found (2^1024 - 2^64 + 1, 2^1024 - 2^128 + 1, 2^1024 - 2^65 + 1,
+     2^1023 + 2^960 - 1, 2^1023 + 3, 2^1024 + 1). *The encodings:* RFC 8017 8.2.2 builds the
+     expected EM (00 01 FF.. 00, the DigestInfo with its NULL, the digest) and compares it
+     whole, so no BER variant, missing NULL or garbage after the digest passes (Bleichenbacher's
+     2006 forgery against e = 3 fails); 8.1.2 and 9.1.2 step by step (the length, 0xbc, the top
+     bits, MGF1's unmasking, the zero padding, the 01, H'). *Why the gains are where they are*
+     (benchmarks/README.md has the probes): a multiply-accumulate costs about 1.4 cycles in
+     every shape tried - rows, two rows interleaved 8 limbs at a time (slower: 3.3k^2 cycles a
+     product against 2.85k^2), product scanning with one to three accumulators (1.4 to 1.7) -
+     because two flag chains with mulx's ports 1 and 5 beside them cap at 1.5 a unit; so the
+     time went into doing fewer: the square (1.28x the product at 2048 bits), the reduction
+     alone, the division. *Proven by* FIPS 186-3's SigVer15 (270), SigVerPSS (270), SigGen15
+     (80) and SigGenPSS (80), Wycheproof's RSASSA-PKCS1-v1_5 files at 2048 to 8192 bits
+     (3,364 tests; the "acceptable" missing NULL refused) and its PSS files (1,411: the misc
+     file's every hash pair, SHA-1 and MGF1-SHA1 refused), .NET's RSA on seven key sizes both
+     ways, RFC 8017's DigestInfo prefixes read from the pinned text, a BigInteger model of the
+     init (every field, 80 moduli at every 64- and 512-bit boundary and the division's shapes)
+     and of the encodings (signed with d on prime moduli 2^1023 + 1155, 2^1024 + 643 and
+     2^2048 + 3211, the last two with PSS's encoded message an octet short of the signature),
+     encodings one detail off, signatures outside the rules, and `tests/native/tiers` (200
+     rounds: keys and both verifications equal at every tier, n, e, the key, the digest and
+     the signature each against the guard page). *Measured* against OpenSSL 3.0.13's EVP: a
+     verification with the key kept 1.24x at 2048 bits (15.8 us), 1.27x at 3072, 1.25x at
+     4096; with the key made from n and e each time (a TLS certificate's case: its key
+     verifies one signature) 1.85x (17.7 us against 33.0), 1.52x and 1.39x; v3 2.38x v1. Next:
+     signing (private keys, CRT, a constant-time windowed exponentiation, PSS and PKCS#1 v1.5
+     encoding), then on CPUs with AVX-512 IFMA 52-bit limbs.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

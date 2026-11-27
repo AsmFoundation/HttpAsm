@@ -251,8 +251,8 @@ uint32_t httpasm_abi_version(void);
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
- * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key; 0 for any other
- * value. */
+ * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
+ * 16 httpasm_rsa_public_key; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -531,6 +531,53 @@ int httpasm_p256_sign(uint8_t signature[HTTPASM_P256_SIGNATURE],
  * point of the curve, or the equation failing. */
 int httpasm_p256_verify(const uint8_t public_key[HTTPASM_P256_POINT], const uint8_t *digest,
                         size_t digest_length, const uint8_t signature[HTTPASM_P256_SIGNATURE]);
+
+/* ------------------------------------------------------------------------------------------
+ * RSA signatures (RFC 8017): verification of RSASSA-PKCS1-v1_5 (certificates' sha256With-
+ * RSAEncryption and its kin) and RSASSA-PSS with MGF1 (TLS 1.3's rsa_pss_rsae_*, rsa_pss_pss_*),
+ * for moduli of 1024 to 8192 bits. Every input is public: these run in variable time. Products
+ * by mulx with adcx/adox, or by mul.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_HASH_SHA1   1           /* PKCS#1 v1.5 verification only (legacy certificates) */
+#define HTTPASM_HASH_SHA224 2           /* PKCS#1 v1.5 verification only */
+#define HTTPASM_HASH_SHA256 3
+#define HTTPASM_HASH_SHA384 4
+#define HTTPASM_HASH_SHA512 5
+
+#define HTTPASM_RSA_MIN_BITS 1024
+#define HTTPASM_RSA_MAX_BITS 8192
+
+/* A public key ready for verification (2080 octets): the modulus, the Montgomery constants its
+ * products need (computed once by the init: a long division, about one product's worth, 1.8 us
+ * at 2048 bits), the exponent. Its octets are its whole state: copy it freely; nothing to free.
+ * A certificate's key verifies one signature: the init is part of that verification's cost. */
+typedef struct httpasm_rsa_public_key {
+    uint64_t opaque[260];
+} httpasm_rsa_public_key;
+
+/* Prepares key from the modulus n and the public exponent e, both big-endian octet strings
+ * (leading zero octets allowed, as DER's INTEGERs carry them). Returns 0; or -1 when n is even
+ * or outside 1024..8192 bits, or e is even, below 3 or above 2^64 - 1 (key is then all zeros
+ * and every verification under it fails). */
+int httpasm_rsa_public_key_init(httpasm_rsa_public_key *key, const uint8_t *n, size_t n_length,
+                                const uint8_t *e, size_t e_length);
+
+/* RSASSA-PKCS1-v1_5 verification (RFC 8017 8.2.2) of a digest made by the hash named (one of
+ * HTTPASM_HASH_*: the digest is that hash's length). Returns 0 when valid; -1 otherwise: an
+ * unknown hash, a signature whose length is not the modulus' octets or whose value is not below
+ * n, or any octet of the encoding other than expected (the DigestInfo is compared whole, so no
+ * BER variant or trailing data passes: the forgeries of Bleichenbacher's 2006 kind fail). */
+int httpasm_rsa_verify_pkcs1(const httpasm_rsa_public_key *key, int hash, const uint8_t *digest,
+                             const uint8_t *signature, size_t signature_length);
+
+/* RSASSA-PSS verification (RFC 8017 8.1.2, MGF1 with the same hash) of a digest of SHA-256,
+ * SHA-384 or SHA-512 (HTTPASM_HASH_*), with the salt's length known (TLS 1.3: the digest's
+ * length; a certificate's parameters otherwise). Returns 0 when valid; -1 otherwise: another
+ * hash, a wrong length or value as for PKCS#1 v1.5, or an encoding that fails any of RFC 8017
+ * 9.1.2's checks. */
+int httpasm_rsa_verify_pss(const httpasm_rsa_public_key *key, int hash, const uint8_t *digest,
+                           size_t salt_length, const uint8_t *signature, size_t signature_length);
 
 /* ------------------------------------------------------------------------------------------
  * Randomness: the kernel's generator (getrandom(2), the urandom source), for TLS randoms,

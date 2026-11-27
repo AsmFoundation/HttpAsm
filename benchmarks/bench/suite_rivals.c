@@ -1075,6 +1075,261 @@ static bench_rival p256_share_rivals[] = { { openssl_name, openssl_p256_share } 
 static bench_rival p256_sign_rivals[] = { { openssl_name, openssl_p256_sign } };
 static bench_rival p256_verify_rivals[] = { { openssl_name, openssl_p256_verify } };
 
+/* ---- RSA verification ------------------------------------------------------------------------
+ * The vectors: a public key, a SHA-256 digest and its valid PKCS#1 v1.5 signature at each size,
+ * Project Wycheproof's rsa_signature_{2048,3072,4096}_sha256_test.json, each one's first valid
+ * test under e = 65537 (the exponent nearly every key has: 16 squares and one product; FIPS
+ * 186-3's records have random exponents of 20-odd bits, half again the work). Hex, decoded on
+ * first use. */
+static const struct {
+    const char *n, *e, *digest, *signature;
+} rsa_hex[] = {
+    {   /* 2048 bits: tcId 2 */
+        "a2b451a07d0aa5f96e455671513550514a8a5b462ebef717094fa1fee82224e637f9746d3f7cafd31878d80325b6ef5a"
+        "1700f65903b469429e89d6eac8845097b5ab393189db92512ed8a7711a1253facd20f79c15e8247f3d3e42e46e48c98e"
+        "254a2fe9765313a03eff8f17e1a029397a1fa26a8dce26f490ed81299615d9814c22da610428e09c7d9658594266f5c0"
+        "21d0fceca08d945a12be82de4d1ece6b4c03145b5d3495d4ed5411eb878daf05fd7afc3e09ada0f1126422f590975a19"
+        "69816f48698bcbba1b4d9cae79d460d8f9f85e7975005d9bc22c4e5ac0f7c1a45d12569a62807d3b9a02e5a530e77306"
+        "6f453d1f5b4c2e9cf7820283f742b9d5",
+        "010001",
+        "de47c9b27eb8d300dbb5f2c353e632c393262cf06340c4fa7f1b40c4cbd36f90",
+        "8a1b220cb2ab415dc760eb7f5bb10335a3cca269d7dbbf7d0962ba79f9cf7b43a5fc09c99a1584f07403473d6c189a83"
+        "6897a5b6f8ea9fa22d601e6ba5f7411fe27c638b81b1a22363583a80fce8c7df3e40fb51bd0e60d0a6653f79f3bcb7ec"
+        "3e9dc14cfb5b31ab1735bca692d50ac03f979dda92747c6430f8045efa3513ba6e0ce3e9e35570e1c30c8ebe589b4419"
+        "2e1344ca83dfa576fc6fdc7bf1cd7cee875b001c8c02ce8d602769e4bd9d241c4857182a0089a8b67644e73eef105c55"
+        "0efa47a40874289395ac0c4e02fd4ba98e130a4c2d1b95521c6af4a002ac3bdc6e52122ae4c08cc3da1c896e059acbdd"
+        "ec574ac0432f6103dd97273d8803c102",
+    },
+    {   /* 3072 bits: tcId 2 */
+        "c6fe23792566023c265287c5ac6f71541c0994d11d059ee6403986efa21c24b51bd91d8862f9df79a4e328e3e27c83df"
+        "260b25a9b43420affc44b51e8d7525b6f29c372a405104732007527a62ed82fac73f4892a80e09682a41a58cd347017f"
+        "3be7d801334f92d9321aafd53b51bffabfc752cfccae0b1ee03bdaff9e428cc1c117f1ac96b4fe23f8c23e6381186a66"
+        "fd59289339ae55c4bcdadbff84abdaa532240d4e1d28b2d0481dadd3b246557ca8fe18092817730b39e6ee378ffcc85b"
+        "19ffdc916a9b991a6b66d4a9c7bab5f5e7a3722101142e7a4108c15d573b15289e07e46eaea07b42c2abcba330e99554"
+        "b4656165bb4c0db2b6393a07eca575c51a93c4e15bdb0f747909447e3efe34c67ca8954b530e56a20a1b6d84d45ed1bc"
+        "d3aa58ec06f184ee5857aaa819e1cca9a26f4e28d6b977d33916db9896d252d1afa762e287cb0d384cc75bfe53f4e922"
+        "d02dd0a481c042e2d306b4b3c189371e575b25e0005a164cf69dd0976e4d5be476806ea6be6084e71ab4f5ac5c1b1203",
+        "010001",
+        "de47c9b27eb8d300dbb5f2c353e632c393262cf06340c4fa7f1b40c4cbd36f90",
+        "631cb4bed6b79dcd3827879f6d64de3ae17e0fdb022be013e733bbfe0031cf204f0508ab87a2e2bbdfaa16cf24acc96b"
+        "3fd2e72bc4a224428e515d6f1e0ea6927eba6ed7282a959e5df5e52eb3be9a39cfe139ea2fa45c21eb81b3197eff655b"
+        "918f7c5fff6abab33945557a922063f9600a372ae7701db686f7e1fe4a6e804a0f624331fbb59536733bed3710dcacd2"
+        "2ec74b1a1386d045372853cac91130703ecafad7f6f42ec1aade5cb865339743c83e882f248b0db0855f487a6d3b5544"
+        "2f67773611a11813ff46a58c762b1bd70b5e870c3095507f23758e90b3c84526f47a825f0ae787acfd3ed349ca6786a2"
+        "e84ec500c6042a9027a994c328c7a6868e6a81481b294383edda62773fd224af46e782ea3f00468515f6100486d94e81"
+        "8afca1bdb81851e62b3bf4f9236f061afafb3e399b93e6f6a295ae200c9bba5ff5aabcac8361c84f2e69aff8a8a21720"
+        "b900d52ea4bddcfbaba3a231bb9b0dd48f0a4ef1cdd255b3524ca0633d04907ab672314c5e3173108313ff4a97df3772",
+    },
+    {   /* 4096 bits: tcId 2 */
+        "956353ecb7561945dc5544e4602466078c93f28507701ffd39e2a9813c8ac8740e6ad61c955d484e513b3dcea527e001"
+        "a018ee2c207c1806a96763280236cd3c820dff79837c9b709cb4b522d3ddbc9192242259c43be75ea244d37ccfa8a4c7"
+        "5024a2cf7cc76e842ea69cc7ca1227405b070047387a5068e4976e4b8ed5f9aadd7b4db024fbb8d7bd8a040d8f6610c1"
+        "c6eb1d4b606dfd182235d0360880304d5a750603af0c424b8c8e6dbc12c3697d2d609c97547e774e2e362ea96d1690dc"
+        "9432112c535258b3db2c4c32ad510d6c07ad0788357883869efb8b629298724847925cf42b34386be700f02903db5852"
+        "276bee2370941f397bdc3905e30964a0b5e73602703340960c3ed6078263b611f197955fecce4b9a32e43cd1d2e5e87c"
+        "4ceb65edc8853a7ee31d28e16e5adffb8ac7b760fbfc63d5f174f4d0936461dbb12c964a6b6d6cee752e5fca1ab4a9fd"
+        "238dd3e8860a1d763d2019f9e7b99ed7666d4e038710f90e0093bc566987d6c0092f571376e705b342d066c54e6e2578"
+        "927b92c1f0928de44e9a6e1f49b907c6aa4f605ec9c398d55df81c67373b03cc8110162fb417f96fd321048647dfcbb3"
+        "92455115cd912ea83351853e6a185284648842adcbd25e67174a3b93b8a64ce2ce9de0e8577b8b662ce32e2565782665"
+        "dd38e5bb5fcc4fe12e4320dab7773b545a09c6d39d9dbad459f21f3e624ee6ed",
+        "010001",
+        "de47c9b27eb8d300dbb5f2c353e632c393262cf06340c4fa7f1b40c4cbd36f90",
+        "46a6c9cd78e38d5567795dbea71872ac16da06725975cee7d8839d2de665ec3b8411277f3e026fd2f9b836d788b48539"
+        "755858bc8be0804147b59c09354b372713145e5a000ac15744ccd2db5795727e2f4d5f67bcab5e7cb1290824963ae885"
+        "28aba0e6785989c8adb86084d26dd1faea3ae2a6175739fe978b576eff673832e513419806d206e0984d1ef0e1c8d898"
+        "1084ee2ee569806b003fb7f08e775998eba1771f1efa070c00a769363c6101d5c5fc6140f102469574cd09746130ed80"
+        "d14eabcd0a0418a752d5595b5f40ee0fb05f5f9860e600d75fbdd53461f5ea18be5bd807281f9e8fd6cf7eb31985206c"
+        "9a5033cdea631512bffdd977fee5e692b3153a2ce9c7708a9c7d665d84762740cc9ea374bd32c18c2d76320e4893a2fa"
+        "c374ca7122e01e08011c351bd33725a6adad96becd44e4ec1032fbfb0c8dcf13cae9556eaf419211d0149c574b8d12ff"
+        "e5bc59468c7c549283be541697258af847e52a9aa8063557dfa40404adbaa95e38ad28eba053aec3c123e98ab1b947bb"
+        "774841e9040dd5409068a2c8a84c530fc4273897ed845d76dbafbf45af1a8fd2767234fac1e852453d8b7eede02af228"
+        "d8b5821238a50a321490dab74d687a3400c34f215b85823424c9d966b516cccac38fc7f08769f47d66c57b9b75ea67be"
+        "82508a513946bcbc809436efc4ee85f139b143c5bc15ff69ad1f3667c3f69bcf",
+    },
+};
+
+static bench_rsa_vector rsa_vectors[3];
+
+/* rsa_hex_decode: the octets of a hex string into out (room for `room`); returns how many, or 0
+ * when the string is odd, too long or not hex. */
+static size_t rsa_hex_decode(const char *hex, uint8_t *out, size_t room)
+{
+    size_t length = strlen(hex);
+    if (length % 2 != 0 || length / 2 > room)
+        return 0;
+    for (size_t i = 0; i < length / 2; i++) {
+        unsigned value;
+        if (sscanf(hex + 2 * i, "%2x", &value) != 1)
+            return 0;
+        out[i] = (uint8_t)value;
+    }
+    return length / 2;
+}
+
+/* bench_rsa_input: see bench.h. */
+const bench_rsa_vector *bench_rsa_input(size_t which)
+{
+    if (which >= sizeof rsa_vectors / sizeof rsa_vectors[0])
+        return NULL;
+    bench_rsa_vector *v = &rsa_vectors[which];
+    if (v->octets == 0) {
+        v->octets = rsa_hex_decode(rsa_hex[which].n, v->n, sizeof v->n);
+        v->e_length = rsa_hex_decode(rsa_hex[which].e, v->e, sizeof v->e);
+        if (v->octets == 0 || v->e_length == 0 || rsa_hex_decode(rsa_hex[which].digest, v->digest, sizeof v->digest) != 32
+            || rsa_hex_decode(rsa_hex[which].signature, v->signature, sizeof v->signature) != v->octets) {
+            fprintf(stderr, "bench: the RSA vector %zu does not decode\n", which);
+            exit(2);
+        }
+    }
+    return v;
+}
+
+/* bench_rsa_verify: see bench.h. */
+void bench_rsa_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_vector *v = (const bench_rsa_vector *)c->data;
+    httpasm_rsa_public_key key;
+    b->api.httpasm_rsa_public_key_init(&key, v->n, v->octets, v->e, v->e_length);
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_rsa_verify_pkcs1(&key, HTTPASM_HASH_SHA256, v->digest, v->signature, v->octets);
+    bench_sink = (uint8_t)sum;
+}
+
+/* bench_rsa_init_verify: see bench.h. */
+void bench_rsa_init_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_vector *v = (const bench_rsa_vector *)c->data;
+    httpasm_rsa_public_key key;
+    int sum = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_rsa_public_key_init(&key, v->n, v->octets, v->e, v->e_length);
+        sum += b->api.httpasm_rsa_verify_pkcs1(&key, HTTPASM_HASH_SHA256, v->digest, v->signature, v->octets);
+    }
+    bench_sink = (uint8_t)sum;
+}
+
+/* bench_rsa_init: see bench.h. */
+void bench_rsa_init(const bench_build *b, const bench_case *c, long calls)
+{
+    const bench_rsa_vector *v = (const bench_rsa_vector *)c->data;
+    httpasm_rsa_public_key key;
+    int sum = 0;
+    for (long i = 0; i < calls; i++)
+        sum += b->api.httpasm_rsa_public_key_init(&key, v->n, v->octets, v->e, v->e_length);
+    bench_sink = (uint8_t)(sum + (int)key.opaque[0]);
+}
+
+typedef void *(*openssl_bld_new_fn)(void);
+typedef int (*openssl_bld_push_bn_fn)(void *bld, const char *key, const void *bn);
+typedef void *(*openssl_bld_to_param_fn)(void *bld);
+typedef void *(*openssl_bin2bn_fn)(const unsigned char *s, int length, void *ret);
+typedef void *(*openssl_ctx_new_from_name_fn)(void *libctx, const char *name, const char *propquery);
+typedef int (*openssl_fromdata_fn)(void *ctx, void **pkey, int selection, void *params);
+typedef int (*openssl_set_md_fn)(void *ctx, const void *md);
+static openssl_bld_new_fn openssl_bld_new;
+static openssl_bld_push_bn_fn openssl_bld_push_bn;
+static openssl_bld_to_param_fn openssl_bld_to_param;
+static openssl_bin2bn_fn openssl_bin2bn;
+static openssl_ctx_new_from_name_fn openssl_ctx_new_from_name;
+static openssl_pkey_ctx_fn openssl_fromdata_init;
+static openssl_fromdata_fn openssl_fromdata;
+static openssl_set_md_fn openssl_set_signature_md;
+static const void *openssl_rsa_md;        /* EVP_sha256() */
+static void *rsa_params[3];
+static void *rsa_fromdata_ctx;
+
+enum { OPENSSL_PUBLIC_KEY = 0x86 };         /* EVP_PKEY_PUBLIC_KEY: all parameters + the public key */
+
+/* openssl_load_rsa: OpenSSL's functions for an RSA public key from n and e (OSSL_PARAM_BLD, BN,
+ * EVP_PKEY_fromdata) and for a verification with SHA-256 (the P-256 set loaded first: it holds
+ * the verify functions), then each vector's parameters, made once. Returns 0, or -1 (the cases
+ * then run without this rival). */
+static int openssl_load_rsa(void)
+{
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (crypto == NULL || openssl_load_p256() != 0)
+        return -1;
+    openssl_bld_new = (openssl_bld_new_fn)dlsym(crypto, "OSSL_PARAM_BLD_new");
+    openssl_bld_push_bn = (openssl_bld_push_bn_fn)dlsym(crypto, "OSSL_PARAM_BLD_push_BN");
+    openssl_bld_to_param = (openssl_bld_to_param_fn)dlsym(crypto, "OSSL_PARAM_BLD_to_param");
+    openssl_bin2bn = (openssl_bin2bn_fn)dlsym(crypto, "BN_bin2bn");
+    openssl_ctx_new_from_name = (openssl_ctx_new_from_name_fn)dlsym(crypto, "EVP_PKEY_CTX_new_from_name");
+    openssl_fromdata_init = (openssl_pkey_ctx_fn)dlsym(crypto, "EVP_PKEY_fromdata_init");
+    openssl_fromdata = (openssl_fromdata_fn)dlsym(crypto, "EVP_PKEY_fromdata");
+    openssl_set_signature_md = (openssl_set_md_fn)dlsym(crypto, "EVP_PKEY_CTX_set_signature_md");
+    openssl_md_fn sha256 = (openssl_md_fn)dlsym(crypto, "EVP_sha256");
+    if (!openssl_bld_new || !openssl_bld_push_bn || !openssl_bld_to_param || !openssl_bin2bn || !openssl_ctx_new_from_name
+        || !openssl_fromdata_init || !openssl_fromdata || !openssl_set_signature_md || !sha256) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the RSA key functions\n");
+        return -1;
+    }
+    openssl_rsa_md = sha256();
+    rsa_fromdata_ctx = openssl_ctx_new_from_name(NULL, "RSA", NULL);
+    for (size_t i = 0; i < sizeof rsa_params / sizeof rsa_params[0]; i++) {
+        const bench_rsa_vector *v = bench_rsa_input(i);
+        void *bld = openssl_bld_new();
+        void *n = openssl_bin2bn(v->n, (int)v->octets, NULL), *e = openssl_bin2bn(v->e, (int)v->e_length, NULL);
+        if (bld == NULL || n == NULL || e == NULL || openssl_bld_push_bn(bld, "n", n) != 1 || openssl_bld_push_bn(bld, "e", e) != 1
+            || (rsa_params[i] = openssl_bld_to_param(bld)) == NULL || rsa_fromdata_ctx == NULL) {
+            fprintf(stderr, "bench: rivals: OpenSSL refused an RSA vector's parameters\n");
+            return -1;
+        }
+        /* (the builder and the numbers stay: a few hundred octets, once per process) */
+    }
+    return 0;
+}
+
+/* openssl_rsa_key: an EVP_PKEY of a vector's n and e through EVP_PKEY_fromdata (OpenSSL's way to
+ * a key from its numbers, as a TLS stack gets one from a certificate's), or NULL. */
+static void *openssl_rsa_key(const bench_case *c)
+{
+    size_t which = (size_t)((const bench_rsa_vector *)c->data - rsa_vectors);
+    void *key = NULL;
+    if (openssl_fromdata_init(rsa_fromdata_ctx) != 1 || openssl_fromdata(rsa_fromdata_ctx, &key, OPENSSL_PUBLIC_KEY, rsa_params[which]) != 1)
+        return NULL;
+    return key;
+}
+
+/* openssl_rsa_verify: EVP_PKEY_verify of the vector's signature, the key and the context made once
+ * (OpenSSL caches the key's Montgomery constants on its first verification). */
+static void openssl_rsa_verify(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    const bench_rsa_vector *v = (const bench_rsa_vector *)c->data;
+    void *key = openssl_rsa_key(c);
+    void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+    int sum = 0;
+    if (ctx != NULL && openssl_verify_init(ctx) == 1 && openssl_set_signature_md(ctx, openssl_rsa_md) == 1) {
+        for (long i = 0; i < calls; i++)
+            sum += openssl_verify(ctx, v->signature, v->octets, v->digest, 32);
+    }
+    openssl_pkey_ctx_free(ctx);
+    openssl_pkey_free(key);
+    bench_sink = (uint8_t)sum;
+}
+
+/* openssl_rsa_fresh: OpenSSL's verification with the key made from n and e each call (fromdata, a
+ * context, the digest set, verify, both freed): its work per certificate. */
+static void openssl_rsa_fresh(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    const bench_rsa_vector *v = (const bench_rsa_vector *)c->data;
+    int sum = 0;
+    for (long i = 0; i < calls; i++) {
+        void *key = openssl_rsa_key(c);
+        void *ctx = key ? openssl_pkey_ctx_new(key, NULL) : NULL;
+        if (ctx != NULL && openssl_verify_init(ctx) == 1 && openssl_set_signature_md(ctx, openssl_rsa_md) == 1)
+            sum += openssl_verify(ctx, v->signature, v->octets, v->digest, 32);
+        openssl_pkey_ctx_free(ctx);
+        openssl_pkey_free(key);
+    }
+    bench_sink = (uint8_t)sum;
+}
+
+static bench_rival rsa_verify_rivals[] = { { openssl_name, openssl_rsa_verify } };
+static bench_rival rsa_init_verify_rivals[] = { { openssl_name, openssl_rsa_fresh } };
+
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
                                        0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -1381,6 +1636,35 @@ void bench_suite_rivals(void)
         c.rivals = p256 ? p256_cases[i].rivals : NULL;
         c.rival_count = p256 ? 1 : 0;
         bench_add(&c);
+    }
+    int rsa = openssl_load_rsa() == 0;
+    static const char *const rsa_labels[] = { "2048-bit, PKCS#1 v1.5 SHA-256", "3072-bit, PKCS#1 v1.5 SHA-256",
+                                              "4096-bit, PKCS#1 v1.5 SHA-256" };
+    static const struct {
+        const char *name;
+        bench_batch ours;
+        const bench_rival *rivals;
+    } rsa_cases[] = {
+        { "rsa_verify", bench_rsa_verify, rsa_verify_rivals },
+        { "rsa_init_verify", bench_rsa_init_verify, rsa_init_verify_rivals },
+        { "rsa_key_init", bench_rsa_init, NULL },
+    };
+    for (size_t i = 0; i < sizeof rsa_cases / sizeof rsa_cases[0]; i++) {
+        for (size_t size = 0; size < 3; size++) {
+            bench_case c;                   /* by hand: one operation a call, no octets to rate */
+            memset(&c, 0, sizeof c);
+            c.suite = "rivals";
+            c.name = rsa_cases[i].name;
+            c.input = rsa_labels[size];
+            c.data = (const uint8_t *)bench_rsa_input(size);
+            c.length = sizeof(bench_rsa_vector);
+            c.octets = 0;
+            c.ours = rsa_cases[i].ours;
+            c.tiers = BENCH_TIERS_BEST_V1;
+            c.rivals = rsa && rsa_cases[i].rivals ? rsa_cases[i].rivals : NULL;
+            c.rival_count = c.rivals ? 1 : 0;
+            bench_add(&c);
+        }
     }
     int hmac384 = openssl_load_hmac384() == 0;
     for (size_t i = 0; i < 2; i++)

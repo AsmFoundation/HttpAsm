@@ -239,6 +239,24 @@ static void add_p256(void)
     }
 }
 
+/* add_rsa: the tiers case of RSA: a 2048-bit PKCS#1 v1.5 verification (Wycheproof's, e = 65537), the
+ * key prepared before the loop, at every tier: v1's mul against v3's mulx with adcx/adox (the
+ * product, the square and the reduction; the v2 tier runs v1's code, v4 v3's). */
+static void add_rsa(void)
+{
+    bench_case c;
+    memset(&c, 0, sizeof c);
+    c.suite = "tiers";
+    c.name = "rsa_verify";
+    c.input = "2048-bit, PKCS#1 v1.5 SHA-256";
+    c.data = (const uint8_t *)bench_rsa_input(0);
+    c.length = sizeof(bench_rsa_vector);
+    c.octets = 0;
+    c.ours = bench_rsa_verify;
+    c.tiers = BENCH_TIERS_ALL;
+    bench_add(&c);
+}
+
 /* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
  * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
  * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
@@ -299,6 +317,7 @@ void bench_suite_tiers(void)
     add_chacha_seal();
     add_x25519();
     add_p256();
+    add_rsa();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

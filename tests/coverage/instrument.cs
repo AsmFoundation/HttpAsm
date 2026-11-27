@@ -12,7 +12,8 @@
 //        block   after each run of labels, before the first instruction that follows
 //        fall    right after each conditional jump: its not-taken edge
 //        taken   each conditional jump is sent through a trampoline that marks its taken edge
-//                and jumps on to the real target
+//                and jumps on to the real target; a short-only jump (jrcxz, loop: rel8 alone)
+//                through one right below itself, the not-taken path jumping over it
 //        dead    after jmp, ret or ud2, before an instruction no label leads to: code nothing
 //                can reach, which must stay unmarked
 //      A marker is "mov byte [rel marks + id], 1": it changes no register and no flag, so it
@@ -54,7 +55,7 @@ internal static partial class Instrumenter
         "js", "jz",
     };
 
-    /// <summary>Jumps with only an 8-bit displacement, which a trampoline could be out of reach of.</summary>
+    /// <summary>Jumps with only an 8-bit displacement: a trampoline at the object's end could be out of their reach, so each gets one right below itself.</summary>
     private static readonly HashSet<string> ShortOnlyJumps = new(StringComparer.OrdinalIgnoreCase)
     {
         "jrcxz", "jecxz", "loop", "loope", "loopne", "loopnz", "loopz",
@@ -299,9 +300,8 @@ internal static partial class Instrumenter
     /// <param name="section">The section the markers go into (ha_cov, or libFuzzer's
     /// __libfuzzer_extra_counters).</param>
     /// <returns>The instrumented lines and the map.</returns>
-    /// <exception cref="InstrumentationException">A short-only jump (jrcxz, loop), whose
-    /// trampoline could be out of its 8-bit reach, or a conditional jump whose target is not a
-    /// plain label.</exception>
+    /// <exception cref="InstrumentationException">A conditional or short-only jump whose target
+    /// is not a plain label.</exception>
     internal static Result Instrument(string[] input, string source, string section)
     {
         var output = new List<string>(input.Length * 2);
@@ -427,7 +427,28 @@ internal static partial class Instrumenter
             afterTerminator = Terminators.Contains(mnemonic);
             if (ShortOnlyJumps.Contains(mnemonic))
             {
-                throw new InstrumentationException($"{here.Replace('\t', ':')}: {rest}: a short-only jump cannot be given a trampoline");
+                // A short-only jump (jrcxz, loop: rel8 alone): a trampoline among the others at the
+                // object's end could be out of its reach, so it gets one right below itself, which
+                // the not-taken path jumps over. jmp and the markers change no flag, so code that
+                // keeps carry chains alive across the jump (rsa.asm's rows) runs as it would.
+                string shortOperand = StripPrefix(rest[mnemonic.Length..].Trim(), "short");
+                if (!PlainLabel().IsMatch(shortOperand))
+                {
+                    throw new InstrumentationException($"{here.Replace('\t', ':')}: {rest}: the target is not a plain label");
+                }
+
+                string shortTarget = shortOperand.StartsWith('.') && !shortOperand.StartsWith("..@", StringComparison.Ordinal) ? scope + shortOperand : shortOperand;
+                int shortTaken = Marker("taken", here, rest);
+                int shortFall = Marker("fall", here, rest);
+                output.Add($" {mnemonic} ..@ha_cov_t{shortTaken}");
+                output.Add($" jmp ..@ha_cov_f{shortFall}");
+                output.Add($"..@ha_cov_t{shortTaken}:");
+                output.Add(MarkerLine(shortTaken));
+                output.Add($" jmp {shortTarget}");
+                output.Add($"..@ha_cov_f{shortFall}:");
+                output.Add(MarkerLine(shortFall));
+                output.Add(resync);
+                continue;
             }
 
             if (!ConditionalJumps.Contains(mnemonic))

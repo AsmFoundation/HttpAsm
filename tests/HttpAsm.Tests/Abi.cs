@@ -293,6 +293,36 @@ internal unsafe struct AesGcmKey
 }
 
 /// <summary>
+/// httpasm_rsa_public_key (httpasm_abi.inc; opaque in httpasm.h), 2080 octets: a public key ready
+/// for verification. The tests read its fields to hold the init to a BigInteger model (R^2 mod n,
+/// n0, the limbs); a caller only passes it. All zeros after a refused init.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct RsaPublicKey
+{
+    /// <summary>The modulus, 128 little-endian limbs, zero above its own.</summary>
+    public fixed ulong N[128];
+
+    /// <summary>R^2 mod n, R = 2^(64 Limbs).</summary>
+    public fixed ulong RR[128];
+
+    /// <summary>-n^-1 mod 2^64.</summary>
+    public ulong N0;
+
+    /// <summary>The public exponent.</summary>
+    public ulong E;
+
+    /// <summary>The limbs the operations run on: n's rounded up to a multiple of 8.</summary>
+    public uint Limbs;
+
+    /// <summary>n's bit length (0 for a refused key).</summary>
+    public uint Bits;
+
+    /// <summary>Unused.</summary>
+    public ulong Reserved;
+}
+
+/// <summary>
 /// httpasm_hmac_sha384_ctx (httpasm.h): a running HMAC-SHA384, 416 octets: SHA-384's inner and
 /// outer hashes past their key blocks. Copying it after init MACs again under the same key.
 /// </summary>

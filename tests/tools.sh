@@ -141,6 +141,16 @@ if [ ! -f "$tools/cavp/ecdsa/SigVer.rsp" ] || [ "$tools/cavp/186-4ecdsatestvecto
   unzip -q -o -j "$tools/cavp/186-4ecdsatestvectors.zip" -d "$tools/cavp/ecdsa"
   touch "$tools/cavp/ecdsa/SigVer.rsp"
 fi
+#   186-3rsatestvectors.zip: FIPS 186-3's RSA files, unpacked flat into cavp/rsa/; RsaTests reads
+#   the PKCS#1 v1.5 and PSS ones: SigVer15 and SigVerPSS (valid and invalid signatures, 1024 to
+#   3072 bits, SHA-1 to SHA-512), SigGen15 and SigGenPSS (signatures to verify, 2048 and 3072).
+fetch cavp/186-3rsatestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-3rsatestvectors.zip \
+  8405aeb3572a4f98ed4b1a3ccb3f2f49e725462dd28ec4759d6a15d88855d19c
+if [ ! -f "$tools/cavp/rsa/SigVerPSS_186-3.rsp" ] || [ "$tools/cavp/186-3rsatestvectors.zip" -nt "$tools/cavp/rsa/SigVerPSS_186-3.rsp" ]; then
+  unzip -q -o -j "$tools/cavp/186-3rsatestvectors.zip" -d "$tools/cavp/rsa"
+  touch "$tools/cavp/rsa/SigVerPSS_186-3.rsp"
+fi
 #   Project Wycheproof (C2SP/wycheproof) at commit 65ca494 (2026-11-11), its testvectors_v1 files
 #   one by one into wycheproof/: edge cases the official vectors leave out (tags cut short or
 #   flipped, empty and long keys, HKDF's length limit), each test marked valid or invalid.
@@ -156,5 +166,37 @@ fetch wycheproof/x25519_test.json "$wycheproof/x25519_test.json" 35c3f5231cf25cc
 fetch wycheproof/ecdh_secp256r1_ecpoint_test.json "$wycheproof/ecdh_secp256r1_ecpoint_test.json" 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
 fetch wycheproof/ecdsa_secp256r1_sha256_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha256_p1363_test.json" c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986
 fetch wycheproof/ecdsa_secp256r1_sha512_p1363_test.json "$wycheproof/ecdsa_secp256r1_sha512_p1363_test.json" 95c41daca2101540641cc13ccab128d67ad665eaf8349896434e1e6a0c5c68fc
+#   RSA signatures (RsaTests): RSASSA-PKCS1-v1_5 at 2048 to 8192 bits with every SHA-2 hash this
+#   library takes (BER and malformed paddings, wrong hashes, the missing NULL, small and edge-case
+#   signatures), and RSASSA-PSS: MGF1 with the same hash at the salt lengths TLS 1.3 and the
+#   certificates use, the misc file's every hash pair, and SHA-1 and MGF1-SHA1 ones that must fail
+#   here (this library verifies PSS with SHA-256, -384 or -512 and MGF1 on the same hash only).
+for pin in \
+  rsa_signature_2048_sha224_test.json:81b9da6e58f8a55ccc02b96f64a1d84d93100b9767dddbc906cee52d4c7daeac \
+  rsa_signature_2048_sha256_test.json:94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393 \
+  rsa_signature_2048_sha384_test.json:c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d \
+  rsa_signature_2048_sha512_test.json:16ea24b039905d054bdb6004f5fd179374e150b7b6d73a7ba654b6d00eab12ef \
+  rsa_signature_3072_sha256_test.json:0f5f18cabfaad3e2792e82f7e9882f8999049b456714de924b8a5e202f61ca43 \
+  rsa_signature_3072_sha384_test.json:73499ee649d8fb703b3f0f455fa36f7682fde677c590a736958ebce05ab27dae \
+  rsa_signature_3072_sha512_test.json:09aa3336fdb7be216180ce944ca7b2a052e1de38c210435c19506327d4a36ebd \
+  rsa_signature_4096_sha256_test.json:957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667 \
+  rsa_signature_4096_sha384_test.json:bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073 \
+  rsa_signature_4096_sha512_test.json:9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a \
+  rsa_signature_8192_sha256_test.json:86df4075b4ce5954726abfa00cc19ebe8b608d6d99094d5e123d6a3a86568bd9 \
+  rsa_signature_8192_sha384_test.json:382c2795790021798099bc8e94d0f078ef1f78787f5c7a87aaa25b5556efacff \
+  rsa_signature_8192_sha512_test.json:c9e5463742d192b5ff1108538841d4d302fd799604a051d09db5f496f2f851f7 \
+  rsa_pss_2048_sha256_mgf1_0_test.json:b22a8d9a2e7e47f681d0ff1d1a55455daaf325d989c64ad005f848bd50b9b4c0 \
+  rsa_pss_2048_sha256_mgf1_32_test.json:7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c \
+  rsa_pss_2048_sha384_mgf1_48_test.json:66d464778b0b2f683a1d1a20e94f77e9472b8cc393b45f423fa08a48e677063c \
+  rsa_pss_3072_sha256_mgf1_32_test.json:cca48433e6d1accb57f65b3396c4f4dd93c776467101c3f0948e74c283fd4749 \
+  rsa_pss_4096_sha256_mgf1_32_test.json:e627cbf5139a01e0a446c4fe15911f6268224fdd3ef4a1eb714b3942b5686410 \
+  rsa_pss_4096_sha384_mgf1_48_test.json:d632649a7630f7c267eda576714ca11cf0ff068d6622f576b8701f923c112577 \
+  rsa_pss_4096_sha512_mgf1_32_test.json:af1e1c1c593edf91be3e9880927231d57f9df082f2d8caec2a61d9874ade101f \
+  rsa_pss_4096_sha512_mgf1_64_test.json:c93ceaa56a190c9fd4707441c5c6a75839f108202d88aec891697f9623042547 \
+  rsa_pss_misc_test.json:1fac515f67fea8ccbf44ea08fde2de00cd76169f774a54ce2994c9963c31e84f \
+  rsa_pss_2048_sha1_mgf1_20_test.json:96d13ecdc356a24aec01dcbef7c5a15458b78373283113c294a60f8ddf717b29 \
+  rsa_pss_2048_sha256_mgf1sha1_20_test.json:8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307; do
+  fetch "wycheproof/${pin%%:*}" "$wycheproof/${pin%%:*}" "${pin##*:}"
+done
 
 echo "$tools"
