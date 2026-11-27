@@ -59,6 +59,49 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_sha256")]
     internal static partial void Sha256(byte* data, nuint n, byte* digest);
 
+    /// <summary>void httpasm_sha512_init(httpasm_sha512_ctx *h): a SHA-512 hash.</summary>
+    /// <param name="h">The running hash to start (or start over).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha512_init")]
+    internal static partial void Sha512Init(Sha512Context* h);
+
+    /// <summary>void httpasm_sha384_init(httpasm_sha512_ctx *h): a SHA-384 hash in the same context.</summary>
+    /// <param name="h">The running hash to start (or start over).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha384_init")]
+    internal static partial void Sha384Init(Sha512Context* h);
+
+    /// <summary>void httpasm_sha512_update(httpasm_sha512_ctx *h, const uint8_t *data, size_t n): either hash.</summary>
+    /// <param name="h">The running hash.</param>
+    /// <param name="data">The octets to feed (anything when n is 0).</param>
+    /// <param name="n">How many.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha512_update")]
+    internal static partial void Sha512Update(Sha512Context* h, byte* data, nuint n);
+
+    /// <summary>void httpasm_sha512_final(httpasm_sha512_ctx *h, uint8_t digest[64]): wipes h.</summary>
+    /// <param name="h">The running hash (started by <see cref="Sha512Init"/>); all zeros afterwards.</param>
+    /// <param name="digest">Receives the 64-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha512_final")]
+    internal static partial void Sha512Final(Sha512Context* h, byte* digest);
+
+    /// <summary>void httpasm_sha384_final(httpasm_sha512_ctx *h, uint8_t digest[48]): wipes h.</summary>
+    /// <param name="h">The running hash (started by <see cref="Sha384Init"/>); all zeros afterwards.</param>
+    /// <param name="digest">Receives the 48-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha384_final")]
+    internal static partial void Sha384Final(Sha512Context* h, byte* digest);
+
+    /// <summary>void httpasm_sha512(const uint8_t *data, size_t n, uint8_t digest[64]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the 64-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha512")]
+    internal static partial void Sha512(byte* data, nuint n, byte* digest);
+
+    /// <summary>void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[48]).</summary>
+    /// <param name="data">The message.</param>
+    /// <param name="n">Its length.</param>
+    /// <param name="digest">Receives the 48-octet digest.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_sha384")]
+    internal static partial void Sha384(byte* data, nuint n, byte* digest);
+
     /// <summary>void httpasm_hmac_sha256_init(httpasm_hmac_sha256_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The running MAC to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

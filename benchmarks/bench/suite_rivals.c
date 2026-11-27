@@ -250,7 +250,8 @@ static const bench_rival h1_response_rivals[] = {
     { "llhttp 9.4.4", llhttp_h1_response },
 };
 
-/* ---- Hashes: SHA-256 against OpenSSL's, the reference M2 measures every primitive by. */
+/* ---- Hashes: SHA-256, SHA-512 and SHA-384 against OpenSSL's, the reference M2 measures every
+ * primitive by. */
 
 /* bench_sha_input: the hash cases' octets (bench.h): 16 KiB from a fixed xorshift, made once. */
 const uint8_t *bench_sha_input(void)
@@ -333,6 +334,86 @@ static void openssl_sha256(const bench_build *b, const bench_case *c, long calls
 
 static bench_rival sha256_rivals[] = {
     { openssl_name, openssl_sha256 },
+};
+
+/* bench_sha512: httpasm_sha512 of the case's message, `calls` times (bench.h). */
+void bench_sha512(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t digest[64];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_sha512(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* bench_sha384: httpasm_sha384 of the case's message, `calls` times (bench.h). */
+void bench_sha384(const bench_build *b, const bench_case *c, long calls)
+{
+    uint8_t digest[48];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        b->api.httpasm_sha384(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* OpenSSL's one-shot SHA512 and SHA384 (the same signature as SHA256's), found by
+ * openssl_load_sha512: its compression picks AVX2 with BMI2, AVX or the scalar code by
+ * OPENSSL_ia32cap, as for any application. */
+static openssl_sha256_fn openssl_sha512_call;
+static openssl_sha256_fn openssl_sha384_call;
+
+/* openssl_load_sha512: SHA512 and SHA384 from the libcrypto openssl_load found. Returns 0, or -1
+ * (with the reason on stderr) when either is missing: the cases then run without this rival. */
+static int openssl_load_sha512(void)
+{
+    if (openssl_load() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    openssl_sha512_call = crypto ? (openssl_sha256_fn)dlsym(crypto, "SHA512") : NULL;
+    openssl_sha384_call = crypto ? (openssl_sha256_fn)dlsym(crypto, "SHA384") : NULL;
+    if (openssl_sha512_call == NULL || openssl_sha384_call == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks SHA512 or SHA384\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* openssl_sha512: OpenSSL's SHA512 of the case's message, `calls` times. */
+static void openssl_sha512(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char digest[64];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_sha512_call(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+/* openssl_sha384: OpenSSL's SHA384 of the case's message, `calls` times. */
+static void openssl_sha384(const bench_build *b, const bench_case *c, long calls)
+{
+    (void)b;
+    unsigned char digest[48];
+    size_t total = 0;
+    for (long i = 0; i < calls; i++) {
+        openssl_sha384_call(c->data, c->length, digest);
+        total += digest[0];
+    }
+    bench_sink = total;
+}
+
+static bench_rival sha512_rivals[] = {
+    { openssl_name, openssl_sha512 },
+};
+
+static bench_rival sha384_rivals[] = {
+    { openssl_name, openssl_sha384 },
 };
 
 /* The MAC cases' key: 32 octets, a TLS 1.3 traffic secret's size. */
@@ -565,6 +646,13 @@ void bench_suite_rivals(void)
     for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
         add("sha256", sha_labels[i], sha, sha_lengths[i], bench_sha256, openssl ? sha256_rivals : NULL,
             openssl ? sizeof sha256_rivals / sizeof sha256_rivals[0] : 0);
+    int sha512 = openssl_load_sha512() == 0;
+    for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
+        add("sha512", sha_labels[i], sha, sha_lengths[i], bench_sha512, sha512 ? sha512_rivals : NULL,
+            sha512 ? sizeof sha512_rivals / sizeof sha512_rivals[0] : 0);
+    for (size_t i = 0; i < 2; i++)          /* 64 octets and 1 KiB: a transcript's and a record's sizes */
+        add("sha384", sha_labels[i], sha, sha_lengths[i], bench_sha384, sha512 ? sha384_rivals : NULL,
+            sha512 ? sizeof sha384_rivals / sizeof sha384_rivals[0] : 0);
     int hmac = openssl_load_hmac() == 0;
     for (size_t i = 0; i < 2; i++)          /* 64 octets and 1 KiB: a record's MAC-sized inputs */
         add("hmac_sha256", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha256, hmac ? hmac_rivals : NULL,

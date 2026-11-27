@@ -75,12 +75,14 @@ extern ha_span_v2           ; v2 and up: rax = the leading octets of rdi[0..rsi)
                             ; rsi, xmm3; clobbers rcx, rdx, the other xmm0-xmm6 (fields.asm)
 extern ha_sha256_blocks     ; SHA-256's compression: state rdi (8 dwords), rdx 64-octet blocks at
                             ; rsi; keeps rdi, rbx, rbp, r12-r15 (crypto/sha256.asm)
-extern ha_copy_short        ; rcx (0-64) octets rsi -> rdi by sized moves; keeps all but rax, rdx,
-                            ; xmm0 (crypto/sha256.asm)
+extern ha_copy_short        ; rcx octets (any count; a block or less meant) rsi -> rdi by sized
+                            ; moves; keeps all but rax, rdx, xmm0 (crypto/sha256.asm)
 extern httpasm_sha256_init  ; the C ABI's SHA-256 (crypto/sha256.asm), for the core's HMAC and
 extern httpasm_sha256_update ; HKDF (crypto/hmac.asm)
 extern httpasm_sha256_final
 extern httpasm_sha256
+extern ha_sha512_blocks     ; SHA-512's (and SHA-384's) compression: state rdi (8 qwords), rdx
+                            ; 128-octet blocks at rsi; keeps rdi, rbx, rbp, r12-r15 (crypto/sha512.asm)
 extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", or 0; keeps every
                             ; register (semantics/ipv6.asm: push end, push cursor, call, pop, add rsp 8)
 

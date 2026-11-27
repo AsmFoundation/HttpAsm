@@ -236,6 +236,23 @@ HTTPASM_SHA256_DIGEST           equ 32      ; octets of a digest
 HTTPASM_SHA256_BLOCK            equ 64      ; octets of a block (HMAC's key padding)
 
 ; -----------------------------------------------------------------------------
+; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
+; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's
+; whole state, like httpasm_sha256_ctx's.
+; -----------------------------------------------------------------------------
+struc httpasm_sha512_ctx
+    .state:             resq 8      ; H0-H7 of FIPS 180-4 6.4, as native qwords
+    .length:            resq 1      ; octets fed so far, the buffered ones included
+    .buffer:            resb 128    ; the next block's first .buffered octets
+    .buffered:          resd 1      ; 0-127
+    .reserved:          resd 1
+endstruc
+
+HTTPASM_SHA512_DIGEST           equ 64      ; octets of a SHA-512 digest
+HTTPASM_SHA384_DIGEST           equ 48      ; octets of a SHA-384 digest
+HTTPASM_SHA512_BLOCK            equ 128     ; octets of a block (both; HMAC's key padding)
+
+; -----------------------------------------------------------------------------
 ; httpasm_hmac_sha256_ctx: a running HMAC-SHA256 (FIPS 198-1), 224 octets: the inner hash,
 ; already past the key's ipad block, then the outer one, past its opad block. The key itself is
 ; not kept. Copying it after httpasm_hmac_sha256_init reuses the key without its two

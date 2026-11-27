@@ -252,6 +252,31 @@ internal struct HmacSha256Context
     public Sha256Context Outer;
 }
 
+/// <summary>
+/// httpasm_sha512_ctx (httpasm.h): a running SHA-512 or SHA-384 hash, 208 octets. The two share
+/// the layout: only the start (<see cref="Native.Sha512Init"/> or <see cref="Native.Sha384Init"/>)
+/// and the final's length differ, so a context must be finished by the final of its own init.
+/// Copying the struct forks the hash.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Sha512Context
+{
+    /// <summary>H0-H7 of FIPS 180-4 6.4.</summary>
+    public fixed ulong State[8];
+
+    /// <summary>Octets fed so far.</summary>
+    public ulong Length;
+
+    /// <summary>The next block's first <see cref="Buffered"/> octets.</summary>
+    public fixed byte Buffer[128];
+
+    /// <summary>How many octets wait in <see cref="Buffer"/> (0-127).</summary>
+    public uint Buffered;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
 /// <summary>httpasm_client_response (httpasm.h): 96 octets.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct ClientResponse

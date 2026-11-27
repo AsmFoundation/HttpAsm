@@ -61,6 +61,13 @@ extern httpasm_sha256_init          ; void (httpasm_sha256_ctx *h)
 extern httpasm_sha256_update        ; void (httpasm_sha256_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_sha256_final         ; void (httpasm_sha256_ctx *h, uint8_t digest[32]): wipes h
 extern httpasm_sha256               ; void (const uint8_t *data, size_t n, uint8_t digest[32])
+extern httpasm_sha512_init          ; void (httpasm_sha512_ctx *h)
+extern httpasm_sha384_init          ; void (httpasm_sha512_ctx *h): the same context, SHA-384's H(0)
+extern httpasm_sha512_update        ; void (httpasm_sha512_ctx *h, const uint8_t *data, size_t n): both
+extern httpasm_sha512_final         ; void (httpasm_sha512_ctx *h, uint8_t digest[64]): wipes h
+extern httpasm_sha384_final         ; void (httpasm_sha512_ctx *h, uint8_t digest[48]): wipes h
+extern httpasm_sha512               ; void (const uint8_t *data, size_t n, uint8_t digest[64])
+extern httpasm_sha384               ; void (const uint8_t *data, size_t n, uint8_t digest[48])
 extern httpasm_hmac_sha256_init     ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha256_update   ; void (httpasm_hmac_sha256_ctx *h, const uint8_t *data, size_t n)
 extern httpasm_hmac_sha256_final    ; void (httpasm_hmac_sha256_ctx *h, uint8_t mac[32]): wipes h

@@ -250,7 +250,8 @@ uint32_t httpasm_abi_version(void);
 /* The size of one of the ABI's structures, for bindings to check their copies: 1 httpasm_field,
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
- * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx; 0 for any other value. */
+ * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx; 0 for any other
+ * value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -328,6 +329,39 @@ void httpasm_sha256_final(httpasm_sha256_ctx *h, uint8_t digest[HTTPASM_SHA256_D
 
 /* The digest of n octets at once. */
 void httpasm_sha256(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA256_DIGEST]);
+
+#define HTTPASM_SHA512_DIGEST 64    /* octets of a SHA-512 digest */
+#define HTTPASM_SHA384_DIGEST 48    /* octets of a SHA-384 digest */
+#define HTTPASM_SHA512_BLOCK  128   /* octets of a SHA-512 (and SHA-384) block */
+
+/* A running SHA-512 or SHA-384 hash (208 octets): the two differ only in their start (init) and
+ * in how much of the state their final writes, so they share this context and the update. As
+ * with SHA-256, a copy forks the hash. Feeding a SHA-384 context to httpasm_sha512_final (or the
+ * reverse) gives neither digest: finish a hash with the final of the init that started it. */
+typedef struct httpasm_sha512_ctx {
+    uint64_t state[8];              /* H0-H7 */
+    uint64_t length;                /* octets fed so far */
+    uint8_t buffer[128];            /* the next block's first octets */
+    uint32_t buffered;              /* how many of them */
+    uint32_t reserved;
+} httpasm_sha512_ctx;
+
+/* Starts a SHA-512 hash, or a SHA-384 one (or starts it over). */
+void httpasm_sha512_init(httpasm_sha512_ctx *h);
+void httpasm_sha384_init(httpasm_sha512_ctx *h);
+
+/* Feeds n octets to either (n may be 0). The whole message must stay below 2^61 octets: the
+ * length is counted in octets, and FIPS 180-4's 2^128-bit bound is far past any TLS use. */
+void httpasm_sha512_update(httpasm_sha512_ctx *h, const uint8_t *data, size_t n);
+
+/* Write the digest of everything fed (64 octets for SHA-512, 48 for SHA-384), then wipe h to
+ * zeros: call an init before feeding it again. */
+void httpasm_sha512_final(httpasm_sha512_ctx *h, uint8_t digest[HTTPASM_SHA512_DIGEST]);
+void httpasm_sha384_final(httpasm_sha512_ctx *h, uint8_t digest[HTTPASM_SHA384_DIGEST]);
+
+/* The digests of n octets at once. */
+void httpasm_sha512(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA512_DIGEST]);
+void httpasm_sha384(const uint8_t *data, size_t n, uint8_t digest[HTTPASM_SHA384_DIGEST]);
 
 /* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256. Every

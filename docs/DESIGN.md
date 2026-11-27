@@ -841,6 +841,29 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      keys, messages and lengths, at every tier. Against OpenSSL 3.0.13's `HMAC()`: 6.0x faster
      on 64 octets (253 against 1,524 ns), 2.31x on 1 KiB; HKDF-Expand of one 32-octet key from
      a 32-octet secret takes 230 ns (four SHA-256 compressions), 3.83x v1's.
+   - **SHA-512 and SHA-384** (2026-11-27), `crypto/sha512.asm`: one context
+     (`httpasm_sha512_ctx`, 208 octets) and one update for both, two inits and two finals (the
+     H(0) and the digest's length are all that differ), one-shot forms, over
+     `ha_sha512_blocks` in two versions: v1 the 80 rounds unrolled as SHA-256's, with K(t) +
+     W(t) added to h before anything that waits for e; v3 (AVX2 with BMI2) the message
+     schedule of two blocks at once in YMM registers (one block a 128-bit lane, since
+     `vpalignr` and the shifts work per lane; sigma0's ROTR8 as one `vpshufb`), stored as
+     W + K while the first block's rounds run and read again by the second block's, and
+     scalar rounds with `rorx` and `andn` in the arrangement of OpenSSL's "AVX2 + BMI" code
+     (Ch and Maj summed into h piece by piece, a ^ b kept as the next b ^ c, Sigma0 added to
+     the next a one round late); a lone last block runs in both lanes. Proven by NIST's
+     129 short, 128 long and 100 Monte Carlo checkpoints of each, .NET's SHA512 and SHA384 on
+     every length to 1,100 octets in random pieces, and `tests/native/tiers` against the guard
+     page. The round sets the speed: alone it takes 6.9 cycles on this core where its
+     dependencies allow 5.0 (a dataflow count over 400 rounds); 72 random valid reorderings of
+     its 24 instructions, the r13-based LEAs as adds, and copies moved off the chain changed
+     nothing beyond the noise, and Intel's arrangement (the Linux kernel's) runs 7.6. So bulk
+     hashing is level with OpenSSL, which runs the same rounds; short messages are not.
+     Against OpenSSL 3.0.13's `SHA512`/`SHA384`: 2.60x faster on 64 octets (241.5 against
+     628.3 ns), 1.20x on 1 KiB, level on 16 KiB (0.61 octets/ns each); v3 is 1.26x v1. The
+     SHA512 extensions (Arrow Lake and later) wait for a CPU that can measure them. Next for
+     HMAC: the key setup's two compressions (K0 ^ ipad, K0 ^ opad) are independent, so one
+     interleaved pass could take them at the cost of about one.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

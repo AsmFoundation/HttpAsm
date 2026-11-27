@@ -191,6 +191,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: SHA-512 and SHA-384.** `httpasm_sha512` and `httpasm_sha384` (one shot) on the
+hash cases' octets beside OpenSSL 3.0.13's `SHA512` and `SHA384` (its AVX2 + BMI2 code on this
+CPU), 21 rounds, the host at 2-14% other load, every A/A control within 1.5%:
+
+| Case | HttpAsm best (v3) | v1 | OpenSSL 3.0.13 | HttpAsm / OpenSSL |
+|---|---:|---:|---:|---:|
+| SHA-512, 64 octets | 241.5 ns | 279.2 ns | 628.3 ns | 2.60x faster |
+| SHA-512, 1 KiB | 1,907 ns | 2,370 ns | 2,282 ns | 1.20x faster |
+| SHA-512, 16 KiB | 26.76 us (0.61 octets/ns) | 33.71 us | 26.98 us (0.61) | level |
+| SHA-384, 64 octets | 240.9 ns | 276.3 ns | 623.9 ns | 2.59x faster |
+| SHA-384, 1 KiB | 1,904 ns | 2,353 ns | 2,283 ns | 1.20x faster |
+
+v3 is 1.26x v1 on 1 KiB and 16 KiB (`tiers/sha512/*`). In cycles (a dependent add chain timed
+beside it gives this WSL core's clock, about 2.9 GHz): 594 a block, 7.4 a round, where the
+rounds alone take 6.9 (the schedule of two blocks in YMM costs the rest) and their dependencies
+allow 5.0. The round is what bounds both libraries: OpenSSL runs the same arrangement, Intel's
+(the Linux kernel's) runs 7.6 cycles, and 72 random valid reorderings of the 24 instructions,
+adds for the LEAs and copies taken off the chain all stayed within the noise. On short messages
+OpenSSL 3's one-shot pays for fetching its provider on every call.
+
 **2026-11-27: HMAC-SHA256 and HKDF-SHA256.** `rivals/hmac_sha256/*` (31 rounds; the host carried
 22% other load, the A/A control within 2%) beside OpenSSL 3.0.13's one-shot `HMAC()` with
 `EVP_sha256()`, under a 32-octet key; `tiers/hkdf_sha256_expand/*`, a 32-octet output key from a

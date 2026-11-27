@@ -1384,6 +1384,79 @@ static int sha256_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_sha512, httpasm_sha384: SHA-512's compression by versions (crypto/sha512.asm) -----
+ * v1 is the scalar compression, v3 the AVX2 schedule of two blocks at once with BMI2 rounds (a
+ * lone last block in both lanes). As for SHA-256: every message ends against the guard page, is
+ * hashed at once and in pieces at every tier, and must give v1's digest. */
+
+/* sha512_pieces: the SHA-512 (sha384 = 1: SHA-384) digest of p[0..n) fed in random pieces (empty
+ * ones too, and pieces past the 128-octet block) to a running hash.
+ *   p, n  the message; digest  out, 64 (48) octets. */
+static void sha512_pieces(const uint8_t *p, size_t n, int sha384, uint8_t digest[64])
+{
+    httpasm_sha512_ctx h;
+    if (sha384)
+        httpasm_sha384_init(&h);
+    else
+        httpasm_sha512_init(&h);
+    size_t at = 0;
+    while (at < n) {
+        size_t piece = (size_t)(rng() % (rng() % 4 == 0 ? 600 : 140));
+        if (piece > n - at)
+            piece = n - at;
+        httpasm_sha512_update(&h, p + at, piece);
+        at += piece;
+    }
+    if (sha384)
+        httpasm_sha384_final(&h, digest);
+    else
+        httpasm_sha512_final(&h, digest);
+}
+
+/* sha512_tiers: SHA-512 and SHA-384 of every length 0-600 (the v3 compression's lone and paired
+ * blocks, the padding's one and two blocks) and `randoms` random ones to 20,000 octets, each
+ * message's last octet the page's last, at every tier, at once and in pieces. Returns 0 when
+ * every digest equals v1's, 1 at the first that does not. */
+static int sha512_tiers(long randoms)
+{
+    long checked = 0;
+    for (long i = -601; i < randoms; i++) {
+        size_t n = i < 0 ? (size_t)(i + 601) : (size_t)(rng() % (rng() % 8 == 0 ? 20000 : 1200));
+        if (n > PAGE)
+            n = PAGE;                       /* the message stays in the readable page */
+        uint8_t *message = page_end - n;
+        for (size_t k = 0; k < n; k++)
+            message[k] = (uint8_t)rng();
+        for (int sha384 = 0; sha384 <= 1; sha384++) {
+            size_t size = sha384 ? 48 : 64;
+            uint8_t expected[64], once[64], pieces[64];
+            httpasm_cpu_limit(caps[0]);
+            if (sha384)
+                httpasm_sha384(message, n, expected);
+            else
+                httpasm_sha512(message, n, expected);
+            for (size_t t = 1; t < TIERS; t++) {
+                uint64_t features = httpasm_cpu_limit(caps[t]);
+                if (sha384)
+                    httpasm_sha384(message, n, once);
+                else
+                    httpasm_sha512(message, n, once);
+                sha512_pieces(message, n, sha384, pieces);
+                if (memcmp(once, expected, size) != 0 || memcmp(pieces, expected, size) != 0) {
+                    fprintf(stderr, "httpasm_%s at %s (features %#llx) differs from v1 on %zu octets (%s)\n",
+                            sha384 ? "sha384" : "sha512", cap_names[t], (unsigned long long)features, n,
+                            memcmp(once, expected, size) != 0 ? "at once" : "in pieces");
+                    dump("message", message, n < 128 ? n : 128);
+                    return 1;
+                }
+                checked++;
+            }
+        }
+    }
+    printf("httpasm_sha512/384: %ld digests at tiers above v1, every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1636,6 +1709,8 @@ int main(int argc, char **argv)
         failed = h2_tiers(randoms / 4);
     if (!failed)
         failed = sha256_tiers(randoms / 40);
+    if (!failed)
+        failed = sha512_tiers(randoms / 40);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

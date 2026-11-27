@@ -282,7 +282,8 @@ ha_sha256_blocks:
 ; ha_copy_short: a few octets (a running hash's partial block, an HMAC key) by moves sized to
 ; the count, no rep movsb (whose start-up costs more than such a copy: write.asm wr_put measured
 ; it). Shared by the crypto code (hidden).
-;   In: rdi = destination, rsi = source, rcx = count (0-64). The two may not overlap.
+;   In: rdi = destination, rsi = source, rcx = count (any; meant for a block or less: SHA-512's
+;   partial blocks reach 127). The two may not overlap.
 ;   Keeps every register but rax, rdx, xmm0 and the flags.
 ;   Memory: reads rsi[0..rcx), writes rdi[0..rcx), nothing past either.
 ; -----------------------------------------------------------------------------
@@ -319,7 +320,7 @@ ha_copy_short:
     mov     [rdi], rax
     mov     [rdi + rcx - 8], rdx
     ret
-.sixteen:                                   ; 16-64: 16 octets a step, the last step overlapping
+.sixteen:                                   ; 16 and up: 16 octets a step, the last overlapping
     xor     edx, edx
 .step:
     movdqu  xmm0, [rsi + rdx]

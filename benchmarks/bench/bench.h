@@ -57,7 +57,9 @@
     X(httpasm_h2_request)           \
     X(httpasm_sha256)               \
     X(httpasm_hmac_sha256)          \
-    X(httpasm_hkdf_sha256_expand)
+    X(httpasm_hkdf_sha256_expand)   \
+    X(httpasm_sha512)               \
+    X(httpasm_sha384)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -189,6 +191,12 @@ const uint8_t *bench_sha_input(void);
 /* bench_sha256: httpasm_sha256 of the case's message, `calls` times (suite_rivals.c). A batch for
  * any suite: the tiers suite times it at every tier, the rivals suite beside OpenSSL. */
 void bench_sha256(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_sha512, bench_sha384: httpasm_sha512 (httpasm_sha384) of the case's message, `calls`
+ * times (suite_rivals.c). Batches for any suite, as bench_sha256. SHA-384 is SHA-512's
+ * compression with another start and a shorter digest: its case shows the final's cost only. */
+void bench_sha512(const bench_build *b, const bench_case *c, long calls);
+void bench_sha384(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha256: httpasm_hmac_sha256 of the case's message under a fixed 32-octet key (a TLS
  * traffic secret's size), `calls` times (suite_rivals.c). */
