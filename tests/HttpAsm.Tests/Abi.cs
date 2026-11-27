@@ -273,6 +273,26 @@ internal unsafe struct AesKey
 }
 
 /// <summary>
+/// httpasm_aes_gcm_key (httpasm.h): an AES-GCM key, 1024 octets: the AES key, H, and GHASH's
+/// powers of H as the carry-less versions keep them. Every tier's init writes the same octets.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct AesGcmKey
+{
+    /// <summary>The block cipher's key.</summary>
+    public AesKey Aes;
+
+    /// <summary>H = E_K(0^128).</summary>
+    public fixed byte H[16];
+
+    /// <summary>H^16 .. H^1, reflected and twisted.</summary>
+    public fixed byte HTable[256];
+
+    /// <summary>Each power's two halves xored.</summary>
+    public fixed byte HKara[256];
+}
+
+/// <summary>
 /// httpasm_hmac_sha384_ctx (httpasm.h): a running HMAC-SHA384, 416 octets: SHA-384's inner and
 /// outer hashes past their key blocks. Copying it after init MACs again under the same key.
 /// </summary>

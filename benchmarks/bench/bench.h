@@ -63,7 +63,9 @@
     X(httpasm_hmac_sha384)          \
     X(httpasm_hkdf_sha384_expand)   \
     X(httpasm_aes_init)             \
-    X(httpasm_aes_encrypt_block)
+    X(httpasm_aes_encrypt_block)    \
+    X(httpasm_aes_gcm_init)         \
+    X(httpasm_aes_gcm_seal)
 
 #define BENCH_API_FIELD(name) __typeof__(&name) name;
 
@@ -215,6 +217,13 @@ void bench_hkdf_expand(const bench_build *b, const bench_case *c, long calls);
  * call encrypting the last one's output, under a key of c->length octets (16 or 32) made from the
  * case's data before the loop (the key's expansion is not timed; c->octets is 16) (suite_rivals.c). */
 void bench_aes_block(const bench_build *b, const bench_case *c, long calls);
+
+/* bench_gcm128_seal, bench_gcm256_seal: httpasm_aes_gcm_seal of the case's message (c->length
+ * octets) under an AES-128-GCM (AES-256-GCM) key made before the loop, with a 5-octet AAD (a TLS
+ * 1.3 record header) and the nonce's last octets changed every call, as a TLS sequence number
+ * changes them (suite_rivals.c). */
+void bench_gcm128_seal(const bench_build *b, const bench_case *c, long calls);
+void bench_gcm256_seal(const bench_build *b, const bench_case *c, long calls);
 
 /* bench_hmac_sha384, bench_hkdf384_expand: the same over SHA-384, with a fixed 48-octet key or
  * PRK (a TLS_AES_256_GCM_SHA384 secret's size), `calls` times (suite_rivals.c). */

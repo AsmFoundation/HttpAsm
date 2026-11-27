@@ -75,6 +75,9 @@ extern httpasm_hmac_sha256          ; void (key, key_length, data, n, mac[32])
 extern httpasm_hkdf_sha256_extract  ; void (salt, salt_length, ikm, ikm_length, prk[32])
 extern httpasm_hkdf_sha256_expand   ; int (prk, prk_length, info, info_length, okm, length): 0, -1 past 8160
 extern httpasm_aes_init             ; int (httpasm_aes_key *k, const uint8_t *key, size_t length): 0, -1 (not 16 or 32)
+extern httpasm_aes_gcm_init         ; int (httpasm_aes_gcm_key *k, const uint8_t *key, size_t length): 0, -1
+extern httpasm_aes_gcm_seal         ; int (k, nonce[12], aad, aad_length, in, length, out, tag[16]): 0, -1 past the limits
+extern httpasm_aes_gcm_open         ; int (k, nonce[12], aad, aad_length, in, length, tag[16], out): 0, -1 (out zeroed)
 extern httpasm_aes_encrypt_block    ; void (const httpasm_aes_key *k, const uint8_t in[16], uint8_t out[16])
 extern httpasm_hmac_sha384_init     ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n)
 extern httpasm_hmac_sha384_update   ; void (httpasm_hmac_sha384_ctx *h, const uint8_t *data, size_t n)

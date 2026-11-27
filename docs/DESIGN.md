@@ -898,6 +898,31 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      and used at every pair of tiers). One chained block: AES-NI 12.8 ns (AES-128) and 16.9 ns
      (AES-256), level with OpenSSL 3.0.13's EVP; v1 544 and 728 ns, eight blocks' work for
      one, which counter mode fills.
+   - **AES-GCM** (2026-11-27), `crypto/gcm.asm`, as TLS 1.3 and QUIC use it: 12-octet nonces,
+     16-octet tags, `httpasm_aes_gcm_init`/`_seal`/`_open` over a 1024-octet key (the AES key,
+     H, and H^16..H^1 reflected and twisted with their Karatsuba halves). Two versions: AES-NI
+     with PCLMULQDQ (counter mode eight blocks at a time; GHASH eight blocks per reduction, each
+     times its own power of H, OpenSSL's twisted-H arrangement with the two-phase shift
+     reduction; round keys and powers copied to the stack because the legacy SSE forms need
+     aligned memory and the key need not be aligned), and v1, constant time (counter mode by the
+     bitsliced cipher, eight counters a call, J0 among the first eight; GHASH by integer
+     multiplications of bit-spread operands, BearSSL's ghash_ctmul64 design). The init computes
+     the powers with PCLMULQDQ where it can and with v1's multiplication otherwise: the same
+     octets either way, so any tier uses any key. open hashes the ciphertext before writing over
+     it (in place works), compares tags without data-dependent branches, and zeroes its output on
+     a mismatch. SP 800-38D's limits (2^36 - 32 octets of text, 2^61 - 1 of AAD) are refused
+     before anything is touched. Both GHASH arrangements were modeled in Python first (every
+     operation as the instructions do it) against GHASH computed bit by bit from the standard.
+     Proven by NIST's CAVP GCM files (all 96-bit-IV records of AES-128 and AES-256: 2,625
+     encrypt and 2,625 decrypt each, every tag length, 1,363 and 1,317 marked FAIL), Wycheproof's
+     133 tests, .NET's AesGcm on 3,000 random cases (in place, and forgeries in the tag, the
+     ciphertext and the AAD refused with zeros), and `tests/native/tiers` (keys and seals equal at
+     every tier, outputs fenced by canaries). Against OpenSSL 3.0.13's EVP (a TLS 1.3 shape: the
+     key set once, a new IV and a 5-octet AAD per record): 2.6x faster on 64 octets, 1.29x on
+     1 KiB, but 0.73x on 16 KiB (3.77 against 5.14 octets/ns): OpenSSL's code interleaves the
+     AES rounds of the next blocks with the GHASH of the last ones, this version does one after
+     the other. Next: VAES with VPCLMULQDQ (two blocks an instruction, this CPU has both) with the
+     two interleaved, then the same interleaving for the AES-NI version.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

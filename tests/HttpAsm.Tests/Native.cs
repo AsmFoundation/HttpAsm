@@ -166,6 +166,40 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_aes_encrypt_block")]
     internal static partial void AesEncryptBlock(AesKey* k, byte* input, byte* output);
 
+    /// <summary>int httpasm_aes_gcm_init(httpasm_aes_gcm_key *k, const uint8_t *key, size_t length).</summary>
+    /// <param name="k">The key to make (untouched on a refusal).</param>
+    /// <param name="key">The key octets.</param>
+    /// <param name="length">16 or 32.</param>
+    /// <returns>0, or -1 for any other length.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_aes_gcm_init")]
+    internal static partial int AesGcmInit(AesGcmKey* k, byte* key, nuint length);
+
+    /// <summary>int httpasm_aes_gcm_seal(k, nonce[12], aad, aad_length, in, length, out, tag[16]).</summary>
+    /// <param name="k">The key.</param>
+    /// <param name="nonce">12 octets.</param>
+    /// <param name="aad">The additional data (anything when its length is 0).</param>
+    /// <param name="aadLength">Its length.</param>
+    /// <param name="input">The plaintext (anything when length is 0).</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="output">Receives the ciphertext (may be input).</param>
+    /// <param name="tag">Receives the 16-octet tag.</param>
+    /// <returns>0, or -1 past SP 800-38D's limits (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_aes_gcm_seal")]
+    internal static partial int AesGcmSeal(AesGcmKey* k, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* output, byte* tag);
+
+    /// <summary>int httpasm_aes_gcm_open(k, nonce[12], aad, aad_length, in, length, tag[16], out).</summary>
+    /// <param name="k">The key.</param>
+    /// <param name="nonce">12 octets.</param>
+    /// <param name="aad">The additional data.</param>
+    /// <param name="aadLength">Its length.</param>
+    /// <param name="input">The ciphertext.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="tag">The 16-octet tag to verify.</param>
+    /// <param name="output">Receives the plaintext (may be input); all zeros when the tag fails.</param>
+    /// <returns>0, or -1 for a wrong tag (output zeroed) or past the limits (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_aes_gcm_open")]
+    internal static partial int AesGcmOpen(AesGcmKey* k, byte* nonce, byte* aad, nuint aadLength, byte* input, nuint length, byte* tag, byte* output);
+
     /// <summary>void httpasm_hmac_sha384_init(httpasm_hmac_sha384_ctx *h, const uint8_t *key, size_t n).</summary>
     /// <param name="h">The context to start.</param>
     /// <param name="key">The key (anything when n is 0).</param>

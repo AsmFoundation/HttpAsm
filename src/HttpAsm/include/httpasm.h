@@ -251,7 +251,8 @@ uint32_t httpasm_abi_version(void);
  * 2 httpasm_request, 3 httpasm_h1_limits, 4 httpasm_response, 5 httpasm_response_head,
  * 6 httpasm_h1_chunked, 7 httpasm_server_options, 8 httpasm_hpack_output, 9 httpasm_client_response,
  * 10 httpasm_sha256_ctx, 11 httpasm_hmac_sha256_ctx, 12 httpasm_sha512_ctx,
- * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key; 0 for any other value. */
+ * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key; 0 for any other
+ * value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -387,6 +388,45 @@ int httpasm_aes_init(httpasm_aes_key *k, const uint8_t *key, size_t length);
 /* Encrypts one block (in and out may be the same octets). */
 void httpasm_aes_encrypt_block(const httpasm_aes_key *k, const uint8_t in[HTTPASM_AES_BLOCK],
                                uint8_t out[HTTPASM_AES_BLOCK]);
+
+/* ------------------------------------------------------------------------------------------
+ * AES-GCM (NIST SP 800-38D) as TLS 1.3 and QUIC use it: AES-128 or AES-256, 12-octet nonces,
+ * 16-octet tags. Versions: VAES with VPCLMULQDQ (two blocks an instruction), AES-NI with
+ * PCLMULQDQ, and a constant-time v1 (the bitsliced cipher, a GHASH by integer multiplications).
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_AES_GCM_NONCE 12        /* octets of a nonce */
+#define HTTPASM_AES_GCM_TAG   16        /* octets of a tag */
+
+/* An AES-GCM key (1024 octets): the AES key, H = E_K(0), and GHASH's precomputed powers of H.
+ * Made once per key; read-only afterwards, so one key may serve several threads. It holds the
+ * key's secret: wipe it when done (explicit_bzero). */
+typedef struct httpasm_aes_gcm_key {
+    httpasm_aes_key aes;
+    uint8_t h[16];
+    uint8_t htable[256];            /* H^16 .. H^1 in the carry-less-multiply versions' form */
+    uint8_t hkara[256];             /* each power's two halves xored (Karatsuba) */
+} httpasm_aes_gcm_key;
+
+/* Makes an AES-GCM key from 16 (AES-128-GCM) or 32 (AES-256-GCM) octets. Returns 0, or -1 for
+ * any other length (k is then untouched). */
+int httpasm_aes_gcm_init(httpasm_aes_gcm_key *k, const uint8_t *key, size_t length);
+
+/* Encrypts in[0..length) into out (out may be in, or must not overlap it) and writes the tag
+ * over aad[0..aad_length) and the ciphertext. Returns 0, or -1 when length exceeds
+ * 2^36 - 32 octets or aad_length 2^61 - 1 (SP 800-38D's limits; nothing is written then).
+ * Never reuse a nonce under a key: GCM's confidentiality and integrity both fall. */
+int httpasm_aes_gcm_seal(const httpasm_aes_gcm_key *k, const uint8_t nonce[HTTPASM_AES_GCM_NONCE],
+                         const uint8_t *aad, size_t aad_length, const uint8_t *in, size_t length,
+                         uint8_t *out, uint8_t tag[HTTPASM_AES_GCM_TAG]);
+
+/* Verifies the tag over aad and in[0..length) and decrypts into out (out may be in, or must not
+ * overlap it). Returns 0; or -1 when the tag does not match (out[0..length) is then all zeros:
+ * no unauthenticated plaintext is left) or a length exceeds the limits of seal (nothing is
+ * written). The tag comparison takes the same time whichever octet differs. */
+int httpasm_aes_gcm_open(const httpasm_aes_gcm_key *k, const uint8_t nonce[HTTPASM_AES_GCM_NONCE],
+                         const uint8_t *aad, size_t aad_length, const uint8_t *in, size_t length,
+                         const uint8_t tag[HTTPASM_AES_GCM_TAG], uint8_t *out);
 
 /* ------------------------------------------------------------------------------------------
  * MACs and key derivation: HMAC (FIPS 198-1, RFC 2104) and HKDF (RFC 5869) over SHA-256 and

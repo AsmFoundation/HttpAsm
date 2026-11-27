@@ -114,6 +114,15 @@ if [ ! -f "$tools/cavp/aes/ECBVarTxt256.rsp" ] || [ "$tools/cavp/KAT_AES.zip" -n
   unzip -q -o "$tools/cavp/KAT_AES.zip" -d "$tools/cavp/aes"
   touch "$tools/cavp/aes/ECBVarTxt256.rsp"
 fi
+#   gcmtestvectors.zip: GCM's encrypt (external IV) and decrypt files for 128-, 192- and 256-bit
+#   keys; AesGcmTests reads the 96-bit-IV records of the 128 and 256 ones (every tag length).
+fetch cavp/gcmtestvectors.zip \
+  https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip \
+  f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023
+if [ ! -f "$tools/cavp/gcm/gcmDecrypt256.rsp" ] || [ "$tools/cavp/gcmtestvectors.zip" -nt "$tools/cavp/gcm/gcmDecrypt256.rsp" ]; then
+  unzip -q -o "$tools/cavp/gcmtestvectors.zip" -d "$tools/cavp/gcm"
+  touch "$tools/cavp/gcm/gcmDecrypt256.rsp"
+fi
 #   Project Wycheproof (C2SP/wycheproof) at commit 65ca494 (2026-11-11), its testvectors_v1 files
 #   one by one into wycheproof/: edge cases the official vectors leave out (tags cut short or
 #   flipped, empty and long keys, HKDF's length limit), each test marked valid or invalid.
@@ -123,5 +132,6 @@ fetch wycheproof/hmac_sha256_test.json "$wycheproof/hmac_sha256_test.json" 2d201
 fetch wycheproof/hkdf_sha256_test.json "$wycheproof/hkdf_sha256_test.json" bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
 fetch wycheproof/hmac_sha384_test.json "$wycheproof/hmac_sha384_test.json" 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
 fetch wycheproof/hkdf_sha384_test.json "$wycheproof/hkdf_sha384_test.json" 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
+fetch wycheproof/aes_gcm_test.json "$wycheproof/aes_gcm_test.json" 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
 
 echo "$tools"

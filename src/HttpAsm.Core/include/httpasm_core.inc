@@ -83,6 +83,11 @@ extern httpasm_sha256_final
 extern httpasm_sha256
 extern ha_sha512_blocks     ; SHA-512's (and SHA-384's) compression: state rdi (8 qwords), rdx
                             ; 128-octet blocks at rsi; keeps rdi, rbx, rbp, r12-r15 (crypto/sha512.asm)
+extern ha_aes_ct_encrypt8   ; v1 AES of eight blocks: keys rdi (expanded), esi rounds, rdx in, rcx
+                            ; out (crypto/aes.asm); keeps rdi, rsi, rdx, rcx, rbx, rbp, r12-r15
+extern ha_aes_ct_expand     ; v1's round keys from key rdi to rsi ((rounds + 1) * 128 octets)
+extern httpasm_aes_init     ; the C ABI's AES (crypto/aes.asm), for AES-GCM (crypto/gcm.asm)
+extern httpasm_aes_encrypt_block
 extern httpasm_sha384_init  ; the C ABI's SHA-384 (crypto/sha512.asm), for the core's HMAC and
 extern httpasm_sha512_update ; HKDF over SHA-384 (crypto/hmac.asm); the update is SHA-512's, which
 extern httpasm_sha384_final ; both hashes share

@@ -151,6 +151,27 @@ static void add_aes_block(void)
     }
 }
 
+/* add_gcm_seal: the tiers cases of httpasm_aes_gcm_seal (AES-128) on 1 KiB and 16 KiB: v1 (the
+ * bitsliced cipher and the integer-multiplication GHASH) against AES-NI with PCLMULQDQ. */
+static void add_gcm_seal(void)
+{
+    static const size_t lengths[] = { 1024, 16384 };
+    static const char *const labels[] = { "1 KiB", "16 KiB" };
+    for (size_t i = 0; i < 2; i++) {
+        bench_case c;
+        memset(&c, 0, sizeof c);
+        c.suite = "tiers";
+        c.name = "aes_128_gcm_seal";
+        c.input = labels[i];
+        c.data = bench_sha_input();
+        c.length = lengths[i];
+        c.octets = lengths[i];
+        c.ours = bench_gcm128_seal;
+        c.tiers = BENCH_TIERS_ALL;
+        bench_add(&c);
+    }
+}
+
 /* add_hkdf384_expand: the tiers case of httpasm_hkdf_sha384_expand as TLS_AES_256_GCM_SHA384's
  * key schedule calls it: 48 octets (one HMAC block) from a 48-octet PRK, with a 20-octet info.
  * Four SHA-384 compressions (two for the key, one each for the inner and outer hash), at each
@@ -207,6 +228,7 @@ void bench_suite_tiers(void)
     add_hkdf_expand();
     add_hkdf384_expand();
     add_aes_block();
+    add_gcm_seal();
     for (size_t i = 0; i < sizeof field_value; i++)
         field_value[i] = (uint8_t)(0x20 + (i * 37) % 95);
     for (size_t i = 0; i < sizeof field_lengths / sizeof field_lengths[0]; i++) {

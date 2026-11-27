@@ -1513,6 +1513,98 @@ static int aes_tiers(long randoms)
     return 0;
 }
 
+/* ---- httpasm_aes_gcm_*: AES-GCM by versions (crypto/gcm.asm) ----------------------------------
+ * v1 (the bitsliced cipher, eight counters a call; GHASH by integer multiplications) against
+ * AES-NI with PCLMULQDQ (eight blocks a step, GHASH aggregated over eight powers of H). Keys made
+ * at every tier must be the same octets; every tier's seal must give v1's ciphertext and tag,
+ * and every tier's open must give the plaintext back and refuse a flipped tag bit with zeros.
+ * The text ends against the guard page (an over-read faults), and the output is followed by
+ * canary octets (an over-write shows). */
+
+/* gcm_tiers: `randoms` random keys, nonces, AAD (0-300 octets) and texts (0-3000 octets, a
+ * third of them multiples of 16). Returns 0 when every tier agrees with v1, 1 at the first
+ * difference. */
+static int gcm_tiers(long randoms)
+{
+    long checked = 0;
+    static uint8_t out[3000 + 64], aad[300];
+    for (long i = 0; i < randoms; i++) {
+        uint8_t key[32], nonce[12], tag[16], expected_tag[16];
+        size_t key_length = rng() % 2 ? 32 : 16;
+        size_t n = (size_t)(rng() % 3001);
+        if (rng() % 3 == 0)
+            n &= ~(size_t)15;
+        size_t aad_length = (size_t)(rng() % 301);
+        for (size_t k = 0; k < key_length; k++)
+            key[k] = (uint8_t)rng();
+        for (size_t k = 0; k < 12; k++)
+            nonce[k] = (uint8_t)rng();
+        for (size_t k = 0; k < aad_length; k++)
+            aad[k] = (uint8_t)rng();
+        uint8_t *text = page_end - n;       /* the plaintext, then (for open) the ciphertext */
+        static uint8_t plain[3000];
+        for (size_t k = 0; k < n; k++)
+            plain[k] = text[k] = (uint8_t)rng();
+        static httpasm_aes_gcm_key made[TIERS];
+        static uint8_t expected[3000];
+        for (size_t t = 0; t < TIERS; t++) {
+            httpasm_cpu_limit(caps[t]);
+            if (httpasm_aes_gcm_init(&made[t], key, key_length) != 0 || memcmp(&made[t], &made[0], sizeof made[0]) != 0) {
+                fprintf(stderr, "httpasm_aes_gcm_init at %s refused the key or made other octets than at v1\n", cap_names[t]);
+                return 1;
+            }
+        }
+        for (size_t t = 0; t < TIERS; t++) {
+            uint64_t features = httpasm_cpu_limit(caps[t]);
+            memset(out, 0xC3, sizeof out);
+            if (httpasm_aes_gcm_seal(&made[t], nonce, aad, aad_length, text, n, out, tag) != 0) {
+                fprintf(stderr, "httpasm_aes_gcm_seal at %s refused %zu octets\n", cap_names[t], n);
+                return 1;
+            }
+            for (size_t k = n; k < sizeof out; k++) {
+                if (out[k] != 0xC3) {
+                    fprintf(stderr, "httpasm_aes_gcm_seal at %s wrote past %zu octets\n", cap_names[t], n);
+                    return 1;
+                }
+            }
+            if (t == 0) {
+                memcpy(expected, out, n);
+                memcpy(expected_tag, tag, 16);
+            } else if (memcmp(out, expected, n) != 0 || memcmp(tag, expected_tag, 16) != 0) {
+                fprintf(stderr, "httpasm_aes_gcm_seal at %s (features %#llx) differs from v1 on %zu octets, %zu of AAD\n",
+                        cap_names[t], (unsigned long long)features, n, aad_length);
+                return 1;
+            }
+            /* open: the ciphertext moved against the guard page, back to the text */
+            uint8_t *sealed = page_end - n;
+            memcpy(sealed, expected, n);
+            memset(out, 0xC3, sizeof out);
+            if (httpasm_aes_gcm_open(&made[t], nonce, aad, aad_length, sealed, n, expected_tag, out) != 0 ||
+                memcmp(out, plain, n) != 0) {
+                fprintf(stderr, "httpasm_aes_gcm_open at %s refused or misread v1's seal (%zu octets)\n", cap_names[t], n);
+                return 1;
+            }
+            uint8_t bad[16];
+            memcpy(bad, expected_tag, 16);
+            bad[rng() % 16] ^= (uint8_t)(1u << (rng() % 8));
+            if (httpasm_aes_gcm_open(&made[t], nonce, aad, aad_length, sealed, n, bad, out) != -1) {
+                fprintf(stderr, "httpasm_aes_gcm_open at %s accepted a flipped tag bit\n", cap_names[t]);
+                return 1;
+            }
+            for (size_t k = 0; k < n; k++) {
+                if (out[k] != 0) {
+                    fprintf(stderr, "httpasm_aes_gcm_open at %s left plaintext after a refusal\n", cap_names[t]);
+                    return 1;
+                }
+            }
+            memcpy(text, plain, n);         /* the plaintext back against the guard page */
+            checked++;
+        }
+    }
+    printf("httpasm_aes_gcm: %ld seals and opens at every tier (keys made at every tier), every one equal to v1's\n", checked);
+    return 0;
+}
+
 /* ---- httpasm_hpack_decode: Huffman strings decoded by versions (hpack.asm hp_string) ---------
  * v1 decodes a Huffman string with a nibble automaton; v2 and up with a table decoder (12-bit
  * lookups of up to two symbols, the canonical tables for codes past 12 bits, a slow loop for the
@@ -1769,6 +1861,8 @@ int main(int argc, char **argv)
         failed = sha512_tiers(randoms / 40);
     if (!failed)
         failed = aes_tiers(randoms / 40);
+    if (!failed)
+        failed = gcm_tiers(randoms / 100);
     if (!failed)
         failed = hpack_tiers(randoms / 4);
 

@@ -566,6 +566,98 @@ static bench_rival aes_rivals[] = {
     { openssl_name, openssl_aes_block },
 };
 
+/* ---- AES-GCM: seals the size of TLS records, the AAD a TLS 1.3 record header. */
+
+static uint8_t gcm_out[16384 + 64];         /* the ciphertext (contenders run one at a time) */
+
+/* gcm_seal: httpasm_aes_gcm_seal of the case's message `calls` times under a key of key_length
+ * octets (the case's first octets), each call's nonce the last one's with its final word bumped. */
+static void gcm_seal(const bench_build *b, const bench_case *c, long calls, size_t key_length)
+{
+    static httpasm_aes_gcm_key key;
+    uint8_t nonce[12] = { 0 }, tag[16];
+    static const uint8_t aad[5] = { 0x17, 0x03, 0x03, 0x40, 0x11 };
+    if (b->api.httpasm_aes_gcm_init(&key, c->data, key_length) != 0)
+        return;
+    uint32_t sequence = 0;
+    for (long i = 0; i < calls; i++) {
+        sequence++;
+        memcpy(nonce + 8, &sequence, 4);
+        b->api.httpasm_aes_gcm_seal(&key, nonce, aad, sizeof aad, c->data, c->length, gcm_out, tag);
+    }
+    bench_sink = tag[0] + gcm_out[0];
+}
+
+/* bench_gcm128_seal, bench_gcm256_seal: gcm_seal under AES-128 and AES-256 keys (bench.h). */
+void bench_gcm128_seal(const bench_build *b, const bench_case *c, long calls) { gcm_seal(b, c, calls, 16); }
+void bench_gcm256_seal(const bench_build *b, const bench_case *c, long calls) { gcm_seal(b, c, calls, 32); }
+
+/* OpenSSL's EVP AES-GCM as a TLS library drives it per record: the key set once per batch, then
+ * per call a new IV (EVP_EncryptInit_ex with only the IV), the AAD, the text, the final, the tag. */
+typedef int (*openssl_final_fn)(void *ctx, unsigned char *out, int *out_length);
+typedef int (*openssl_ctrl_fn)(void *ctx, int type, int arg, void *ptr);
+static openssl_final_fn openssl_encrypt_final;
+static openssl_ctrl_fn openssl_cipher_ctrl;
+static const void *openssl_aes128_gcm;
+static const void *openssl_aes256_gcm;
+
+/* openssl_load_gcm: the GCM ciphers and functions beside openssl_load_aes's. Returns 0, or -1
+ * (the GCM cases then run without this rival). */
+static int openssl_load_gcm(void)
+{
+    if (openssl_load_aes() != 0)
+        return -1;
+    void *crypto = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    openssl_encrypt_final = crypto ? (openssl_final_fn)dlsym(crypto, "EVP_EncryptFinal_ex") : NULL;
+    openssl_cipher_ctrl = crypto ? (openssl_ctrl_fn)dlsym(crypto, "EVP_CIPHER_CTX_ctrl") : NULL;
+    openssl_md_fn gcm128 = crypto ? (openssl_md_fn)dlsym(crypto, "EVP_aes_128_gcm") : NULL;
+    openssl_md_fn gcm256 = crypto ? (openssl_md_fn)dlsym(crypto, "EVP_aes_256_gcm") : NULL;
+    if (openssl_encrypt_final == NULL || openssl_cipher_ctrl == NULL || gcm128 == NULL || gcm256 == NULL) {
+        fprintf(stderr, "bench: rivals: libcrypto.so.3 lacks the EVP GCM functions\n");
+        return -1;
+    }
+    openssl_aes128_gcm = gcm128();
+    openssl_aes256_gcm = gcm256();
+    return 0;
+}
+
+/* openssl_gcm_seal: OpenSSL's seal of the case's message, `calls` times, as gcm_seal. */
+static void openssl_gcm_seal(const bench_build *b, const bench_case *c, long calls, int aes256)
+{
+    (void)b;
+    void *ctx = openssl_ctx_new();
+    unsigned char nonce[12] = { 0 }, tag[16];
+    static const unsigned char aad[5] = { 0x17, 0x03, 0x03, 0x40, 0x11 };
+    int length = 0;
+    if (ctx == NULL || openssl_encrypt_init(ctx, aes256 ? openssl_aes256_gcm : openssl_aes128_gcm, NULL, c->data, NULL) != 1) {
+        openssl_ctx_free(ctx);
+        return;
+    }
+    uint32_t sequence = 0;
+    for (long i = 0; i < calls; i++) {
+        sequence++;
+        memcpy(nonce + 8, &sequence, 4);
+        openssl_encrypt_init(ctx, NULL, NULL, NULL, nonce);
+        openssl_encrypt_update(ctx, NULL, &length, aad, (int)sizeof aad);
+        openssl_encrypt_update(ctx, gcm_out, &length, c->data, (int)c->length);
+        openssl_encrypt_final(ctx, gcm_out + length, &length);
+        openssl_cipher_ctrl(ctx, 0x10, 16, tag);            /* EVP_CTRL_AEAD_GET_TAG */
+    }
+    openssl_ctx_free(ctx);
+    bench_sink = tag[0] + gcm_out[0];
+}
+
+static void openssl_gcm128_seal(const bench_build *b, const bench_case *c, long calls) { openssl_gcm_seal(b, c, calls, 0); }
+static void openssl_gcm256_seal(const bench_build *b, const bench_case *c, long calls) { openssl_gcm_seal(b, c, calls, 1); }
+
+static bench_rival gcm128_rivals[] = {
+    { openssl_name, openssl_gcm128_seal },
+};
+
+static bench_rival gcm256_rivals[] = {
+    { openssl_name, openssl_gcm256_seal },
+};
+
 /* The SHA-384 MAC cases' key: 48 octets, a TLS_AES_256_GCM_SHA384 secret's size. */
 static const uint8_t mac_key48[48] = { 0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
                                        0x0b, 0x1c, 0x2d, 0x3e, 0x4f, 0x50, 0x61, 0x72, 0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
@@ -819,6 +911,13 @@ void bench_suite_rivals(void)
         c.rival_count = aes ? sizeof aes_rivals / sizeof aes_rivals[0] : 0;
         bench_add(&c);
     }
+    int gcm = openssl_load_gcm() == 0;
+    for (size_t i = 0; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
+        add("aes_128_gcm_seal", sha_labels[i], sha, sha_lengths[i], bench_gcm128_seal, gcm ? gcm128_rivals : NULL,
+            gcm ? sizeof gcm128_rivals / sizeof gcm128_rivals[0] : 0);
+    for (size_t i = 1; i < sizeof sha_lengths / sizeof sha_lengths[0]; i++)
+        add("aes_256_gcm_seal", sha_labels[i], sha, sha_lengths[i], bench_gcm256_seal, gcm ? gcm256_rivals : NULL,
+            gcm ? sizeof gcm256_rivals / sizeof gcm256_rivals[0] : 0);
     int hmac384 = openssl_load_hmac384() == 0;
     for (size_t i = 0; i < 2; i++)
         add("hmac_sha384", sha_labels[i], sha, sha_lengths[i], bench_hmac_sha384, hmac384 ? hmac384_rivals : NULL,

@@ -249,6 +249,20 @@ endstruc
 HTTPASM_AES_BLOCK               equ 16      ; octets of an AES block
 
 ; -----------------------------------------------------------------------------
+; httpasm_aes_gcm_key: an AES-GCM key (SP 800-38D), 1024 octets (crypto/gcm.asm): the AES key,
+; H = E_K(0^128), and the powers H^16 .. H^1 as the carry-less versions keep them (reflected
+; and twisted) with their Karatsuba halves. Every tier's init writes the same octets.
+; -----------------------------------------------------------------------------
+struc httpasm_aes_gcm_key
+    .aes:               resb httpasm_aes_key_size
+    .h:                 resb 16     ; H, as AES made it
+    .htable:            resb 256    ; H^16 first, H^1 at 240
+    .hkara:             resb 256    ; each power's two halves xored, in both qwords
+endstruc
+HTTPASM_AES_GCM_NONCE           equ 12
+HTTPASM_AES_GCM_TAG             equ 16
+
+; -----------------------------------------------------------------------------
 ; httpasm_sha512_ctx: a running SHA-512 or SHA-384 hash (FIPS 180-4; one layout for both, as
 ; SHA-384 is SHA-512 with another H(0), cut to 48 octets), 208 octets. Its octets are the hash's
 ; whole state, like httpasm_sha256_ctx's.

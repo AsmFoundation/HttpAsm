@@ -191,6 +191,24 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: AES-GCM, AES-NI with PCLMULQDQ and v1.** `httpasm_aes_gcm_seal` as TLS 1.3 calls it
+(the key made once, a new nonce and a 5-octet AAD per record) beside OpenSSL 3.0.13's EVP driven
+the same way (the key set once; per record `EVP_EncryptInit_ex` with the IV, the AAD, the text,
+the final, `EVP_CTRL_AEAD_GET_TAG`), 9 rounds:
+
+| Case | AES-NI + PCLMULQDQ | v1 (constant time) | OpenSSL 3.0.13 | |
+|---|---:|---:|---:|---|
+| AES-128-GCM, 64 octets | 88.3 ns | 931 ns | 230.6 ns | 2.61x OpenSSL |
+| AES-128-GCM, 1 KiB | 311 ns | 8,171 ns | 401 ns | 1.29x OpenSSL |
+| AES-128-GCM, 16 KiB | 4,344 ns (3.77 octets/ns) | 120.0 us | 3,185 ns (5.14) | 0.73x OpenSSL |
+| AES-256-GCM, 1 KiB | 355 ns | 9,690 ns | 439 ns | 1.24x OpenSSL |
+| AES-256-GCM, 16 KiB | 5,078 ns (3.23) | 142.0 us | 3,743 ns (4.38) | 0.74x OpenSSL |
+
+On short records OpenSSL's EVP pays for its per-record setup; on long ones its AVX code wins by
+interleaving the next blocks' AES rounds with the last blocks' GHASH, where this version runs the
+eight-block counter mode and the eight-block GHASH one after the other. v1 runs at about 21
+cycles an octet (0.14 octets/ns), 27x below AES-NI, as a table-free fallback does.
+
 **2026-11-27: the AES block cipher.** `httpasm_aes_encrypt_block`, each call encrypting the last
 call's output (one block's latency, as QUIC's header protection sees it), the key expanded
 before the loop, beside OpenSSL 3.0.13's EVP (`EVP_aes_128_ecb`/`EVP_aes_256_ecb`, a context set
