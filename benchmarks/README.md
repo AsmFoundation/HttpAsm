@@ -208,9 +208,13 @@ the P-256 rivals. 41 rounds:
 The tiers suite: v3 1.22x v1 on a shared secret [1.20-1.22] and 1.21x on a signature. The field's
 generic six-limb Montgomery product (scratchpad p384/f6.asm) takes 130 cycles chained and 114
 at throughput; m by shl and add (p's n0 is 2^32 + 1) measured 131, no gain. Most of a shared
-secret is 380 doublings (4 products and 4 squares each) and 76 additions (11 and 5), so the next
-step is a square of its own: about 15% under the product of a value with itself in the
-scratchpad.
+secret is 380 doublings (4 products and 4 squares each) and 76 additions (11 and 5). v3's own
+square (about 15% under the product of a value with itself a call in the scratchpad), by
+`bench.sh ab` against a162801 at 41 rounds in three processes: a shared secret 1.032x, 1.030x,
+1.035x, a verification 1.034x, 1.032x, 1.030x, a key share 1.033x, 1.026x, 1.023x (each proven),
+a signature 1.018x to 1.023x and a public key 1.012x to 1.023x (not proven: two processes of
+three), v1 unchanged (it still squares through its product). The rest of a doubling's and an
+addition's time is their small operations: the next lever.
 
 **2026-11-27: RSA signing.** RSASSA-PKCS1-v1_5 and RSASSA-PSS with SHA-256 under Project
 Wycheproof's signing keys (rsa_pkcs1_*_sig_gen: e = 65537, balanced primes; the 2048-bit one

@@ -27,7 +27,10 @@
 ;   F6Q_* (v1: any x86-64): mul, one carry chain.
 ; Each version's macros have the same names after the prefix (F6X_MUL / F6Q_MUL, and F6X_ADD /
 ; F6Q_ADD for the shared F6_ADD), so crypto/p384.asm's point routines take the prefix as a
-; parameter and are written once. A square is a product of a value with itself for now.
+; parameter and are written once. v3 squares with its own F6X_SQR (the products above the
+; diagonal once: 21 mulx and the reduction's 36 against the product's 72); v1 squares through
+; F6Q_MUL, as mul overwrites the flags that a doubling chain and the squares' additions would
+; share.
 ;
 ; Constant time: no branch and no address depends on an operand; the final subtractions are
 ; cmov or masks. The macros clobber the flags and the registers each lists, never rbp or rsp
@@ -369,9 +372,138 @@
   %undef F6_M_
 %endmacro
 
-; F6X_SQR out, a, m, n0: out = a^2 R^-1 mod M (a below M; out may be a).
+; -----------------------------------------------------------------------------
+; F6X_SQR out, a, m, n0: out = a^2 R^-1 mod M (a below M; out may be a). The 768-bit square
+; with each product above the diagonal once (15 mulx in five rows, t1..t10 in registers), then
+; doubled on CF while the six squares join on OF (6 mulx); the high half t6..t11 parked in out
+; (a is read no more), the low half reduced by six Montgomery steps (F6X_RED, the turning
+; registers of F6X_MUL), the high half added (below 2M: the reduced low half is at most M, the
+; high half below M), F6_FINAL. Clobbers rax, rbx, rcx, rdx, rsi, rdi, r8-r15, the flags.
+; -----------------------------------------------------------------------------
 %macro F6X_SQR 4
-    F6X_MUL     %1, %2, %2, %3, %4
+  %define F6_M_ %3
+    ; row 0: t1..t6 = a0 a[1..5] (one chain)
+    mov         rdx, [%2]
+    mulx        r10, r9, [%2 + 8]           ; a0 a1: t1, and t2's start
+    mulx        r11, rax, [%2 + 16]         ; a0 a2
+    add         r10, rax
+    mulx        r12, rax, [%2 + 24]         ; a0 a3
+    adc         r11, rax
+    mulx        r13, rax, [%2 + 32]         ; a0 a4
+    adc         r12, rax
+    mulx        r14, rax, [%2 + 40]         ; a0 a5
+    adc         r13, rax
+    adc         r14, 0                      ; t6
+    ; row 1: t3..t7 += a1 a[2..5] (two chains; t7 = r15 starts at 0)
+    mov         rdx, [%2 + 8]
+    xor         r15d, r15d
+    mulx        rcx, rax, [%2 + 16]
+    adcx        r11, rax
+    adox        r12, rcx
+    mulx        rcx, rax, [%2 + 24]
+    adcx        r12, rax
+    adox        r13, rcx
+    mulx        rcx, rax, [%2 + 32]
+    adcx        r13, rax
+    adox        r14, rcx
+    mulx        rcx, rax, [%2 + 40]
+    adcx        r14, rax
+    adox        r15, rcx
+    mov         eax, 0
+    adcx        r15, rax                    ; (the rows' sum fits t1..t10: no carry passes t10)
+    ; row 2: t5..t8 += a2 a[3..5] (t8 = rbx)
+    mov         rdx, [%2 + 16]
+    xor         ebx, ebx
+    mulx        rcx, rax, [%2 + 24]
+    adcx        r13, rax
+    adox        r14, rcx
+    mulx        rcx, rax, [%2 + 32]
+    adcx        r14, rax
+    adox        r15, rcx
+    mulx        rcx, rax, [%2 + 40]
+    adcx        r15, rax
+    adox        rbx, rcx
+    mov         eax, 0
+    adcx        rbx, rax
+    ; row 3: t7..t9 += a3 a[4..5] (t9 = rsi)
+    mov         rdx, [%2 + 24]
+    xor         esi, esi
+    mulx        rcx, rax, [%2 + 32]
+    adcx        r15, rax
+    adox        rbx, rcx
+    mulx        rcx, rax, [%2 + 40]
+    adcx        rbx, rax
+    adox        rsi, rcx
+    mov         eax, 0
+    adcx        rsi, rax
+    ; row 4: t9..t10 += a4 a5 (t10 = rdi)
+    mov         rdx, [%2 + 32]
+    mulx        rdi, rax, [%2 + 40]
+    add         rsi, rax
+    adc         rdi, 0
+    ; t = 2t + the squares a_i^2 at t[2i], t[2i+1]: CF doubles t1..t10, OF adds the squares
+    mov         rdx, [%2]
+    mulx        rcx, r8, rdx                ; a0^2: t0, and its high word for t1
+    xor         eax, eax                    ; CF = OF = 0
+    adcx        r9, r9
+    adox        r9, rcx
+    mov         rdx, [%2 + 8]
+    mulx        rcx, rax, rdx               ; a1^2
+    adcx        r10, r10
+    adox        r10, rax
+    adcx        r11, r11
+    adox        r11, rcx
+    mov         rdx, [%2 + 16]
+    mulx        rcx, rax, rdx               ; a2^2
+    adcx        r12, r12
+    adox        r12, rax
+    adcx        r13, r13
+    adox        r13, rcx
+    mov         rdx, [%2 + 24]
+    mulx        rcx, rax, rdx               ; a3^2
+    adcx        r14, r14
+    adox        r14, rax
+    adcx        r15, r15
+    adox        r15, rcx
+    mov         rdx, [%2 + 32]
+    mulx        rcx, rax, rdx               ; a4^2
+    adcx        rbx, rbx
+    adox        rbx, rax
+    adcx        rsi, rsi
+    adox        rsi, rcx
+    mov         rdx, [%2 + 40]
+    mulx        rcx, rax, rdx               ; a5^2
+    adcx        rdi, rdi
+    adox        rdi, rax
+    mov         eax, 0
+    adcx        rcx, rax                    ; t11 (a^2 < 2^768: nothing carries out of it)
+    adox        rcx, rax
+    ; the high half t6..t11 parked in out (every read of a is done)
+    mov         [%1], r14
+    mov         [%1 + 8], r15
+    mov         [%1 + 16], rbx
+    mov         [%1 + 24], rsi
+    mov         [%1 + 32], rdi
+    mov         [%1 + 40], rcx
+    ; the low half r8..r13 reduced: six steps over the turning registers, the limbs above start 0
+    xor         r14d, r14d
+    xor         r15d, r15d
+    F6X_RED     %3, %4, r8, r9, r10, r11, r12, r13, r14, r15
+    F6X_RED     %3, %4, r9, r10, r11, r12, r13, r14, r15, r8
+    F6X_RED     %3, %4, r10, r11, r12, r13, r14, r15, r8, r9
+    F6X_RED     %3, %4, r11, r12, r13, r14, r15, r8, r9, r10
+    F6X_RED     %3, %4, r12, r13, r14, r15, r8, r9, r10, r11
+    F6X_RED     %3, %4, r13, r14, r15, r8, r9, r10, r11, r12
+    ; (low + q M) / R = r14 r15 r8 r9 r10 r11 + r12 2^384, at most M; plus the high half
+    add         r14, [%1]
+    adc         r15, [%1 + 8]
+    adc         r8, [%1 + 16]
+    adc         r9, [%1 + 24]
+    adc         r10, [%1 + 32]
+    adc         r11, [%1 + 40]
+    adc         r12, 0
+    F6_FINAL    %1, r14, r15, r8, r9, r10, r11, r12
+  %undef F6_M_
 %endmacro
 
 ; =============================================================================
@@ -502,7 +634,7 @@
     F6Q_MUL     %1, %2, %3, rel p384_p, [rel p384_p0]
 %endmacro
 %macro F6X_FSQR 2
-    F6X_MUL     %1, %2, %2, rel p384_p, [rel p384_p0]
+    F6X_SQR     %1, %2, rel p384_p, [rel p384_p0]
 %endmacro
 %macro F6Q_FSQR 2
     F6Q_MUL     %1, %2, %2, rel p384_p, [rel p384_p0]

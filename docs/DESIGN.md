@@ -1234,9 +1234,14 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      OpenSSL 3.0.13's EVP, whose P-384 is its generic EC_GFp_mont_method (no assembly for this
      curve), 41 rounds: a shared secret 3.9x (209 us against 812), a public key 20x (37.4 us), a
      key share 8.1x (253 us), a signature 17.6x (47.5 us), a verification 3.3x (231 us); v3
-     1.22x v1. Next: a square of its own (the 15 products above the diagonal once, then the low
-     half reduced and the high half added: about 15% under the product of a value with itself in
-     the scratchpad), then the rest of the field's latency.
+     1.22x v1. Then v3's square of its own (the 15 products above the diagonal once, doubled
+     with the six squares added, the low half reduced and the high half added: 21 + 36 mulx
+     against the product's 72; about 15% under the product of a value with itself a call in
+     the scratchpad): `bench.sh ab` against a162801, three processes, a shared secret, a
+     verification and a key share 1.03x each (proven), a signature and a public key about 1.02x;
+     less than the square's own gain because the doublings' and additions' small operations
+     (adds, subtractions, halvings, the selections by mask) are a large part of them. Next: those
+     small operations (fused into the products, or values kept in registers between them).
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
