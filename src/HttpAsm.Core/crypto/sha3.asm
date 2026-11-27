@@ -444,6 +444,130 @@ SHA3_ROUTINES v3
 SHA3_ROUTINES v1
 
 ; =============================================================================
+; Four states at once (v3, AVX2): ML-KEM samples its matrix and noise as many independent SHAKE
+; streams (FIPS 203: k^2 SHAKE128 runs, 2k or 2k + 1 SHAKE256 runs per operation), so four of
+; them share one permutation, a ymm register holding the same lane of all four. The round is the
+; scalar one's, lane by lane (theta's C and D in registers, each output row's five B read from
+; their places before pi, chi stored, the state alternating with a stack copy). AVX2 has no
+; 64-bit rotation: rho is two shifts and an OR, but rotations by 8 and 56 move whole octets
+; (vpshufb), and theta's rotation by 1 doubles by vpaddq (another port than the shifts).
+; =============================================================================
+
+section .rodata
+align 32
+k4_rol8:        times 2 db 7, 0, 1, 2, 3, 4, 5, 6, 15, 8, 9, 10, 11, 12, 13, 14
+k4_rol56:       times 2 db 1, 2, 3, 4, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 15, 8
+
+section .text
+
+; The x4 round's registers: D[x] in ymm0-ymm4, B[X] (and theta's C[X] before them) in
+; ymm5-ymm9, ymm10 and ymm11 temporaries, ymm12 and ymm13 the shuffles that rotate by 8 and by 56,
+; ymm14 iota's constant in all four lanes; rax walks keccak_rc.
+
+; K4_LANE dst, x, y, src: dst = rol(lane (x, y) at src ^ D[x], r[x][y]) in each 64-bit lane.
+%macro K4_LANE 4
+    vpxor       %1, ymm%2, [%4 + 32 * (%2 + 5 * %3)]
+  %assign k4r KR_%2_%3
+  %if k4r == 8
+    vpshufb     %1, %1, ymm12
+  %elif k4r == 56
+    vpshufb     %1, %1, ymm13
+  %elif k4r != 0
+    vpsllq      ymm10, %1, k4r
+    vpsrlq      %1, %1, 64 - k4r
+    vpor        %1, %1, ymm10
+  %endif
+%endmacro
+
+; K4_CHI a, b, c, dst, X, Y: lane (X, Y) at dst = a ^ (~b & c); iota's constant joins (0, 0).
+%macro K4_CHI 6
+    vpandn      ymm11, %2, %3
+    vpxor       ymm11, ymm11, %1
+  %if %5 == 0 && %6 == 0
+    vpxor       ymm11, ymm11, ymm14
+  %endif
+    vmovdqa     [%4 + 32 * (%5 + 5 * %6)], ymm11
+%endmacro
+
+; K4_ROUND src, dst: one round of the four states at src into dst (both base registers).
+%macro K4_ROUND 2
+  %assign kx 0
+  %rep 5
+    %assign kc kx + 5
+    vmovdqa     ymm%[kc], [%1 + 32 * kx]
+    vpxor       ymm%[kc], ymm%[kc], [%1 + 32 * (kx + 5)]
+    vpxor       ymm%[kc], ymm%[kc], [%1 + 32 * (kx + 10)]
+    vpxor       ymm%[kc], ymm%[kc], [%1 + 32 * (kx + 15)]
+    vpxor       ymm%[kc], ymm%[kc], [%1 + 32 * (kx + 20)]
+    %assign kx kx + 1
+  %endrep
+  %assign kx 0
+  %rep 5
+    %assign kcp (kx + 1) % 5 + 5
+    %assign kcm (kx + 4) % 5 + 5
+    vpaddq      ymm10, ymm%[kcp], ymm%[kcp]
+    vpsrlq      ymm11, ymm%[kcp], 63
+    vpor        ymm10, ymm10, ymm11
+    vpxor       ymm%[kx], ymm10, ymm%[kcm]
+    %assign kx kx + 1
+  %endrep
+    vpbroadcastq ymm14, [rax]
+  %assign kY 0
+  %rep 5
+    %assign kX 0
+    %rep 5
+      %assign ksx (kX + 3 * kY) % 5
+      %assign kb kX + 5
+      K4_LANE   ymm%[kb], %[ksx], %[kX], %1
+      %assign kX kX + 1
+    %endrep
+    K4_CHI      ymm5, ymm6, ymm7, %2, 0, kY
+    K4_CHI      ymm6, ymm7, ymm8, %2, 1, kY
+    K4_CHI      ymm7, ymm8, ymm9, %2, 2, kY
+    K4_CHI      ymm8, ymm9, ymm5, %2, 3, kY
+    K4_CHI      ymm9, ymm5, ymm6, %2, 4, kY
+    %assign kY kY + 1
+  %endrep
+    add         rax, 8
+%endmacro
+
+; -----------------------------------------------------------------------------
+; ha_keccak_f1600_x4_v3: Keccak-f[1600] on four states at once, in place.
+;   In: rdi = the states interleaved, lane L of state i at 32 L + 8 i (800 octets, 32-aligned).
+;   Keeps every general register but rax, rcx and the flags; clobbers ymm0-ymm14 (and ends with
+;   vzeroupper).
+;   Memory: the states; 800 octets of stack (the other copy, 32-aligned), wiped before it returns
+;   (ML-KEM's noise is secret).
+; -----------------------------------------------------------------------------
+global ha_keccak_f1600_x4_v3:function hidden (ha_keccak_f1600_x4_v3.end - ha_keccak_f1600_x4_v3)
+align 16
+ha_keccak_f1600_x4_v3:
+    push        rbp
+    mov         rbp, rsp
+    and         rsp, -32
+    sub         rsp, 800
+    lea         rax, [rel keccak_rc]
+    vmovdqa     ymm12, [rel k4_rol8]
+    vmovdqa     ymm13, [rel k4_rol56]
+    mov         ecx, 12
+.pair:
+    K4_ROUND    rdi, rsp
+    K4_ROUND    rsp, rdi
+    dec         ecx
+    jnz         .pair
+    vpxor       ymm0, ymm0, ymm0            ; the stack copy wiped
+  %assign kq 0
+  %rep 25
+    vmovdqa     [rsp + 32 * kq], ymm0
+    %assign kq kq + 1
+  %endrep
+    mov         rsp, rbp
+    pop         rbp
+    vzeroupper
+    ret
+.end:
+
+; =============================================================================
 ; The C ABI.
 ; =============================================================================
 

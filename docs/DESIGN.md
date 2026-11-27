@@ -1331,8 +1331,14 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      against OpenSSL 3.0.13's EVP (keccak1600-x86_64; algorithm fetched once, context reused),
      41 rounds: SHA3-256 1.41x on 64 octets (305 ns against 421), 1.13x on 1 KiB, 1.09x on 16
      KiB; SHAKE128 1.47x, 1.12x, 1.08x; v3 1.23-1.25x v1. The permutation takes about 774 cycles
-     (32 a round, against about 26 for its 130 ALU operations on five ports). Next: four states
-     at once in AVX2 lanes for ML-KEM's independent SHAKE128 streams.
+     (32 a round, against about 26 for its 130 ALU operations on five ports). *Four states at
+     once* (`ha_keccak_f1600_x4_v3`, hidden, AVX2): a ymm register holds the same lane of four
+     interleaved states (lane L of state i at 32 L + 8 i), the round the scalar one's lane by lane
+     (C and D in registers, each output row read before pi, chi stored, the state alternating
+     with an 800-octet stack copy, wiped after); rho by two shifts and an OR, but by vpshufb for
+     the rotations by 8 and 56, and theta's rotation by 1 doubling with vpaddq (another port).
+     1,720 cycles for four permutations against 812 for one: 1.89x the throughput (proven equal
+     to v3's and v1's on 20,000 random state sets). For ML-KEM's matrix and noise.
    - **ML-KEM** (2026-11-27, first step: v1), `crypto/mlkem.asm`: ML-KEM-512, -768 and -1024
      (FIPS 203), for RFC 10024's X25519MLKEM768, SecP256r1MLKEM768 and SecP384r1MLKEM1024 and the
      pure ML-KEM groups: `httpasm_mlkem{512,768,1024}_keypair` (from a 64-octet seed d || z),
@@ -1366,9 +1372,51 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      mlkem-native 2.1.0 (pq-code-package's, its AVX2 backend and four-way Keccak; OpenSSL 3.0.13
      has no ML-KEM), 41 rounds: ML-KEM-768 key pair 31.3 us against 10.8, encapsulation 41.1
      against 12.3, decapsulation 56.8 against 16.3; ML-KEM-1024 48.3 / 60.6 / 81.1 against 15.6 /
-     17.7 / 23.6: about 3x slower, as scalar against AVX2. Next: v3 in AVX2 (the NTT, its inverse
-     and the base-case products 16 coefficients a register, the sampling by shuffles, four Keccak
-     states at once for the matrix and the PRFs).
+     17.7 / 23.6: about 3x slower, as scalar against AVX2.
+     *v3, AVX2* (2026-11-27, second step), sixteen 16-bit coefficients a register, every routine
+     of v1 again: coefficients stay in FIPS 203's order except inside the NTT and its inverse,
+     whose last three layers (lengths 8, 4, 2) pair lanes of the same register and so work on a
+     shuffled order (two registers' 32 coefficients exchanged by vperm2i128, vpunpck{l,h}qdq and a
+     dword blend, each its own inverse) and shuffle back before storing. Butterflies are the
+     Kyber reference's Montgomery products in three multiplications (zeta's q^-1 multiple
+     precomputed); the forward NTT is v1's exactly, lane for lane (same butterflies, same
+     Barrett: vpmulhw by 20159, then vpmulhrsw by 32 is floor((h + 512) / 1024)); the inverse
+     Barrett-reduces only its third and sixth layers' sums (the peak stays below 4q). Base-case
+     products: each second factor's cache once ([b0, b1 gamma] and [b1, b0] pairs), then two
+     vpmaddwd a register give a0 b0 + a1 b1 gamma and a0 b1 + a1 b0 exactly in 32 bits, summed
+     over the vector and Montgomery-reduced once from 32 bits. Compress_d for every d by one
+     formula on anything in (-2q, 2q) (no reduction before it): x + 2q, the quotient estimate
+     vpmulhrsw(x, floor(2^(15+d) / q)) (the quotient or one less), the exact remainder in 16 bits
+     decides; Decompress_d is vpmulhrsw(y << (15 - d), q); the encodings by vpmaddwd, vpshufb,
+     vpsllvd / vpsrlvq and lane joins, every load and store kept inside its buffer;
+     SamplePolyCBD by bit sums in octets (eta 2) and in 24-bit groups (eta 3); SampleNTT's
+     rejection 16 candidates at a time through a 256-entry compaction table (popcnt). Every
+     formula was proven before the assembly: a register simulation of the shuffled layout (0
+     mismatches against FIPS 203's NTT, inverse and products) and an emulation of each
+     instruction sequence with exact 16- and 32-bit wrapping (Compress and Decompress on every
+     input, the inverse's and the products' bounds); then a harness against v1's routines on
+     random inputs (0 mismatches; NTT 3,458 -> 280 cycles, inverse 5,502 -> 286, a k = 3 product
+     6,556 -> 198 + 62 for the cache, the compressions 13-29x). *The hashes became the cost*
+     (44 Keccak permutations in a 768 encapsulation, about 86% of v3's time with one state at a
+     time), so the matrix (k^2 SHAKE128 runs) and the noise (2k or 2k + 1 SHAKE256 runs) are
+     sampled four at a time through `ha_keccak_f1600_x4_v3` (a lone last run alone); the matrix
+     is stored whole for k = 2, 3 (the entries are public: above the wiped part of the frame), a
+     row or column at a time for k = 4. A call goes up to 20,800 octets deep (ML-KEM-1024; 11,048
+     at v1), so both versions now touch the stack every 4032 octets on the way down: a nearly
+     spent thread faults on its guard page instead of the frame stepping over it into whatever
+     lies below (a stack clash). `tests/native/stack` proves it for every function at v1 and at
+     the best tier: the depth measured on a painted stack, then 254 runs in forked children on
+     stacks too small by 64 octets to all but 1 KiB, each above a PROT_NONE guard and a 64 KiB
+     shared sentinel: every one faults inside its guard page with the sentinel intact, and each
+     function on its depth + 1 KiB returns the main stack's octets; a control (an unprobed
+     20,000-octet frame) is caught stepping over. *Proven by* the same tests at v3 and v1
+     (MlKemTests, `tests/native/tiers`: 1,600 rounds at every tier equal to v1's).
+     *Measured* (41 rounds, paired): ML-KEM-768 key pair 10.58 us against mlkem-native's 10.87
+     (1.04x), encapsulation 10.92 against 11.79 (1.08x), decapsulation 14.38 against 15.17
+     (1.08x); ML-KEM-1024 14.25 / 14.96 / 20.02 against 15.68 / 17.17 / 22.41 (1.10x, 1.15x,
+     1.12x); v3 is 3.3-4.2x v1. With the arithmetic in AVX2 but one Keccak state at a time it
+     was 14.25 / 15.59 / 18.85 (mlkem-native 1.19-1.44x ahead): the four-way permutation is what
+     passed it.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
    (PEM, PKCS#8).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:

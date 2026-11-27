@@ -191,6 +191,26 @@ benchmarks/ab.sh ../before . 5 10                               # 5 rounds of 10
 
 ## Results
 
+**2026-11-27: ML-KEM, v3 (AVX2, four Keccak states at once).** The same cases as v1's below, now
+at the v3 tier: the arithmetic 16 coefficients a register (NTT, inverse, base-case products by
+vpmaddwd on cached factors, the compressions, encodings, CBD and rejection) and the matrix and
+noise sampled four SHAKE runs at a time (`ha_keccak_f1600_x4_v3`). 41 rounds, paired:
+
+| Case | v3 | v1 | mlkem-native 2.1.0 | |
+|---|---:|---:|---:|---|
+| ML-KEM-768 key pair | 10.58 us | 34.53 us | 10.87 us | 1.04x mlkem-native |
+| ML-KEM-768 encapsulation | 10.92 us | 43.29 us | 11.79 us | 1.08x mlkem-native |
+| ML-KEM-768 decapsulation | 14.38 us | 57.87 us | 15.17 us | 1.08x mlkem-native |
+| ML-KEM-1024 key pair | 14.25 us | 53.63 us | 15.68 us | 1.10x mlkem-native |
+| ML-KEM-1024 encapsulation | 14.96 us | 64.20 us | 17.17 us | 1.15x mlkem-native |
+| ML-KEM-1024 decapsulation | 20.02 us | 85.00 us | 22.41 us | 1.12x mlkem-native |
+
+v3 is 3.3x to 4.2x v1. The steps, measured each: the arithmetic in AVX2 with one Keccak state at
+a time gave 14.25 / 15.59 / 18.85 us at ML-KEM-768 (mlkem-native still 1.19x to 1.44x ahead: 44
+permutations at about 870 cycles were 86% of an encapsulation); four states a permutation (1,720
+cycles against 812 for one) passed it. What is left is mostly hashing: H(ek) (9 permutations),
+G, J (decapsulation: 9) and the matrix's lone ninth entry at ML-KEM-768 run one state at a time.
+
 **2026-11-27: ML-KEM, v1 (scalar).** A key pair from a fixed seed, an encapsulation to it with a
 fixed m, and the decapsulation of that ciphertext, at ML-KEM-768 and ML-KEM-1024. OpenSSL 3.0.13
 has no ML-KEM, so the rival is mlkem-native 2.1.0 (pq-code-package's, its multilevel native
@@ -229,8 +249,8 @@ permutation 262, the XOR of the rate's octets the rest) against OpenSSL's 320. T
 alone (scratchpad sha3/kf.asm, 200,000 calls) takes about 774 cycles: 32 a round, where its 130
 ALU operations on five ports would allow about 26. Not tried here: AVX2 for one state (three
 vector ports for the same operations, and rotations of three instructions without AVX-512's
-vprolq), AVX-512 (vprolq, vpternlogq: no CPU here measures it). Next: four states at once in
-AVX2 lanes, for ML-KEM's matrix sampling (independent SHAKE128 streams).
+vprolq), AVX-512 (vprolq, vpternlogq: no CPU here measures it). Four states at once in AVX2
+lanes came next, for ML-KEM's matrix and noise (its entry above: 1,720 cycles for four).
 
 **2026-11-27: Ed25519.** Three cases (bench_ed25519_*): a public key from a seed (SHA-512 and
 the fixed base), a signature under a key prepared before the loop, and a verification of a valid

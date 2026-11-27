@@ -672,6 +672,10 @@ int httpasm_ed25519_verify(const uint8_t public_key[HTTPASM_ED25519_KEY], const 
  * function is deterministic: the caller draws the randomness (httpasm_random), which also makes
  * them testable against fixed vectors. Constant time in every secret; the decapsulation's implicit
  * rejection (a modified ciphertext gives an unrelated key, not an error) included.
+ * Stack: each call needs up to about 21 KiB of the calling thread's stack (20,800 octets at most,
+ * measured by tests/native/stack: ML-KEM-1024 with AVX2; 11 KiB without), touched a page at a time
+ * on the way down, so a thread with too little faults on its guard page rather than writing past
+ * it. All of it but the public matrix is wiped before the call returns.
  * ------------------------------------------------------------------------------------------ */
 
 #define HTTPASM_MLKEM_SEED     64       /* octets of a key generation seed: d || z (64 random) */
