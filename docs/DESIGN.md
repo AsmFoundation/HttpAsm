@@ -431,7 +431,14 @@ HTTP/2, the drivers, the client):
          Now one text, `include/semantics/authority.inc`, checks HTTP/1.1's Host, CONNECT
          target and http(s) absolute-form authority and HTTP/2's `:authority` and Host:
          `uri-host [ ":" port ]` with IP-literals held to IPv6's and IPvFuture's octets, and
-         for CONNECT a port of 1 to 65535 (RFC 9110 9.3.6).
+         for CONNECT a port of 1 to 65535 (RFC 9110 9.3.6);
+       - the HPACK encoder reused a dynamic entry's name by known-field id alone (CI's campaign,
+         2026-11-27): a known name without a static entry, `connection`, after a field spelled
+         `connectiOn`, came back from the peer as `connectiOn`, whose spelling the peer's entry
+         keeps. Only a name with a static entry went in by that entry's index, with the static
+         table's lower-case spelling on both sides; any other entry's name now serves only a
+         name spelled the same, octet for octet. HttpAsm's own HTTP/2 answers lower-case their
+         names first, so only a direct caller of `httpasm_hpack_encode` saw it.
      - Seeds live in `tests/fuzz/seeds/<name>/`. Every finding becomes a seed and a regression
        test once fixed. CI runs each fuzzer for 30 s.
      - **Replay:** `run.sh merge` minimizes each fuzzer's corpus into `tests/fuzz/corpus/<name>/`,

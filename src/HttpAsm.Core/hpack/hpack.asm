@@ -1433,13 +1433,27 @@ httpasm_hpack_encode:
     jz      .compare_name
     cmp     eax, [r10 + 8]                  ; a known name: the ids say it
     jne     .dynamic_next
-    jmp     .same_name
+    ; The ids settle it only for a name with a static entry: every such field went into the
+    ; table with that entry's index as its name, so the peer's entry holds the static table's
+    ; lower-case spelling, which this name folds to. A known name without one (Connection,
+    ; Keep-Alive...) went out as its caller spelled it, and the peer's entry keeps that
+    ; spelling: it serves only a name spelled the same, octet for octet, or "connection" would
+    ; come back from the peer as an earlier field's "connectiOn" (tests/fuzz/hpack's round
+    ; trip, CI 2026-11-27).
+    lea     rcx, [rel ha_hpack_by_id]
+    cmp     word [rcx + rax * 2], 0
+    jne     .same_name
+    mov     ecx, [r10]
+    cmp     ecx, [r15 + httpasm_field.name_length]
+    jne     .dynamic_next
+    jmp     .compare_octets
 .compare_name:
     mov     ecx, [r10]
     cmp     ecx, [r15 + httpasm_field.name_length]
     jne     .dynamic_next
     cmp     dword [r10 + 8], 0
     jne     .dynamic_next                   ; a known name cannot equal an unknown one
+.compare_octets:                            ; ecx: the name's length, the entry's too
     lea     rsi, [r10 + HA_HPACK_ENTRY_HEADER]
     mov     rdi, [r15 + httpasm_field.name]
     test    rcx, rcx

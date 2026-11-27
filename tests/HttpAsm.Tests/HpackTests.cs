@@ -376,6 +376,26 @@ public sealed partial class HpackTests
         Assert.Equal(0x10, block[0] & 0xF0);        // the first field's literal is 0001xxxx
     }
 
+    /// <summary>
+    /// A known name without a static entry ("connection") enters the table as its caller spelled
+    /// it, and the peer's entry keeps that spelling, so a later field must reuse that entry's name
+    /// only when spelled the same: tests/fuzz/hpack found "connectiOn" and then "connection" coming
+    /// back from the peer as "connectiOn" twice (CI, 2026-11-27). Spelled the same, the name is
+    /// reused, and both tables stay entry for entry the same.
+    /// </summary>
+    [Fact]
+    public void ReusesAnEntrysNameOnlyAsThePeerSpellsIt()
+    {
+        Platform.RequireLinuxX64();
+        using var encoder = new HpackTable(4096);
+        using var decoder = new HpackTable(4096);
+        HpackField first = Assert.Single(decoder.Decode(encoder.Encode([new HpackField("connectiOn", "a")])).Fields);
+        Assert.Equal("connectiOn: a", first.ToString());
+        HpackDecoded second = decoder.Decode(encoder.Encode([new HpackField("connection", "b"), new HpackField("connectiOn", "c")]));
+        Assert.Equal(["connection: b", "connectiOn: c"], second.Fields.Select(f => f.ToString()));
+        AssertSameTables(encoder, decoder);
+    }
+
     /// <summary>Encode writes nothing and leaves the table alone when the buffer is below the bound.</summary>
     [Fact]
     public void EncodeRefusesABufferBelowTheBound()
