@@ -84,7 +84,10 @@ jobs:
   test:
     name: Registry, build and tests (linux-x64)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # 2026-11-28: 30 minutes ran out in the fuzzing step once M2 step 3 added four fuzzers (the
+    # tests took 10.5 minutes, the coverage gate 9.5, constant time 1, then each fuzzer its 30 s
+    # plus its build). Each fuzzer adds about 40 s; the margin leaves room for the next ones.
+    timeout-minutes: 50
     env:
       HTTPASM_REQUIRE_LINUX: "1"
       DOTNET_NOLOGO: "1"
