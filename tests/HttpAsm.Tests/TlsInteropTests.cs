@@ -86,79 +86,11 @@ public sealed class TlsInteropTests
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         using var server = new TlsServerHarness(credential.Key, [credential.Certificate], groups: groups, flags: flags);
         Assert.Equal(0, server.ConfigAnswer);
-        bool sawClose = false;
-        string? failure = null;
+        var served = new Served();
         var pump = new Thread(() =>
         {
-            try
-            {
-                using Socket s = listener.AcceptSocket();
-                s.NoDelay = true;
-                var buffer = new byte[1 << 18];
-                int filled = 0;
-                while (true)
-                {
-                    int n = s.Receive(buffer, filled, buffer.Length - filled, SocketFlags.None);
-                    if (n == 0)
-                    {
-                        return;                                             // the client is gone
-                    }
-
-                    filled += n;
-                    int at = 0;
-                    while (at < filled)
-                    {
-                        TlsServerHarness.Received r = server.Receive(buffer.AsSpan(at, filled - at));
-                        if (r.Answer == 0)
-                        {
-                            break;                                          // a record not whole yet
-                        }
-
-                        byte[] output = server.TakeOutput();
-                        if (r.Answer < 0)
-                        {
-                            s.Send(output);
-                            failure = $"the engine failed: alert {r.Event.Alert}, flags {r.Event.Flags}";
-                            return;
-                        }
-
-                        at += (int)r.Answer;
-                        if (r.Event.Kind == TlsEngine.EventData)
-                        {
-                            // the echo: send takes what the output span holds, so a caller drains
-                            // it and sends the rest, as many rounds as that takes
-                            s.Send(output);
-                            output = [];
-                            ReadOnlySpan<byte> rest = r.Data;
-                            while (rest.Length > 0)
-                            {
-                                long taken = server.Send(rest);
-                                Assert.True(taken > 0, $"send took {taken} of {rest.Length} octets with the output drained");
-                                s.Send(server.TakeOutput());
-                                rest = rest[(int)taken..];
-                            }
-                        }
-                        else if (r.Event.Kind == TlsEngine.EventClosed)
-                        {
-                            sawClose = true;
-                            Assert.Equal(0, server.Close());
-                            output = [.. output, .. server.TakeOutput()];
-                        }
-
-                        if (output.Length > 0)
-                        {
-                            s.Send(output);
-                        }
-                    }
-
-                    Buffer.BlockCopy(buffer, at, buffer, 0, filled - at);
-                    filled -= at;
-                }
-            }
-            catch (Exception e)
-            {
-                failure = e.ToString();
-            }
+            using Socket s = listener.AcceptSocket();
+            Serve(server, s, 0, served);
         }) { IsBackground = true };
         pump.Start();
 
@@ -200,12 +132,132 @@ public sealed class TlsInteropTests
         }
 
         Assert.True(pump.Join(TimeSpan.FromSeconds(30)), "the server pump did not finish");
-        if (failure is not null)
+        if (served.Failure is not null)
         {
-            throw new InvalidOperationException(failure);
+            throw new InvalidOperationException(served.Failure);
         }
 
-        return new Run(negotiated, echoed, server.Negotiated(), sawClose, server.Random.Lengths);
+        return new Run(negotiated, echoed, server.Negotiated(), served.SawClose, server.Random.Lengths);
+    }
+
+    /// <summary>What a server pump saw (written by its thread, read after it ended).</summary>
+    internal sealed class Served
+    {
+        /// <summary>Whether the client's close_notify arrived.</summary>
+        public bool SawClose { get; set; }
+
+        /// <summary>The application data records echoed.</summary>
+        public int Echoes { get; set; }
+
+        /// <summary>How the pump failed (the engine's failure, or an exception), or null.</summary>
+        public string? Failure { get; set; }
+    }
+
+    /// <summary>
+    /// Serves one accepted connection with the engine: what arrives is fed one record at a time
+    /// (a record cut by TCP waits for its rest), the engine's output is written back after each,
+    /// every application data record is echoed (send takes what the output span holds, so the
+    /// output is drained and the rest sent, as many rounds as that takes), and the client's
+    /// close_notify is answered with ours. After closeAfterEchoes echoes (0: never) the server
+    /// closes first: close_notify, then the socket's send side.
+    /// </summary>
+    /// <param name="server">The engine's connection.</param>
+    /// <param name="s">The accepted socket.</param>
+    /// <param name="closeAfterEchoes">Echoes after which the server closes (0: never).</param>
+    /// <param name="served">What the pump saw, filled as it goes.</param>
+    /// <param name="onRecord">Called on the pump's thread for each record the engine took (after
+    /// its output went out), or null.</param>
+    internal static void Serve(TlsServerHarness server, Socket s, int closeAfterEchoes, Served served, Action<TlsServerHarness.Received>? onRecord = null)
+    {
+        bool shut = false;
+
+        // what the engine queued goes out, unless our side is shut (then nothing may be written:
+        // what the engine still answers, a late alert, is dropped as a closed socket drops it)
+        void Flush(byte[] octets)
+        {
+            if (octets.Length > 0 && !shut)
+            {
+                s.Send(octets);
+            }
+        }
+
+        try
+        {
+            s.NoDelay = true;
+            var buffer = new byte[1 << 18];
+            int filled = 0;
+            while (true)
+            {
+                int n = s.Receive(buffer, filled, buffer.Length - filled, SocketFlags.None);
+                if (n == 0)
+                {
+                    return;                                             // the client is gone
+                }
+
+                filled += n;
+                int at = 0;
+                while (at < filled)
+                {
+                    TlsServerHarness.Received r = server.Receive(buffer.AsSpan(at, filled - at));
+                    if (r.Answer == 0)
+                    {
+                        break;                                          // a record not whole yet
+                    }
+
+                    byte[] output = server.TakeOutput();
+                    if (r.Answer < 0)
+                    {
+                        Flush(output);
+                        served.Failure = $"the engine failed: alert {r.Event.Alert}, flags {r.Event.Flags}";
+                        return;
+                    }
+
+                    at += (int)r.Answer;
+                    Flush(output);
+                    onRecord?.Invoke(r);
+                    if (r.Event.Kind == TlsEngine.EventData)
+                    {
+                        ReadOnlySpan<byte> rest = r.Data;
+                        while (rest.Length > 0)
+                        {
+                            long taken = server.Send(rest);
+                            if (taken <= 0)
+                            {
+                                served.Failure = $"send took {taken} of {rest.Length} octets with the output drained";
+                                return;
+                            }
+
+                            Flush(server.TakeOutput());
+                            rest = rest[(int)taken..];
+                        }
+
+                        served.Echoes++;
+                        if (served.Echoes == closeAfterEchoes)
+                        {
+                            server.Close();
+                            Flush(server.TakeOutput());
+                            s.Shutdown(SocketShutdown.Send);
+                            shut = true;
+                        }
+                    }
+                    else if (r.Event.Kind == TlsEngine.EventClosed)
+                    {
+                        served.SawClose = true;
+                        if (server.Close() == 0)
+                        {
+                            Flush(server.TakeOutput());
+                        }
+                    }
+                }
+
+                Buffer.BlockCopy(buffer, at, buffer, 0, filled - at);
+                filled -= at;
+            }
+        }
+        catch (Exception e)
+        {
+            served.Failure = e.ToString();
+        }
     }
 
     /// <summary>Every key kind with every suite a client may force: the interop matrix.</summary>
