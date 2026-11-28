@@ -451,6 +451,276 @@ static void rsa(const char *const hex[7], const char *tier)
     public(&key, sizeof key);
 }
 
+/* put_tlv: a DER element (tag, a definite length in the fewest octets, the contents) at out;
+ * returns its length. */
+static size_t put_tlv(uint8_t *out, uint8_t tag, const uint8_t *content, size_t n)
+{
+    size_t h = 0;
+    out[h++] = tag;
+    if (n < 128) {
+        out[h++] = (uint8_t)n;
+    } else if (n < 256) {
+        out[h++] = 0x81, out[h++] = (uint8_t)n;
+    } else {
+        out[h++] = 0x82, out[h++] = (uint8_t)(n >> 8), out[h++] = (uint8_t)n;
+    }
+    memmove(out + h, content, n);
+    return h + n;
+}
+
+/* encodings: the readers private keys go through, on secrets. PEM: the base64 text of a key
+ * between its boundaries (secret; the boundaries are not), of RFC 8410's Ed25519 key and of a
+ * text with every base64 character, its pads and whitespace of each kind. ASN.1: an
+ * RSAPrivateKey built from the 2048-bit key's numbers, each INTEGER's contents secret (its
+ * identifier and length octets are the structure: public by design), read element by element
+ * under DER and BER; an OCTET STRING's secret contents gathered, primitive and BER-constructed. */
+static void encodings(const char *tier)
+{
+    static const char *const texts[] = {
+        "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEINTuctv5E1hK1bbY8fdp+K06/nwoy/HU++CXqI9EdVhC\n-----END PRIVATE KEY-----\n",
+        "-----BEGIN TEST-----\r\nABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\r\n\t AQID BA\v\fU =\n-----END TEST-----",
+        "-----BEGIN TEST-----\nAQIDBAU=\n-----END TEST-----",
+        "-----BEGIN TEST-----\nAQIDBAUG\n-----END TEST-----",
+    };
+    static uint8_t text[512], der[512];
+    for (size_t i = 0; i < sizeof texts / sizeof texts[0]; i++) {
+        size_t n = strlen(texts[i]);
+        memcpy(text, texts[i], n);
+        const char *body = strchr(texts[i], '\n') + 1, *end = strstr(body, "-----END");
+        secret(text + (body - texts[i]), (size_t)(end - body));
+        httpasm_pem block;
+        expect(httpasm_pem_read(&block, text, n, der, sizeof der) == 0, "pem_read", tier);
+        public(der, sizeof der);
+        public(text, n);
+    }
+
+    /* RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, dp, dq, qinv }: the key's numbers in
+     * that order (d is not among them: q's octets stand in for it) */
+    static const int order[8] = { 0, 1, 3, 2, 3, 4, 5, 6 };
+    static uint8_t numbers[8][257], body[2048], key[2100], scratch[600];
+    size_t at = 0;
+    uint8_t zero = 0;
+    at += put_tlv(body + at, 0x02, &zero, 1);
+    for (int i = 0; i < 8; i++) {
+        uint8_t raw[256];
+        size_t m = hex_octets(rsa_2048[order[i]], raw);
+        size_t off = (raw[0] & 0x80) ? 1 : 0;               /* a positive INTEGER's leading zero */
+        numbers[i][0] = 0;
+        memcpy(numbers[i] + off, raw, m);
+        at += put_tlv(body + at, 0x02, numbers[i], m + off);
+    }
+    size_t total = put_tlv(key, 0x30, body, at);
+    size_t p = 0;
+    httpasm_asn1 e;
+    expect(httpasm_asn1_read(&e, key, total, HTTPASM_ASN1_DER) == 0 && e.tag == HTTPASM_ASN1_SEQUENCE, "asn1 sequence", tier);
+    p = (size_t)(e.content - key);
+    int index = 0;
+    while (p < total) {
+        httpasm_asn1 item;
+        if (httpasm_asn1_read(&item, key + p, total - p, HTTPASM_ASN1_DER) != 0)
+            break;
+        if (index >= 3)
+            secret(item.content, item.content_length);    /* d, p, q, dp, dq, qinv */
+        p += item.length;
+        index++;
+    }
+    expect(index == 9, "asn1 integers", tier);
+    for (int rules = HTTPASM_ASN1_DER; rules <= HTTPASM_ASN1_BER; rules++) {
+        p = (size_t)(e.content - key);
+        int read = 0;
+        while (p < total) {
+            httpasm_asn1 item;
+            int r = httpasm_asn1_read(&item, key + p, total - p, rules);
+            expect(r == 0 && item.tag == HTTPASM_ASN1_INTEGER, "asn1 integer", tier);
+            if (r != 0)
+                break;
+            p += item.length;
+            read++;
+        }
+        expect(read == 9, "asn1 integers read", tier);
+    }
+    public(key, total);
+
+    /* an OCTET STRING's secret contents: primitive, then in BER's constructed form (two segments) */
+    uint8_t value[64], octets[256];
+    fill(value, sizeof value, 77);
+    size_t n1 = put_tlv(octets, 0x04, value, sizeof value);
+    uint8_t seg[160];
+    size_t s = put_tlv(seg, 0x04, value, 32);
+    s += put_tlv(seg + s, 0x04, value + 32, 32);
+    size_t n2 = put_tlv(octets + n1, 0x24, seg, s);
+    secret(octets + 2, sizeof value);                       /* the primitive's contents */
+    secret(octets + n1 + 4, 32);                             /* each segment's contents */
+    secret(octets + n1 + 4 + 34, 32);
+    for (int which = 0; which < 2; which++) {
+        httpasm_asn1 str;
+        size_t off = which ? n1 : 0, n = which ? n2 : n1;
+        int rules = which ? HTTPASM_ASN1_BER : HTTPASM_ASN1_DER;
+        expect(httpasm_asn1_read(&str, octets + off, n, rules) == 0, "asn1 octet string", tier);
+        expect(httpasm_asn1_octets(&str, scratch, sizeof scratch, rules) == (int64_t)sizeof value, "asn1_octets", tier);
+        public(scratch, sizeof scratch);
+    }
+    public(octets, sizeof octets);
+}
+
+/* base64: RFC 4648's encoding of in[0..n) into out, 64 characters a line (RFC 7468's strict
+ * form); returns the characters written. */
+static size_t base64(const uint8_t *in, size_t n, char *out)
+{
+    static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0, line = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? in[i + 2] : 0);
+        char q[4] = { alphabet[v >> 18], alphabet[(v >> 12) & 63], i + 1 < n ? alphabet[(v >> 6) & 63] : '=', i + 2 < n ? alphabet[v & 63] : '=' };
+        for (int k = 0; k < 4; k++) {
+            out[o++] = q[k];
+            if (++line == 64) {
+                out[o++] = '\n';
+                line = 0;
+            }
+        }
+    }
+    if (line)
+        out[o++] = '\n';
+    return o;
+}
+
+/* pem_key: label and DER as a PEM text in out; returns its length, *body and *body_length the
+ * base64 text's place (the secret part: the boundaries are not). */
+static size_t pem_key(const char *label, const uint8_t *der, size_t n, char *out, size_t *body, size_t *body_length)
+{
+    size_t o = (size_t)sprintf(out, "-----BEGIN %s-----\n", label);
+    *body = o;
+    o += base64(der, n, out + o);
+    *body_length = o - *body;
+    o += (size_t)sprintf(out + o, "-----END %s-----\n", label);
+    return o;
+}
+
+/* keys: httpasm_private_key_load on PEM files whose whole base64 text is secret (so everything
+ * decoded from it is too, the structure included: the loader and the reader must mark public
+ * what is public by design, and nothing else may steer them): RSA-2048 in PKCS#8 and PKCS#1,
+ * P-256 in PKCS#8 and SEC1, P-384 and P-521 in PKCS#8 (scalars below n, the top octet 1),
+ * Ed25519 and Ed448 in PKCS#8, and a BER PKCS#8 of the RSA key (indefinite lengths, a
+ * constructed privateKey). */
+static void keys(const char *tier)
+{
+    static uint8_t rsakey[2100], body[2200], der[2400], seg[2400];
+    static char text[4096];
+    static httpasm_private_key key;
+    /* RSAPrivateKey from the 2048-bit numbers (d: q's octets stand in; the init ignores d) */
+    static const int order[8] = { 0, 1, 3, 2, 3, 4, 5, 6 };
+    size_t at = 0;
+    uint8_t zero = 0;
+    at += put_tlv(body + at, 0x02, &zero, 1);
+    for (int i = 0; i < 8; i++) {
+        uint8_t raw[256], number[257];
+        size_t m = hex_octets(rsa_2048[order[i]], raw);
+        size_t off = (raw[0] & 0x80) ? 1 : 0;
+        number[0] = 0;
+        memcpy(number + off, raw, m);
+        at += put_tlv(body + at, 0x02, number, m + off);
+    }
+    size_t rsa_length = put_tlv(rsakey, 0x30, body, at);
+    static const uint8_t rsa_algorithm[] = { 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00 };
+    static const uint8_t version0[] = { 0x02, 0x01, 0x00 };
+
+    typedef struct { const char *label; int kind; size_t n; } key_file;   /* a PEM label, the kind expected, the DER's octets */
+    key_file files[8];
+    static uint8_t ders[8][2400];
+    int count = 0;
+    /* RSA, PKCS#8 */
+    at = 0;
+    memcpy(body + at, version0, 3), at += 3;
+    memcpy(body + at, rsa_algorithm, sizeof rsa_algorithm), at += sizeof rsa_algorithm;
+    at += put_tlv(body + at, 0x04, rsakey, rsa_length);
+    files[count] = (key_file){ "PRIVATE KEY", HTTPASM_KEY_RSA, put_tlv(ders[count], 0x30, body, at) };
+        count++;
+    /* RSA, PKCS#1 */
+    memcpy(ders[count], rsakey, rsa_length);
+    files[count] = (key_file){ "RSA PRIVATE KEY", HTTPASM_KEY_RSA, rsa_length };
+        count++;
+    /* the curves: PKCS#8 with ECPrivateKey (no public key), P-256 also as SEC1 */
+    static const struct { int kind; size_t size; uint8_t oid[10]; size_t oid_length; } curves[] = {
+        { HTTPASM_KEY_P256, 32, { 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 }, 10 },
+        { HTTPASM_KEY_P384, 48, { 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22 }, 7 },
+        { HTTPASM_KEY_P521, 66, { 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23 }, 7 },
+    };
+    static const uint8_t ec_oid[] = { 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+    for (size_t c = 0; c < 3; c++) {
+        uint8_t d[512], ec[512], alg[512];   /* (room past need: put_tlv may write 255 + 3) */
+        fill(d, curves[c].size, (unsigned)(90 + c));
+        d[0] = 1;                                           /* below n */
+        size_t e = 0;
+        uint8_t one = 1;
+        e += put_tlv(ec + e, 0x02, &one, 1);
+        e += put_tlv(ec + e, 0x04, d, curves[c].size);
+        uint8_t inner[512];
+        size_t inner_length = put_tlv(inner, 0x30, ec, e);
+        size_t a = 0;
+        memcpy(alg + a, ec_oid, sizeof ec_oid), a += sizeof ec_oid;
+        memcpy(alg + a, curves[c].oid, curves[c].oid_length), a += curves[c].oid_length;
+        at = 0;
+        memcpy(body + at, version0, 3), at += 3;
+        at += put_tlv(body + at, 0x30, alg, a);
+        at += put_tlv(body + at, 0x04, inner, inner_length);
+        files[count] = (key_file){ "PRIVATE KEY", curves[c].kind, put_tlv(ders[count], 0x30, body, at) };
+        count++;
+        if (c == 0) {
+            /* SEC1: version, privateKey, [0] the curve */
+            uint8_t params[512];
+            size_t pl = put_tlv(params, 0xA0, curves[c].oid, curves[c].oid_length);
+            memcpy(ec + e, params, pl);
+            files[count] = (key_file){ "EC PRIVATE KEY", curves[c].kind, put_tlv(ders[count], 0x30, ec, e + pl) };
+        count++;
+        }
+    }
+    /* Ed25519 and Ed448: CurvePrivateKey inside the privateKey OCTET STRING */
+    static const struct { int kind; size_t size; uint8_t oid[5]; } edwards[] = {
+        { HTTPASM_KEY_ED25519, 32, { 0x06, 0x03, 0x2B, 0x65, 0x70 } },
+        { HTTPASM_KEY_ED448, 57, { 0x06, 0x03, 0x2B, 0x65, 0x71 } },
+    };
+    for (size_t k = 0; k < 2; k++) {
+        uint8_t seed[512], curve_key[512], alg[512];   /* (room past need: put_tlv may write 255 + 3) */
+        fill(seed, edwards[k].size, (unsigned)(95 + k));
+        size_t cl = put_tlv(curve_key, 0x04, seed, edwards[k].size);
+        size_t a = put_tlv(alg, 0x30, edwards[k].oid, 5);
+        at = 0;
+        memcpy(body + at, version0, 3), at += 3;
+        memcpy(body + at, alg, a), at += a;
+        at += put_tlv(body + at, 0x04, curve_key, cl);
+        files[count] = (key_file){ "PRIVATE KEY", edwards[k].kind, put_tlv(ders[count], 0x30, body, at) };
+        count++;
+    }
+    for (int f = 0; f < count; f++) {
+        size_t b, bl;
+        size_t n = pem_key(files[f].label, ders[f], files[f].n, text, &b, &bl);
+        secret(text + b, bl);
+        expect(httpasm_private_key_load(&key, (const uint8_t *)text, n) == files[f].kind, "private_key_load (PEM)", tier);
+        public(&key, sizeof key);
+        public(text, n);
+    }
+
+    /* the RSA key in BER's forms: indefinite lengths, a privateKey of 100-octet segments; DER
+     * input, its octets all secret */
+    size_t s = 0;
+    for (size_t i = 0; i < rsa_length; i += 100) {
+        size_t piece = rsa_length - i < 100 ? rsa_length - i : 100;
+        s += put_tlv(seg + s, 0x04, rsakey + i, piece);
+    }
+    at = 0;
+    der[at++] = 0x30, der[at++] = 0x80;
+    memcpy(der + at, version0, 3), at += 3;
+    memcpy(der + at, rsa_algorithm, sizeof rsa_algorithm), at += sizeof rsa_algorithm;
+    der[at++] = 0x24, der[at++] = 0x80;
+    memcpy(der + at, seg, s), at += s;
+    der[at++] = 0, der[at++] = 0, der[at++] = 0, der[at++] = 0;
+    secret(der, at);
+    expect(httpasm_private_key_load(&key, der, at) == HTTPASM_KEY_RSA, "private_key_load (BER)", tier);
+    public(&key, sizeof key);
+    public(der, at);
+}
+
 /* checks: every primitive at every tier valgrind's CPU offers (a tier whose features equal the
  * one before is skipped: valgrind's CPU tops out below it). */
 static void *checks(void *unused)
@@ -475,6 +745,8 @@ static void *checks(void *unused)
         ffdhe(names[t]);
         rsa(rsa_1024, names[t]);
         rsa(rsa_2048, names[t]);
+        encodings(names[t]);
+        keys(names[t]);
     }
     return NULL;
 }

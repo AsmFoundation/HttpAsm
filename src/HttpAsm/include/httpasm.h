@@ -254,7 +254,8 @@ uint32_t httpasm_abi_version(void);
  * 13 httpasm_hmac_sha384_ctx, 14 httpasm_aes_key, 15 httpasm_aes_gcm_key,
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
  * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
- * 22 httpasm_hmac_sha512_ctx; 0 for any other value. */
+ * 22 httpasm_hmac_sha512_ctx, 23 httpasm_asn1, 24 httpasm_pem, 25 httpasm_private_key,
+ * 26 httpasm_certificate, 27 httpasm_public_key; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -1087,6 +1088,247 @@ void httpasm_hkdf_sha512_extract(const uint8_t *salt, size_t salt_length, const 
  * 255 * 64 = 16320 octets (nothing is written then). */
 int httpasm_hkdf_sha512_expand(const uint8_t *prk, size_t prk_length, const uint8_t *info,
                                size_t info_length, uint8_t *okm, size_t length);
+
+/* ------------------------------------------------------------------------------------------
+ * ASN.1's encodings (ITU-T X.690): a reader of the Basic Encoding Rules and of their strict
+ * profile, the Distinguished Encoding Rules, for certificates (DER: RFC 5280) and private keys
+ * (BER: RFC 5958 has receivers accept it). It reads one element at a time, in place: nothing
+ * is copied or allocated, an element's contents point into the caller's octets, and no octet
+ * past the input is read. Every input is taken as untrusted.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_ASN1_DER 0          /* rules: X.690's clauses 8, 10 and 11 (one encoding a value) */
+#define HTTPASM_ASN1_BER 1          /* rules: clause 8 alone (every sender's option) */
+
+/* A tag as httpasm_asn1 holds it: the class in bits 31-30, the constructed form in bit 29 (the
+ * identifier octet's bits 8-6, shifted up by 24), the number in bits 28-0. */
+#define HTTPASM_ASN1_UNIVERSAL   0x00000000u
+#define HTTPASM_ASN1_APPLICATION 0x40000000u
+#define HTTPASM_ASN1_CONTEXT     0x80000000u
+#define HTTPASM_ASN1_PRIVATE     0xC0000000u
+#define HTTPASM_ASN1_CONSTRUCTED 0x20000000u
+#define HTTPASM_ASN1_CLASS       0xC0000000u
+#define HTTPASM_ASN1_NUMBER      0x1FFFFFFFu
+
+/* The universal types the reader checks (X.680's numbers; SEQUENCE and SET with their form). */
+#define HTTPASM_ASN1_BOOLEAN          1u
+#define HTTPASM_ASN1_INTEGER          2u
+#define HTTPASM_ASN1_BIT_STRING       3u
+#define HTTPASM_ASN1_OCTET_STRING     4u
+#define HTTPASM_ASN1_NULL             5u
+#define HTTPASM_ASN1_OID              6u
+#define HTTPASM_ASN1_ENUMERATED       10u
+#define HTTPASM_ASN1_UTF8_STRING      12u
+#define HTTPASM_ASN1_SEQUENCE         (16u | HTTPASM_ASN1_CONSTRUCTED)
+#define HTTPASM_ASN1_SET              (17u | HTTPASM_ASN1_CONSTRUCTED)
+#define HTTPASM_ASN1_NUMERIC_STRING   18u
+#define HTTPASM_ASN1_PRINTABLE_STRING 19u
+#define HTTPASM_ASN1_T61_STRING       20u
+#define HTTPASM_ASN1_VIDEOTEX_STRING  21u
+#define HTTPASM_ASN1_IA5_STRING       22u
+#define HTTPASM_ASN1_UTC_TIME         23u
+#define HTTPASM_ASN1_GENERALIZED_TIME 24u
+#define HTTPASM_ASN1_GRAPHIC_STRING   25u
+#define HTTPASM_ASN1_VISIBLE_STRING   26u
+#define HTTPASM_ASN1_GENERAL_STRING   27u
+#define HTTPASM_ASN1_UNIVERSAL_STRING 28u
+#define HTTPASM_ASN1_BMP_STRING       30u
+
+/* httpasm_asn1.flags */
+#define HTTPASM_ASN1_INDEFINITE 1u  /* BER's indefinite length: end-of-contents octets end it */
+
+/* One element (32 octets). Valid while the octets it was read from are. */
+typedef struct httpasm_asn1 {
+    const uint8_t *content;         /* the contents octets */
+    size_t content_length;          /* their count (an indefinite length's: before its end-of-contents) */
+    size_t length;                  /* the whole encoding: identifier, length, contents, end-of-contents */
+    uint32_t tag;                   /* HTTPASM_ASN1_<class> | [HTTPASM_ASN1_CONSTRUCTED] | number */
+    uint32_t flags;                 /* HTTPASM_ASN1_INDEFINITE */
+} httpasm_asn1;
+
+/* Reads the first element of in[0..length) under rules (HTTPASM_ASN1_DER or _BER); the octets
+ * after it are the caller's (element->length says where it ends). Checked: the identifier
+ * (8.1.2: the high-tag form only for numbers above 30 and without leading zero bits; numbers up
+ * to 2^28 - 1), the length (8.1.3; never 0xFF; BER's indefinite form only for a constructed
+ * encoding, its end-of-contents found by reading the nested elements; DER: definite, in the
+ * fewest octets), the contents within the input; and for a universal tag, its type's rules:
+ * BOOLEAN, INTEGER and ENUMERATED (the fewest octets), BIT STRING (DER: unused bits zero), OCTET
+ * STRING, NULL, OBJECT IDENTIFIER, SEQUENCE and SET (constructed), the strings' characters
+ * (PrintableString's table, NumericString, IA5String, VisibleString, UTF-8 in the fewest octets
+ * without surrogates, BMPString and UniversalString without surrogates; T61String, Videotex-,
+ * Graphic- and GeneralString's ISO 2022 octets as they are), UTCTime's and GeneralizedTime's
+ * forms (DER's: Z and the seconds always, a fraction without trailing zeros; BER's: X.680's,
+ * with optional seconds, differentials and local time; every field in its range, leap years
+ * included), and BER's constructed strings segment by segment (DER refuses them; a constructed
+ * time is gathered first, 64 characters at most). Other universal types (REAL, EXTERNAL, the TIME types, ...) are refused. The
+ * reader follows nesting itself only for indefinite lengths and segments, 32 levels at most;
+ * a constructed element's other contents are the caller's to read, element by element. Returns
+ * 0, or -1 (element's fields then unspecified). Constant time in an INTEGER's value (only its
+ * identifier and length octets steer it), for the private keys it reads. */
+int httpasm_asn1_read(httpasm_asn1 *element, const uint8_t *in, size_t length, int rules);
+
+/* Applies universal type `type`'s rules (HTTPASM_ASN1_INTEGER, ...) to an element read under
+ * another tag: an IMPLICIT one, such as RFC 5958's publicKey [1] (a BIT STRING). The element
+ * keeps its own form (X.690 8.14.4) and its segments' universal tags. Returns 0, or -1 (also for
+ * a type the reader does not check, a class bit in `type`, unknown rules, or an element whose
+ * flags httpasm_asn1_read never returns: any bit but HTTPASM_ASN1_INDEFINITE). */
+int httpasm_asn1_check(const httpasm_asn1 *element, uint32_t type, int rules);
+
+/* Reads a SET OF's components (under SET's tag or an IMPLICIT one) under rules, and under DER
+ * checks their order (X.690 11.6: ascending encodings, compared as octet strings with the
+ * shorter padded with zero octets; equal ones may repeat). A SET's (not SET OF) tag order
+ * (10.3) is not checked: no structure the library reads has one. Returns 0, or -1. */
+int httpasm_asn1_check_set_of(const httpasm_asn1 *set, int rules);
+
+/* The value of an OCTET STRING or a restricted character string (read under its own tag, or one
+ * under an implicit tag), primitive or BER-constructed: its octets in order, the segments'
+ * joined, copied into out[0..capacity). The element is checked as an OCTET STRING first, so a
+ * constructed element of another kind is refused rather than flattened. Returns the count, or
+ * -1 when it does not fit (out then holds a prefix), the check fails (an element's flags as
+ * httpasm_asn1_check takes them), or the rules are unknown. Copies without looking at the
+ * octets (constant time: a private key's may be secret). */
+int64_t httpasm_asn1_octets(const httpasm_asn1 *element, uint8_t *out, size_t capacity, int rules);
+
+/* A BIT STRING's bits, primitive or BER-constructed: the octets after each segment's initial
+ * octet, in order, into out[0..capacity), and in *unused the unused bits of the final octet (0 to
+ * 7). The element is checked as a BIT STRING first. Returns the octets, or -1 as for
+ * httpasm_asn1_octets (*unused then unchanged). */
+int64_t httpasm_asn1_bits(const httpasm_asn1 *element, uint8_t *out, size_t capacity,
+                          uint32_t *unused, int rules);
+
+/* ------------------------------------------------------------------------------------------
+ * PEM (RFC 7468): the textual encoding of certificates and keys, "-----BEGIN <label>-----",
+ * base64, "-----END <label>-----". The base64 is decoded in constant time (only the layout,
+ * where whitespace stands and where the text ends, steers the decoder), for private keys' sake.
+ * ------------------------------------------------------------------------------------------ */
+
+/* One block, as httpasm_pem_read found it (32 octets). */
+typedef struct httpasm_pem {
+    const uint8_t *label;           /* the label ("CERTIFICATE", "PRIVATE KEY", ...), in the text */
+    size_t label_length;
+    size_t der_length;              /* the octets decoded into der (on -2: the room they need) */
+    size_t end;                     /* the text's offset past the END boundary: where to look next */
+} httpasm_pem;
+
+/* Finds the first block of text[0..length) whose BEGIN line starts the text or a line (text
+ * before it, such as explanatory lines, is skipped) and decodes its base64 into
+ * der[0..capacity). The rules: exactly five hyphen-minuses on each side; a label of printable
+ * characters with single hyphen-minuses or spaces inside it; RFC 7468's lax base64 text
+ * (whitespace anywhere, up to two pads, any other character refused); the END line's label the
+ * BEGIN line's; pads absent or right, a final quantum's pad bits zero. Returns 0 (block filled);
+ * 1 when no BEGIN line is found (a file's blocks are all read: call again from block->end until
+ * then); -1 for a malformed block; -2 when the octets need more than capacity (block->der_length
+ * says how much; der untouched). der is written only once the whole block was checked; a
+ * private key's octets in it are the caller's to wipe. */
+int httpasm_pem_read(httpasm_pem *block, const uint8_t *text, size_t length, uint8_t *der,
+                     size_t capacity);
+
+/* ------------------------------------------------------------------------------------------
+ * Private keys from their files: the key a server signs its handshakes with. PEM or DER, in
+ * PKCS#8 (RFC 5958's OneAsymmetricKey, "PRIVATE KEY"), PKCS#1 ("RSA PRIVATE KEY") or SEC1 (RFC
+ * 5915, "EC PRIVATE KEY"); BER accepted throughout (RFC 5958: receivers MUST). Read in constant
+ * time in the key's secret numbers, scalar or seed; every buffer that held them is wiped.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_KEY_RSA     1       /* rsaEncryption: PKCS#1 v1.5 and PSS signatures */
+#define HTTPASM_KEY_RSA_PSS 2       /* id-RSASSA-PSS (RFC 4055): PSS signatures only */
+#define HTTPASM_KEY_P256    3       /* id-ecPublicKey on prime256v1 */
+#define HTTPASM_KEY_P384    4       /* ... on secp384r1 */
+#define HTTPASM_KEY_P521    5       /* ... on secp521r1 */
+#define HTTPASM_KEY_ED25519 6       /* id-Ed25519 (RFC 8410) */
+#define HTTPASM_KEY_ED448   7       /* id-Ed448 */
+
+/* A private key, prepared (6888 octets): its kind and size first, then the key of that kind
+ * ready to sign (an httpasm_rsa_private_key, a curve's scalar with its public key, an
+ * httpasm_ed25519/ed448_private_key). Its octets ARE the secret: zero it when done. */
+typedef struct httpasm_private_key {
+    uint32_t kind;                  /* HTTPASM_KEY_* */
+    uint32_t bits;                  /* the modulus' or the curve's size in bits */
+    uint32_t pss_hash;              /* HTTPASM_KEY_RSA_PSS: the hash its parameters bind (HTTPASM_HASH_*), 0: any */
+    uint32_t pss_salt;              /* and the salt length they name (0 when absent) */
+    uint32_t public_length;         /* public's octets: 65/97/133 (04 || x || y), 32, 57; 0 for RSA */
+    uint32_t reserved[3];
+    uint8_t public_key[136];        /* the public key (an RSA key's n and e are in the secret part) */
+    uint64_t opaque[840];
+} httpasm_private_key;
+
+/* Loads the private key in data[0..length): DER when its first octet is 0x30, else PEM text
+ * (the first "PRIVATE KEY", "RSA PRIVATE KEY" or "EC PRIVATE KEY" block; other blocks, a
+ * certificate's or "EC PARAMETERS", are skipped). Accepted: OneAsymmetricKey v1 and v2 (whose
+ * publicKey must be the key's own), RSA keys of two primes (rsaEncryption with NULL or absent
+ * parameters; id-RSASSA-PSS with no parameters, or SHA-256/384/512 and MGF1 over the same hash),
+ * P-256/384/521 keys on a named curve (their scalar padded if a writer dropped its leading
+ * zeros; a public key given must be d G's, uncompressed or compressed), Ed25519 and Ed448 keys.
+ * Returns the kind (HTTPASM_KEY_*) with key filled; -2 when the text's only private key is an
+ * "ENCRYPTED PRIVATE KEY" (password-based decryption is not supported yet); -1 otherwise (key
+ * then all zeros): any other format, algorithm (X25519 and X448 keys sign nothing) or
+ * inconsistency (an RSA key's numbers that do not make one, a scalar outside 1..n-1). Needs
+ * about 90 KiB of stack (touched a page at a time). */
+int httpasm_private_key_load(httpasm_private_key *key, const uint8_t *data, size_t length);
+
+/* ------------------------------------------------------------------------------------------
+ * Certificates (RFC 5280 4.1): their structure, in DER, and their subject's public key; what a
+ * server reads of its own chain (to know its key's kind and that the key is the certificate's)
+ * and a TLS client of its peer's leaf. Chain validation (names, constraints, the extensions'
+ * meanings, revocation, time) is M3's: these read and check the encoding and its shape only.
+ * ------------------------------------------------------------------------------------------ */
+
+/* A certificate's parts (152 octets): pointers into the DER read, valid while it is. */
+typedef struct httpasm_certificate {
+    const uint8_t *tbs;                 /* tbsCertificate's whole encoding: what the signature covers */
+    size_t tbs_length;
+    const uint8_t *serial;              /* serialNumber's contents (two's complement, big-endian) */
+    size_t serial_length;
+    const uint8_t *issuer;              /* the issuer's whole encoding (a Name) */
+    size_t issuer_length;
+    const uint8_t *subject;             /* the subject's */
+    size_t subject_length;
+    const uint8_t *spki;                /* subjectPublicKeyInfo's whole encoding (httpasm_public_key_read) */
+    size_t spki_length;
+    const uint8_t *extensions;          /* [3]'s Extensions SEQUENCE, whole, or NULL */
+    size_t extensions_length;
+    const uint8_t *signature_algorithm; /* the outer signatureAlgorithm's whole encoding */
+    size_t signature_algorithm_length;
+    const uint8_t *signature;           /* signatureValue's octets */
+    size_t signature_length;
+    int64_t not_before;                 /* validity, in seconds since 1970-01-01T00:00:00Z */
+    int64_t not_after;
+    uint32_t version;                   /* 1, 2 or 3 */
+    uint32_t reserved;
+} httpasm_certificate;
+
+/* Reads a certificate's DER (der[0..length), one element exactly): the TBSCertificate's fields
+ * in order (version present only as v2 or v3, DER's omission of v1; the inner signature the
+ * outer signatureAlgorithm's octets exactly, RFC 5280 4.1.1.2; the unique identifiers v2+ and
+ * the extensions v3 only, one at least, each { extnID, critical TRUE or absent, extnValue }),
+ * names as RDNSequences (non-empty SETs in DER's order of { type, value }), the validity's two
+ * times (UTCTime as 1950-2049, GeneralizedTime without fractions: RFC 5280 4.1.2.5), the
+ * signature whole octets. Returns 0, or -1. */
+int httpasm_certificate_read(httpasm_certificate *c, const uint8_t *der, size_t length);
+
+/* A public key from a SubjectPublicKeyInfo (2248 octets). */
+typedef struct httpasm_public_key {
+    uint32_t kind;                      /* HTTPASM_KEY_* */
+    uint32_t bits;
+    uint32_t pss_hash;                  /* HTTPASM_KEY_RSA_PSS: the hash its parameters bind, 0: any */
+    uint32_t pss_salt;
+    uint32_t point_length;              /* point's octets: 65/97/133, 32, 57; 0 for RSA */
+    uint32_t reserved[3];
+    uint8_t point[136];                 /* a curve's 04 || x || y, or an Edwards key */
+    httpasm_rsa_public_key rsa;         /* RSA: the key prepared for verification */
+} httpasm_public_key;
+
+/* Reads a SubjectPublicKeyInfo's DER (a certificate's spki): rsaEncryption (parameters NULL)
+ * and id-RSASSA-PSS (the private keys' parameter rules) with RSAPublicKey { n, e } prepared;
+ * id-ecPublicKey on P-256/384/521 with an uncompressed point of the curve's length (checked on
+ * the curve when it is used); Ed25519 and Ed448 keys, parameters absent. Returns the kind, or
+ * -1 (key then all zeros). */
+int httpasm_public_key_read(httpasm_public_key *key, const uint8_t *spki, size_t length);
+
+/* Whether pub (a certificate's key) is key's public half: an RSA modulus and exponent (either
+ * RSA kind with either), a curve and its point, an Edwards key. Returns 0 for one key pair,
+ * else -1. */
+int httpasm_private_key_matches(const httpasm_private_key *key, const httpasm_public_key *pub);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)

@@ -1,12 +1,13 @@
 /*
  * stack.c - proves that HttpAsm's functions whose frames pass a page touch their stack at most
  * 4032 octets apart on the way down (crypto/mlkem.asm's MK_ENTER, httpasm_core.inc's
- * HA_STACK_DOWN in crypto/p384.asm, crypto/p521.asm and crypto/rsa.asm), so that a thread whose stack is nearly
+ * HA_STACK_DOWN in crypto/p384.asm, crypto/p521.asm, crypto/rsa.asm and asn1/keys.asm), so that a thread whose stack is nearly
  * spent faults on its guard page instead of the frame stepping over the guard into whatever is
  * mapped below it (a stack clash: the class of CVE-2017-1000364). Every function with a frame
  * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
  * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-521's, P-384's and P-256's,
- * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it) and Ed448's - at
+ * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it), Ed448's and the
+ * key loader's (33 KiB, an RSA key's preparation under it: from DER and from PEM) - at
  * v1 and at the best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
  *   - it runs again, in a forked child, on stacks too small for that depth (from 64 octets short
@@ -245,6 +246,37 @@ static void run_rsa_sign_pss(void)
     out_n = 256;
 }
 
+/* The key loader (asn1/keys.asm: a 33 KiB frame, and an RSA key's preparation under it): the
+ * 2048-bit key as PKCS#8 in DER and in PEM, and a P-256 key (built in setup). */
+static uint8_t key_rsa_der[2048], key_p256_der[160];
+static char key_rsa_pem[4096];
+static size_t key_rsa_der_n, key_p256_der_n, key_rsa_pem_n;
+static void run_key_load(const void *file, size_t n)
+{
+    static httpasm_private_key key;
+    result = httpasm_private_key_load(&key, (const uint8_t *)file, n);
+    memcpy(out, &key, sizeof key);
+    out_n = sizeof key;
+}
+static void run_key_load_rsa_der(void) { run_key_load(key_rsa_der, key_rsa_der_n); }
+static void run_key_load_rsa_pem(void) { run_key_load(key_rsa_pem, key_rsa_pem_n); }
+static void run_key_load_p256(void) { run_key_load(key_p256_der, key_p256_der_n); }
+
+/* put_tlv: a DER element (tag, the fewest length octets, contents) at out; returns its length. */
+static size_t put_tlv(uint8_t *o, uint8_t tag, const uint8_t *content, size_t n)
+{
+    size_t h = 0;
+    o[h++] = tag;
+    if (n < 128)
+        o[h++] = (uint8_t)n;
+    else if (n < 256)
+        o[h++] = 0x81, o[h++] = (uint8_t)n;
+    else
+        o[h++] = 0x82, o[h++] = (uint8_t)(n >> 8), o[h++] = (uint8_t)n;
+    memmove(o + h, content, n);
+    return h + n;
+}
+
 /* FFDHE (in RSA signing's frame): a 64-octet exponent at the smallest and the largest group. */
 static uint8_t ff_x[64], ff_peer2048[256], ff_peer8192[1024];
 static void run_ffdhe2048_public_key(void) { result = httpasm_ffdhe_public_key(HTTPASM_FFDHE2048, out, ff_x, sizeof ff_x); out_n = 256; }
@@ -275,6 +307,8 @@ static const stack_call calls[] = {
     { "rsa sign_pkcs1", run_rsa_sign_pkcs1 }, { "rsa sign_pss", run_rsa_sign_pss },
     { "ffdhe2048 public_key", run_ffdhe2048_public_key }, { "ffdhe2048 shared", run_ffdhe2048_shared },
     { "ffdhe8192 public_key", run_ffdhe8192_public_key }, { "ffdhe8192 shared", run_ffdhe8192_shared },
+    { "private_key_load rsa (DER)", run_key_load_rsa_der }, { "private_key_load rsa (PEM)", run_key_load_rsa_pem },
+    { "private_key_load p256", run_key_load_p256 },
 };
 
 /* ---- running a call on a stack of our own ---- */
@@ -600,6 +634,67 @@ static int prepare(void)
         || httpasm_rsa_sign_pss(&rsa_private, HTTPASM_HASH_SHA256, digest32, rsa_salt, sizeof rsa_salt, rsa_pss, 256) != 0) {
         fprintf(stderr, "stack: RSA refused its own key\n");
         return 1;
+    }
+    /* the key files: RSAPrivateKey (version, n, e, d - q's octets stand in, p, q, dp, dq, qinv)
+     * inside PKCS#8, its PEM; a P-256 ECPrivateKey inside PKCS#8 */
+    {
+        static uint8_t body[2400], rsakey[2400], number[260];
+        static const int order[8] = { 0, 1, 3, 2, 3, 4, 5, 6 };
+        static const uint8_t version0[] = { 0x02, 0x01, 0x00 };
+        static const uint8_t rsa_algorithm[] = { 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00 };
+        size_t at = 0;
+        memcpy(body, version0, 3), at = 3;
+        for (int i = 0; i < 8; i++) {
+            const uint8_t *v = rsa_octets[order[i]];
+            size_t m = rsa_lengths[order[i]], off = (v[0] & 0x80) ? 1 : 0;
+            number[0] = 0;
+            memcpy(number + off, v, m);
+            at += put_tlv(body + at, 0x02, number, m + off);
+        }
+        size_t rl = put_tlv(rsakey, 0x30, body, at);
+        at = 0;
+        memcpy(body, version0, 3), at = 3;
+        memcpy(body + at, rsa_algorithm, sizeof rsa_algorithm), at += sizeof rsa_algorithm;
+        at += put_tlv(body + at, 0x04, rsakey, rl);
+        key_rsa_der_n = put_tlv(key_rsa_der, 0x30, body, at);
+        static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        size_t o = (size_t)sprintf(key_rsa_pem, "-----BEGIN PRIVATE KEY-----\n"), line = 0;
+        for (size_t i = 0; i < key_rsa_der_n; i += 3) {
+            const uint8_t *d = key_rsa_der;
+            size_t n = key_rsa_der_n;
+            uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? (uint32_t)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+            char q[4] = { alphabet[v >> 18], alphabet[(v >> 12) & 63], i + 1 < n ? alphabet[(v >> 6) & 63] : '=', i + 2 < n ? alphabet[v & 63] : '=' };
+            for (int k = 0; k < 4; k++) {
+                key_rsa_pem[o++] = q[k];
+                if (++line == 64)
+                    key_rsa_pem[o++] = '\n', line = 0;
+            }
+        }
+        if (line)
+            key_rsa_pem[o++] = '\n';
+        o += (size_t)sprintf(key_rsa_pem + o, "-----END PRIVATE KEY-----\n");
+        key_rsa_pem_n = o;
+        static const uint8_t ec_algorithm[] = { 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
+                                                0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
+        uint8_t ec[64], d[32], inner[80];
+        for (size_t k = 0; k < 32; k++)
+            d[k] = (uint8_t)(0x21 + 7 * k);
+        static const uint8_t one[] = { 0x02, 0x01, 0x01 };
+        memcpy(ec, one, 3);
+        size_t el = 3 + put_tlv(ec + 3, 0x04, d, 32);
+        size_t il = put_tlv(inner, 0x30, ec, el);
+        at = 0;
+        memcpy(body, version0, 3), at = 3;
+        memcpy(body + at, ec_algorithm, sizeof ec_algorithm), at += sizeof ec_algorithm;
+        at += put_tlv(body + at, 0x04, inner, il);
+        key_p256_der_n = put_tlv(key_p256_der, 0x30, body, at);
+        httpasm_private_key check;
+        if (httpasm_private_key_load(&check, key_rsa_der, key_rsa_der_n) != HTTPASM_KEY_RSA
+            || httpasm_private_key_load(&check, (const uint8_t *)key_rsa_pem, key_rsa_pem_n) != HTTPASM_KEY_RSA
+            || httpasm_private_key_load(&check, key_p256_der, key_p256_der_n) != HTTPASM_KEY_P256) {
+            fprintf(stderr, "stack: the key loader refused the key files\n");
+            return 1;
+        }
     }
     uint8_t ff_other[64];
     for (size_t k = 0; k < sizeof ff_x; k++) {

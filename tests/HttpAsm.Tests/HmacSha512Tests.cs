@@ -16,9 +16,8 @@ namespace HttpAsm.Tests;
 public sealed unsafe class HmacSha512Tests
 {
     /// <summary>
-    /// The .NET copy of httpasm_hmac_sha512_ctx has the library's size, 416 octets, under id 22,
-    /// the registry's last: id 23 answers 0, as any id past the registry does (the end check
-    /// moves to the newest structure's tests each time one is added).
+    /// The .NET copy of httpasm_hmac_sha512_ctx has the library's size, 416 octets, under id 22
+    /// (the end of the registry is checked by the newest structure's tests: Asn1Tests).
     /// </summary>
     [Fact]
     public void StructureMatchesTheLibrary()
@@ -26,7 +25,6 @@ public sealed unsafe class HmacSha512Tests
         Platform.RequireLinuxX64();
         Assert.Equal(416, Unsafe.SizeOf<HmacSha512Context>());
         Assert.Equal((uint)Unsafe.SizeOf<HmacSha512Context>(), Native.StructSize(22));
-        Assert.Equal(0u, Native.StructSize(23));
     }
 
     /// <summary>

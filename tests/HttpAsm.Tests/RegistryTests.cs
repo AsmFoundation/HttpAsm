@@ -13,12 +13,16 @@ public sealed class RegistryTests(ITestOutputHelper output)
     /// certificate compression with its codecs, and the cryptographic RFCs. The codecs' formats
     /// (RFC 1950, 1951, 7932, 8878) are written without BCP 14 keywords or grammar blocks, so
     /// they give no rows and are left out here: their proof is the formats' own test data, as
-    /// NIST's standards' is their vectors (docs/DESIGN.md section 5).
+    /// NIST's standards' is their vectors (docs/DESIGN.md section 5). M2's step 3 adds the
+    /// encoding rules (ITU-T X.690, whose rows are transcribed by hand in specs/x690.tsv), PEM
+    /// (RFC 7468), the private key formats (RFC 5958, 5915, 8410) and the public keys' identifiers
+    /// (RFC 5480, 4055), and RFC 5280, whose certificate structure step 3 reads (the rest is M3's).
     /// </summary>
     private static readonly string[] Documents =
         ["RFC9110", "RFC9111", "RFC9112", "RFC9113", "RFC7541", "RFC9846", "RFC10024", "RFC9963", "RFC8449", "RFC7301", "RFC6066",
          "RFC7919", "RFC9849", "RFC9180", "RFC9149", "RFC9850", "RFC9345", "RFC8879", "RFC7748", "RFC8032", "RFC8439", "RFC5869",
-         "RFC8017", "RFC9000", "RFC9001", "RFC9002", "RFC9114", "RFC9204"];
+         "RFC8017", "X690", "RFC7468", "RFC5958", "RFC5915", "RFC5480", "RFC8410", "RFC4055", "RFC5280",
+         "RFC9000", "RFC9001", "RFC9002", "RFC9114", "RFC9204"];
 
     /// <summary>A typo in a [Requirement] would claim a proof of nothing: every id must be a row.</summary>
     [Fact]

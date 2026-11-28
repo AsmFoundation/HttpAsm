@@ -29,9 +29,13 @@ out="$here/tests/native/bin/ct"   # (bin/ is ignored by git)
 mkdir -p "$out"
 echo "ct/run.sh: building the ConstantTime configuration" >&2
 # The build's log stays beside the program (not in /tmp, which two checkouts would share); only
-# its end is printed, on a failure.
-dotnet build src/HttpAsm/HttpAsm.asmproj -c ConstantTime -nologo -v q > "$out/build.log" 2>&1 \
-  || { tail -20 "$out/build.log"; exit 2; }
+# its end is printed, on a failure. Transitive project references are off: the core is the
+# library's direct reference, and the SDK's IncludeTransitiveProjectReferences once added it a
+# second time to this configuration's build (measured 2026-11-28, in WSL after a Windows-side
+# build of another configuration), so every core object reached the link twice (lld: duplicate
+# symbol).
+dotnet build src/HttpAsm/HttpAsm.asmproj -c ConstantTime -nologo -v q -p:DisableTransitiveProjectReferences=true \
+  > "$out/build.log" 2>&1 || { tail -20 "$out/build.log"; exit 2; }
 lib="$here/src/HttpAsm/bin/ConstantTime/libc/linux-x64"
 cc -O2 -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -I src/HttpAsm/include tests/native/ct.c \
   -L "$lib" -l:libhttpasm.so -Wl,-rpath,"$lib" -lpthread -o "$out/ct" || exit 2

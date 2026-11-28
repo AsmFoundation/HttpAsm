@@ -21,3 +21,7 @@ tests/fuzz/.work/
 # worktrees of other commits (benchmarks/bench.sh)
 benchmarks/.build/
 benchmarks/.ab/
+
+# The ITU-T Recommendations specs.cs fetch downloads to check their hashes: free to download,
+# not to redistribute (their rows are transcribed in specs/x690.tsv)
+specs/itu/

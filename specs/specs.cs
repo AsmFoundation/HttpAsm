@@ -25,6 +25,9 @@
 //     When one paragraph holds several keywords, each gets #1, #2, ... in document order.
 //   Text (older RFCs, no pn): RFC<n>-<section>-p<k>, with k counting the section's paragraphs
 //     from 1. These numbers are ours: the RFC Editor's HTML has no paragraph anchors there.
+//   ITU-T (X.690, format "itu"): X690-<clause>[letter], from the hand transcription
+//     specs/x690.tsv, since the ITU's PDF may not be redistributed (it is fetched only to check
+//     its hash) and has no paragraph structure to extract.
 // Rows whose keyword is "ABNF" are the XML documents' grammar blocks (sourcecode type abnf*),
 // so a syntax test can name the rule it proves. The collected-ABNF appendix repeats those
 // blocks and is skipped. Keywords in quotes (the BCP 14 boilerplate that defines them) are not
@@ -88,8 +91,9 @@ internal static class Cli
 /// <summary>One official document, as specs/documents.json lists it.</summary>
 /// <param name="Id">The registry's prefix for its rows, such as "RFC9112".</param>
 /// <param name="Title">The document's title.</param>
-/// <param name="Format">"xml" (prepped RFCXML v3, where every paragraph has a pn) or "txt" (an
-/// older RFC's text file).</param>
+/// <param name="Format">"xml" (prepped RFCXML v3, where every paragraph has a pn), "txt" (an
+/// older RFC's text file), or "itu" (an ITU-T Recommendation's PDF, whose rows are transcribed by
+/// hand in specs/&lt;id&gt;.tsv: see <see cref="ItuRows"/>).</param>
 /// <param name="Milestone">The docs/DESIGN.md milestone that implements it, or "open".</param>
 /// <param name="Url">Where the RFC Editor publishes the file.</param>
 /// <param name="Html">The RFC Editor's HTML rendering, whose anchors the rows link to.</param>
@@ -226,6 +230,21 @@ internal static class Commands
         foreach (Document d in Documents.Load(specs))
         {
             string path = Path.Combine(specs, d.LocalFile);
+            if (d.Format == "itu")
+            {
+                // An ITU-T Recommendation may not be redistributed, so its PDF is not in the
+                // repository and CI never has it: its rows come from the hand transcription
+                // beside documents.json. A copy that fetch did download must still be the
+                // pinned one, so rows are never transcribed from another edition unnoticed.
+                if (File.Exists(path) && (d.Sha256.Length == 0 || Hash(File.ReadAllBytes(path)) != d.Sha256))
+                {
+                    throw new SpecsException($"{d.Id}: {d.LocalFile} does not match its pinned SHA-256; run fetch");
+                }
+
+                rows.AddRange(ItuRows.Extract(d, Path.Combine(specs, d.Id.ToLowerInvariant() + ".tsv")));
+                continue;
+            }
+
             if (!File.Exists(path))
             {
                 throw new SpecsException($"{d.Id}: {d.LocalFile} is missing; run fetch");
@@ -305,6 +324,59 @@ internal static class Commands
     /// <param name="bytes">The bytes.</param>
     /// <returns>Lowercase hex, as documents.json stores it.</returns>
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+}
+
+/// <summary>
+/// The rows of an ITU-T Recommendation, read from their hand transcription (specs/x690.tsv for
+/// X.690): the ITU's PDF cannot be parsed into paragraphs the way the RFC Editor's files can,
+/// and may not be committed, so each normative statement was copied from it by hand, with its
+/// clause number. Ids are "&lt;document&gt;-&lt;clause&gt;[letter]", such as X690-8.1.3.5c.
+/// </summary>
+internal static class ItuRows
+{
+    /// <summary>The transcription's rows, in its order (the Recommendation's).</summary>
+    /// <param name="document">The document (format "itu").</param>
+    /// <param name="path">The transcription: '#' comment lines, then one row per line of five
+    /// tab-separated fields: the id's suffix, the clause, its title, the keyword, the statement.</param>
+    /// <returns>The rows.</returns>
+    /// <exception cref="SpecsException">The file is missing, or a line has not five fields, an empty
+    /// field, or a keyword outside BCP 14's (a transcription mistake, not a row to keep).</exception>
+    public static IEnumerable<Requirement> Extract(Document document, string path)
+    {
+        if (!File.Exists(path))
+        {
+            throw new SpecsException($"{document.Id}: its transcription {Path.GetFileName(path)} is missing");
+        }
+
+        string[] keywords = ["MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT",
+            "RECOMMENDED", "NOT RECOMMENDED", "MAY", "OPTIONAL"];
+        var rows = new List<Requirement>();
+        int number = 0;
+        foreach (string raw in File.ReadAllLines(path))
+        {
+            number++;
+            if (raw.Length == 0 || raw.StartsWith('#'))
+            {
+                continue;
+            }
+
+            string[] f = raw.Split('\t');
+            if (f.Length != 5 || f.Any(x => x.Trim().Length == 0) || !keywords.Contains(f[3]))
+            {
+                throw new SpecsException($"{Path.GetFileName(path)}:{number}: not five fields with a BCP 14 keyword");
+            }
+
+            string text = Prose.Normalize(f[4]);
+            // The Recommendation writes its keywords in lowercase; the subject that precedes the
+            // first of them is the actor, as for an RFC's sentence.
+            int at = text.IndexOf(f[3], StringComparison.OrdinalIgnoreCase);
+            rows.Add(new Requirement(
+                $"{document.Id}-{f[0]}", document.Id, f[1], f[2], f[3], Prose.Actor(text, Math.Max(at, 0)),
+                document.Milestone, document.Html, text));
+        }
+
+        return rows;
+    }
 }
 
 /// <summary>Writes the registry's tab-separated format.</summary>

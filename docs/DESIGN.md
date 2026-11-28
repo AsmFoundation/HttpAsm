@@ -1704,7 +1704,137 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      soon as Z3 is known); the variable base's table made affine by one batched inversion
      (mixed additions: five products fewer a window); dbl-2001-b's 3M + 5S.
 3. *The DER reader* (M3 step 2, brought forward), and loading the server's own chain and key
-   (PEM, PKCS#8).
+   (PEM, PKCS#8), done 2026-11-28: a chain file is read a block at a time (`httpasm_pem_read`'s
+   `end` says where the next one starts, each block's DER through `httpasm_certificate_read`);
+   the C ABI that takes a whole configuration is step 5's. The coverage gate holds the four
+   files: every block and branch side runs (pem.asm all 116 sides, keys.asm 379 of 380,
+   x509.asm 358 of 360, asn1.asm 428 of 436) or is listed with its proof of unreachability (the
+   checks a gather repeats after the segment walk made them, the SET OF comparison's padded
+   tail no two readable encodings reach, a small INTEGER's sign after its first octet's check,
+   the RDN walk's reads after `httpasm_asn1_check_set_of` read them).
+   - **The documents** (2026-11-28): ITU-T X.690 (02/2021), the encoding rules, and RFC 7468
+     (PEM), 5958 (OneAsymmetricKey), 5915 (ECPrivateKey), 5480 (EC public keys), 8410 (the
+     Edwards and Montgomery keys), 4055 (RSASSA-PSS's parameters), all M2's, and RFC 5280, M3's,
+     whose certificate structure this step reads. X.690 is the ITU's PDF, free to download but
+     not to redistribute: `specs/documents.json` pins its SHA-256 (format "itu"), `specs.cs
+     fetch` downloads it into `specs/itu/` (ignored by git) only to check the hash, and its 75
+     rows are transcribed by hand, clause by clause in its words, in `specs/x690.tsv` (ids
+     `X690-<clause>[letter]`), which `extract` reads instead (`ItuRows`).
+   - **The ASN.1 reader** (2026-11-28), `asn1/asn1.asm`: `httpasm_asn1_read` reads one element
+     under DER or BER, in place (nothing copied, nothing past the input read): the identifier
+     (the high-tag form only above 30, without leading zero bits; numbers up to 2^28 - 1), the
+     length (never 0xFF; BER's indefinite form only for a constructed encoding, its
+     end-of-contents found by reading the nested elements; DER's definite form in the fewest
+     octets), and for a universal tag its type's rules: BOOLEAN, INTEGER and ENUMERATED, BIT
+     STRING (DER: unused bits zero), OCTET STRING, NULL, OBJECT IDENTIFIER, SEQUENCE and SET,
+     the strings' character sets (PrintableString's table, NumericString, IA5String,
+     VisibleString, UTF-8 in the fewest octets without surrogates, BMPString and
+     UniversalString without surrogates; the ISO 2022 types as octets), UTCTime and
+     GeneralizedTime in DER's form (Z, the seconds, no trailing fraction zero) and BER's
+     (X.680's: optional seconds, differentials, local time, fractions), every field in range
+     with leap years, and BER's constructed strings segment by segment (a constructed time
+     gathered first, 64 characters at most). Universal types the library cannot check (REAL,
+     the TIME types, ...) are refused, not passed through. The reader follows nesting itself
+     only for indefinite lengths and segments, 32 levels at most (each takes under 100 octets of
+     stack). `httpasm_asn1_check` applies a universal type's rules under an IMPLICIT tag,
+     `httpasm_asn1_check_set_of` DER's SET OF order (11.6), `httpasm_asn1_octets` and
+     `httpasm_asn1_bits` join BER's segments. Constant time: only INTEGER and OCTET STRING
+     contents may hold a key's secrets (8.3.2's verdict on an INTEGER's first two octets is
+     branch-free; an OCTET STRING's are never read); the rest is public by design and the
+     ConstantTime build marks it so where it is loaded. Proven by `Asn1Tests` (every rule's
+     keeping and breaking encodings under both rules, every prefix against a guard page, and a
+     differential walk against .NET's System.Formats.Asn1 over 2,000 random structures and
+     8,000 mutations, element by element, with no disagreement), and `tests/fuzz/asn1.c`
+     (against an independent C model of the same rules, which checks a string's characters on
+     its joined value where the assembly streams them through the segments; DER a profile of
+     BER; 342,418 inputs in its first minute without a difference). Its first long run (15
+     minutes beside the other three ASN.1 fuzzers) and the minute after its fix found two bugs,
+     both fixed with their inputs kept as seeds: the reader was exponential in nested indefinite
+     segments (it found a
+     constructed string's end by reading every segment whole, then walked the segments again to
+     check them, each pass re-reading the deeper levels whole: 26 levels of `23 80`, 107 octets,
+     took 1.1 s, 32 would take 72 s, a denial of service in a few hundred octets of a key file or
+     of any BER a caller reads; the segment walk now ends the string as it checks it, each
+     segment's header read once, `AR_HEAD`/`AF_UNENDED`, 32 levels in under a microsecond:
+     `Asn1Tests.ReadsDeepSegmentsInLinearTime`), and `httpasm_asn1_bits` lost the unused-bits
+     count when an empty constructed segment followed the last primitive one (now or-ed: only the
+     last primitive segment's can be non-zero). The model's own walk had the same doubling and
+     now reads such contents structurally, so the two still reach their verdicts by different
+     roads. The functions that take an element refuse a `flags` value the reader never returns
+     (its internal mark of an unended string would make the walk write a const element). Then
+     20 minutes of the four ASN.1 fuzzers side by side found nothing (asn1 5,906,454 inputs,
+     pem 37,957,200, key 6,133,151, x509 68,208,138), and their corpora are minimized into
+     `tests/fuzz/corpus/` (asn1 497 inputs, pem 163, key 216, x509 201), which the replay and the
+     coverage gate run. A structural mutation test walks real files too (`DerMutations`: every
+     element removed, doubled, trailed, replaced, retagged, made unreadable, its value changed,
+     the DER an OCTET or BIT STRING holds entered): 788 mutations of seven key files and over
+     800 of certificates and public key infos, each refused cleanly or still a key of its
+     kind that works.
+   - **PEM** (2026-11-28), `asn1/pem.asm`: `httpasm_pem_read` decodes the first block of a text
+     whose BEGIN line starts the text or a line: exactly five hyphen-minuses, the ABNF's labels,
+     RFC 7468's lax base64 (whitespace anywhere, VT and FF included, pads absent or right, a
+     final quantum's pad bits zero), the END line's label the BEGIN line's, and the next block
+     from where this one ended. Other characters refuse the block, against RFC 7468's SHOULD
+     ignore them, as OpenSSL, BoringSSL, Go and .NET refuse them (a text whose characters a
+     parser drops is ambiguous, its section 14). The base64 is decoded in constant time: each
+     character's class (base64, whitespace, pad, the END line's hyphen) steers the decoder and
+     is public by design (the layout and the length), its six bits never do. The output is
+     written only once the block has been checked. Proven by `PemTests` (RFC 7468's and RFC
+     8410's examples, the latter's six-dash END line refused, every length to 300 octets in nine
+     layouts, every malformation, files of several blocks, -2 with the room needed) and a
+     differential against .NET's PemEncoding over 12,000 texts (6,655 blocks read alike; the
+     differences all triaged: unpadded quanta and VT/FF whitespace, which RFC 7468 allows and
+     .NET does not, and a sixth hyphen-minus after an END line, which .NET does not look at),
+     and `tests/fuzz/pem.c` (against a C model with a table-driven base64).
+   - **Private keys** (2026-11-28), `asn1/keys.asm`: `httpasm_private_key_load` takes PEM or
+     DER, PKCS#8 (v1 and v2), PKCS#1 and SEC1, BER throughout (RFC 5958 2's MUST): RSA of two
+     primes (rsaEncryption, and id-RSASSA-PSS unbound or bound to SHA-256/384/512 with MGF1 over
+     the same hash: a key bound to SHA-1 is refused, as no TLS 1.3 signature could use it),
+     P-256/384/521 on their named curves (a scalar shorter than the curve's, as OpenSSL before
+     1.1.0 wrote one key in 256, padded; a public key given must be d G's, uncompressed or
+     compressed), Ed25519 and Ed448; X25519 and X448 keys, other algorithms, multi-prime RSA
+     and every inconsistency are refused with the key left all zeros, and "ENCRYPTED PRIVATE
+     KEY" answers -2 (its decryption, PBES2, is M3's). Every buffer that held key material is
+     wiped before it returns; the frame (33 KiB) is taken a page at a time. Constant time: the
+     memcheck check loads keys whose whole PEM text is secret (RSA in PKCS#8 and PKCS#1, the
+     three curves, both Edwards keys, a BER key), so everything decoded from it is too: the
+     loader marks public what is public by design (the structure, the algorithm, the version, n
+     and e) and nothing else steers it (its first run found one site, the DER-or-PEM test of
+     the first octet, now marked). Proven by `KeyTests` (keys .NET makes of each kind, size and
+     format, each then signing with the library under .NET's verification; RFC 8410's and RFC
+     8032's Edwards keys by their public keys; BER rewrites; PSS parameters; combined files;
+     every refusal; the 54 cases of RSASSA-PSS parameters both PSS readers are held to,
+     `KeyTests.PssCases`) and `tests/fuzz/key.c` (every tier the same key; a loaded key holds
+     together: d G recomputed, an RSA key's own signature verifying; DER and PEM alike;
+     325,733 inputs in its first minute; 35 minutes in two long runs without a finding).
+   - **Certificates** (2026-11-28), `asn1/x509.asm`: `httpasm_certificate_read` reads a
+     certificate's DER (RFC 5280 4.1) in place, every part a pointer into it: the TBS's fields
+     in order (the version present only as v2 or v3, DER's omission of v1; the inner signature
+     algorithm the outer one's octets exactly, 4.1.1.2; issuer and subject as RDNSequences of
+     non-empty SETs in DER's order of { type, value }; the validity's two times as seconds
+     since 1970, UTCTime's YY as 1950-2049, GeneralizedTime without fractions; the unique
+     identifiers in v2 and v3 only, in order, once each; the extensions in v3 only, one at
+     least, each { extnID, critical TRUE or absent, extnValue }), the signature whole octets,
+     nothing after. `httpasm_public_key_read` takes a SubjectPublicKeyInfo: rsaEncryption
+     (parameters NULL, RFC 4055 1.2) and id-RSASSA-PSS (the private keys' parameter rules) with
+     RSAPublicKey prepared for verification; id-ecPublicKey on P-256/384/521 with an
+     uncompressed point; Ed25519's and Ed448's keys, parameters absent; anything else refused
+     with the key all zeros. `httpasm_private_key_matches` pairs a private key with a
+     certificate's (either RSA identifier with either: TLS picks the schemes by the
+     certificate). Chain validation (names, constraints, the extensions' meanings and
+     uniqueness, revocation, time) is M3's. RFC 8410's example certificate encodes critical
+     FALSE, the DEFAULT DER omits, and is refused: a strictness to weigh against x509-limbo's
+     cases in M3. Proven by `CertificateTests` (.NET's certificates of each kind, validities on
+     both sides of 2050 and before 1970, with and without extensions, read field for field as
+     X509Certificate2 reads them and their TBS verifying under .NET's key; public key infos of
+     every kind, RSA keys verifying .NET's signatures; the PSS table; every pairing of six keys
+     and the structures the library never fills; unique identifiers; 77 certificates and 53
+     public key infos that each break one rule) and `tests/fuzz/x509.c` (every tier the same;
+     every part inside the input and in its place; the validity against a model of the
+     calendar by another algorithm, Hinnant's days_from_civil; an RSA key against
+     `httpasm_rsa_public_key_init` of the n and e a model walks to; a pairing only of one key's
+     halves; 6,362,114 inputs in two minutes, then 15 and 20 minutes, 68,208,138 inputs in
+     the last, without a finding).
 4. *The TLS 1.3 engine*, sans-I/O in the core, server and client:
    - the record layer, the handshake and its key schedule, HelloRetryRequest;
    - PSK resumption, tickets and ticket requests; 0-RTT with anti-replay;
@@ -1732,7 +1862,8 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      8410, 9525, 5958, 7468; RFC 7292 with 9579 and 9879; RFC 8018;
    - revocation and transparency: RFC 6960 with 8954 and 9654; RFC 6962 and 9162;
    - TLS 1.2: RFC 5246, 7627, 8422, 5288, 5289, 7905, 5746, 9325, 10015, 9155, 9851, 9852.
-2. *Encodings:*
+2. *Encodings* (the reader, BER's and DER's, the certificates' structure, PEM and PKCS#8 were
+   brought forward to M2 step 3, done 2026-11-28):
    - ASN.1 DER: a strict reader and a writer;
    - X.509 certificates and CRLs;
    - PEM and PKCS#8;

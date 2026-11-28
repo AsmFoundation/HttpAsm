@@ -24,7 +24,16 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 > - **a client** (`httpasm_client_*`): one blocking HTTP/1.1 connection, tested against this
 >   server and against Kestrel;
 > - **the codecs** behind them, callable on their own: HTTP/1.1 parsing and writing in both
->   directions, chunked bodies, HPACK, HTTP/2's request rules.
+>   directions, chunked bodies, HPACK, HTTP/2's request rules;
+> - **the cryptography** TLS 1.3 is being built from (M2): SHA-2, SHA-3, HMAC and HKDF, AES-GCM,
+>   ChaCha20-Poly1305, X25519, X448, ECDH and ECDSA on P-256/384/521, Ed25519, Ed448, ML-KEM,
+>   FFDHE and RSA, each with a constant-time baseline and accelerated tiers, held to NIST's and
+>   Project Wycheproof's vectors and checked for constant time by valgrind (`tests/ct/`); and
+>   the keys' formats: an ASN.1 reader of BER and DER (`httpasm_asn1_*`, linear in its input
+>   however deep BER nests), PEM (`httpasm_pem_read`), private keys from their files
+>   (`httpasm_private_key_load`: PKCS#8, PKCS#1, SEC1), and certificates' structure and public
+>   keys (`httpasm_certificate_read`, `httpasm_public_key_read`, `httpasm_private_key_matches`;
+>   chain validation is M3's).
 >
 > [docs/DESIGN.md](docs/DESIGN.md) holds the decisions, the architecture and the milestones;
 > [benchmarks/](benchmarks/README.md) holds the measurements.
@@ -32,9 +41,12 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 ## How it is built
 
 - **From the official documents.** `specs/` pins the RFC Editor's files by SHA-256 and extracts
-  every MUST, SHOULD and MAY into [specs/requirements.tsv](specs/requirements.tsv): 2,554
-  requirements and 102 grammar blocks from RFC 9110-9114, 9204, 7541, 6585, 8446 and
-  9000-9002. Each test names the rows it proves: `[Requirement("RFC9110-5.5-5#1")]`. Every row
+  every MUST, SHOULD and MAY into [specs/requirements.tsv](specs/requirements.tsv): 3,895
+  requirements and 102 grammar blocks from HTTP's RFCs (9110-9114, 9204, 7541, 6585, 9000-9002),
+  TLS 1.3's (9846 and its extensions), the cryptographic RFCs, the key and certificate formats
+  (7468, 5958, 5915, 5480, 8410, 4055, 5280) and ITU-T X.690, whose rows are transcribed by
+  hand ([specs/x690.tsv](specs/x690.tsv)): the ITU publishes it free of charge but not for
+  redistribution. Each test names the rows it proves: `[Requirement("RFC9110-5.5-5#1")]`. Every row
   of milestone 1's documents is accounted for: proven by a test that names it, or deferred in
   [specs/deferred.tsv](specs/deferred.tsv) with the milestone it belongs to and a reason (a test
   fails on any row that is neither, and on a deferral that has gone stale). Tables

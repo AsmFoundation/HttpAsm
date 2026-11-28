@@ -824,6 +824,36 @@ internal struct ServerOptions
 /// <summary>The constants of httpasm.h that the tests use.</summary>
 internal static class Abi
 {
+    /// <summary>HTTPASM_HASH_SHA256: the hash id the RSA functions take.</summary>
+    public const int HashSha256 = 3;
+
+    /// <summary>HTTPASM_HASH_SHA384: also what a PSS key's parameters may bind (pss_hash).</summary>
+    public const int HashSha384 = 4;
+
+    /// <summary>HTTPASM_HASH_SHA512: the largest hash a PSS key may bind.</summary>
+    public const int HashSha512 = 5;
+
+    /// <summary>HTTPASM_KEY_RSA: an rsaEncryption key (both paddings).</summary>
+    public const int KeyRsa = 1;
+
+    /// <summary>HTTPASM_KEY_RSA_PSS: an id-RSASSA-PSS key (PSS only).</summary>
+    public const int KeyRsaPss = 2;
+
+    /// <summary>HTTPASM_KEY_P256.</summary>
+    public const int KeyP256 = 3;
+
+    /// <summary>HTTPASM_KEY_P384.</summary>
+    public const int KeyP384 = 4;
+
+    /// <summary>HTTPASM_KEY_P521.</summary>
+    public const int KeyP521 = 5;
+
+    /// <summary>HTTPASM_KEY_ED25519.</summary>
+    public const int KeyEd25519 = 6;
+
+    /// <summary>HTTPASM_KEY_ED448.</summary>
+    public const int KeyEd448 = 7;
+
     /// <summary>HTTPASM_RESPONSE_LENGTH.</summary>
     public const uint ResponseLength = 0x0001;
 
@@ -1035,4 +1065,239 @@ public enum ParseError
 
     /// <summary>HTTP/2: :authority empty or not uri-host [ ":" port ], a CONNECT's without a port of 1-65535, or a Host naming another authority.</summary>
     H2Authority = 37,
+}
+
+/// <summary>
+/// httpasm_asn1 (httpasm.h): one element of an ASN.1 encoding as <see cref="Native.Asn1Read"/>
+/// found it, 32 octets. <see cref="Content"/> points into the octets it was read from: the
+/// element is only meaningful while those stay where they were (pinned, or native memory).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Asn1Element
+{
+    /// <summary>The contents octets, inside the input.</summary>
+    public byte* Content;
+
+    /// <summary>Their count; for an indefinite length, the octets before its end-of-contents.</summary>
+    public nuint ContentLength;
+
+    /// <summary>The whole encoding's octets: identifier, length, contents, end-of-contents.</summary>
+    public nuint Length;
+
+    /// <summary>The class (bits 31-30), the constructed form (bit 29) and the number (bits 28-0).</summary>
+    public uint Tag;
+
+    /// <summary><see cref="Asn1.Indefinite"/> or 0.</summary>
+    public uint Flags;
+}
+
+/// <summary>
+/// httpasm_pem (httpasm.h): one PEM block as <see cref="Native.PemRead"/> found it, 32 octets.
+/// <see cref="Label"/> points into the text, which must stay where it was.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct PemBlock
+{
+    /// <summary>The label, in the text.</summary>
+    public byte* Label;
+
+    /// <summary>Its octets.</summary>
+    public nuint LabelLength;
+
+    /// <summary>The octets decoded (on -2: the room they need).</summary>
+    public nuint DerLength;
+
+    /// <summary>The text's offset past the END boundary: where the next search starts.</summary>
+    public nuint End;
+}
+
+/// <summary>
+/// httpasm_private_key (httpasm.h): a private key as <see cref="Native.PrivateKeyLoad"/> prepared
+/// it, 6888 octets. Its octets are the secret: a test zeroes them when it is done with real keys
+/// only where it matters (these are test keys).
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct PrivateKey
+{
+    /// <summary>HTTPASM_KEY_*.</summary>
+    public uint Kind;
+
+    /// <summary>The modulus' or the curve's bits.</summary>
+    public uint Bits;
+
+    /// <summary>A PSS key's bound hash (HTTPASM_HASH_*), 0: any.</summary>
+    public uint PssHash;
+
+    /// <summary>A PSS key's salt length (0 when absent).</summary>
+    public uint PssSalt;
+
+    /// <summary>The public key's octets (0 for RSA).</summary>
+    public uint PublicLength;
+
+    /// <summary>Unused.</summary>
+    public fixed uint Reserved[3];
+
+    /// <summary>The public key: 04 || x || y, or the Edwards key's.</summary>
+    public fixed byte Public[136];
+
+    /// <summary>The prepared key of the kind.</summary>
+    public fixed ulong Opaque[840];
+}
+
+/// <summary>
+/// httpasm_certificate (httpasm.h): a certificate's parts as <see cref="Native.CertificateRead"/>
+/// found them, 152 octets; every pointer points into the DER read.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct Certificate
+{
+    /// <summary>tbsCertificate's whole encoding.</summary>
+    public byte* Tbs;
+
+    /// <summary>Its octets.</summary>
+    public nuint TbsLength;
+
+    /// <summary>serialNumber's contents.</summary>
+    public byte* Serial;
+
+    /// <summary>Their octets.</summary>
+    public nuint SerialLength;
+
+    /// <summary>The issuer's whole encoding.</summary>
+    public byte* Issuer;
+
+    /// <summary>Its octets.</summary>
+    public nuint IssuerLength;
+
+    /// <summary>The subject's whole encoding.</summary>
+    public byte* Subject;
+
+    /// <summary>Its octets.</summary>
+    public nuint SubjectLength;
+
+    /// <summary>subjectPublicKeyInfo's whole encoding.</summary>
+    public byte* Spki;
+
+    /// <summary>Its octets.</summary>
+    public nuint SpkiLength;
+
+    /// <summary>The Extensions SEQUENCE, whole, or null.</summary>
+    public byte* Extensions;
+
+    /// <summary>Its octets.</summary>
+    public nuint ExtensionsLength;
+
+    /// <summary>The outer signatureAlgorithm's whole encoding.</summary>
+    public byte* SignatureAlgorithm;
+
+    /// <summary>Its octets.</summary>
+    public nuint SignatureAlgorithmLength;
+
+    /// <summary>The signature's octets.</summary>
+    public byte* Signature;
+
+    /// <summary>Their count.</summary>
+    public nuint SignatureLength;
+
+    /// <summary>The validity's start, seconds since 1970-01-01T00:00:00Z.</summary>
+    public long NotBefore;
+
+    /// <summary>Its end.</summary>
+    public long NotAfter;
+
+    /// <summary>1, 2 or 3.</summary>
+    public uint Version;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
+/// <summary>httpasm_public_key (httpasm.h): a SubjectPublicKeyInfo's key, 2248 octets.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct PublicKey
+{
+    /// <summary>HTTPASM_KEY_*.</summary>
+    public uint Kind;
+
+    /// <summary>The key's bits.</summary>
+    public uint Bits;
+
+    /// <summary>A PSS key's bound hash, 0: any.</summary>
+    public uint PssHash;
+
+    /// <summary>A PSS key's salt length.</summary>
+    public uint PssSalt;
+
+    /// <summary>The point's octets (0 for RSA).</summary>
+    public uint PointLength;
+
+    /// <summary>Unused.</summary>
+    public fixed uint Reserved[3];
+
+    /// <summary>A curve's 04 || x || y, or an Edwards key.</summary>
+    public fixed byte Point[136];
+
+    /// <summary>The RSA key prepared (httpasm_rsa_public_key, 2080 octets).</summary>
+    public fixed ulong Rsa[260];
+}
+
+/// <summary>httpasm.h's ASN.1 constants: the rules, the tag's bits, the universal types the reader checks.</summary>
+internal static class Asn1
+{
+    /// <summary>HTTPASM_ASN1_DER: X.690's clauses 8, 10 and 11.</summary>
+    public const int Der = 0;
+
+    /// <summary>HTTPASM_ASN1_BER: clause 8 alone.</summary>
+    public const int Ber = 1;
+
+    /// <summary>HTTPASM_ASN1_APPLICATION.</summary>
+    public const uint Application = 0x40000000;
+
+    /// <summary>HTTPASM_ASN1_CONTEXT.</summary>
+    public const uint Context = 0x80000000;
+
+    /// <summary>HTTPASM_ASN1_PRIVATE.</summary>
+    public const uint Private = 0xC0000000;
+
+    /// <summary>HTTPASM_ASN1_CONSTRUCTED.</summary>
+    public const uint Constructed = 0x20000000;
+
+    /// <summary>HTTPASM_ASN1_BOOLEAN.</summary>
+    public const uint Boolean = 1;
+
+    /// <summary>HTTPASM_ASN1_INTEGER.</summary>
+    public const uint Integer = 2;
+
+    /// <summary>HTTPASM_ASN1_BIT_STRING.</summary>
+    public const uint BitString = 3;
+
+    /// <summary>HTTPASM_ASN1_OCTET_STRING.</summary>
+    public const uint OctetString = 4;
+
+    /// <summary>HTTPASM_ASN1_NULL.</summary>
+    public const uint Null = 5;
+
+    /// <summary>HTTPASM_ASN1_OID.</summary>
+    public const uint Oid = 6;
+
+    /// <summary>HTTPASM_ASN1_ENUMERATED.</summary>
+    public const uint Enumerated = 10;
+
+    /// <summary>HTTPASM_ASN1_UTF8_STRING.</summary>
+    public const uint Utf8String = 12;
+
+    /// <summary>HTTPASM_ASN1_SEQUENCE (with its constructed bit).</summary>
+    public const uint Sequence = 16 | Constructed;
+
+    /// <summary>HTTPASM_ASN1_SET (with its constructed bit).</summary>
+    public const uint Set = 17 | Constructed;
+
+    /// <summary>HTTPASM_ASN1_UTC_TIME.</summary>
+    public const uint UtcTime = 23;
+
+    /// <summary>HTTPASM_ASN1_GENERALIZED_TIME.</summary>
+    public const uint GeneralizedTime = 24;
+
+    /// <summary>HTTPASM_ASN1_INDEFINITE: BER's indefinite length.</summary>
+    public const uint Indefinite = 1;
 }

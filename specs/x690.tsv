@@ -1,0 +1,94 @@
+# x690.tsv - the rows of ITU-T X.690 (02/2021), "ASN.1 encoding rules: Specification of Basic
+# Encoding Rules (BER), Canonical Encoding Rules (CER) and Distinguished Encoding Rules (DER)",
+# transcribed by hand from the PDF that specs/documents.json pins (id X690): the ITU publishes it
+# free of charge but does not allow it to be redistributed, so the file itself is not in the
+# repository, and specs.cs fetch downloads it into specs/itu/ only to check its hash. Each row
+# quotes one normative statement in the Recommendation's words.
+#
+# Which clauses: the ones a reader of BER and DER is bound by for the types the library reads
+# (the encoding's structure, identifier, length, contents and end-of-contents octets; BOOLEAN,
+# INTEGER, ENUMERATED, BIT STRING, OCTET STRING, NULL, SEQUENCE, SEQUENCE OF, SET, SET OF, tagged
+# values, OBJECT IDENTIFIER, the restricted character strings, the useful time types), and the
+# restrictions of clauses 10 and 11 that DER adds. Not transcribed: REAL (8.5, 11.3), EXTERNAL,
+# EMBEDDED PDV and CHARACTER STRING (8.18, 8.17, 8.24), the relative and internationalized object
+# identifiers (8.20 to 8.22), the TIME types (8.26, 11.9), GeneralString's escapes (11.4) and CER
+# (clause 9): the library interprets none of them.
+#
+# Columns (tab-separated): the row's id after "X690-" (the clause, and a list item's letter),
+# the clause number, the clause's title, the keyword (the Recommendation's "shall" in capitals,
+# as BCP 14 writes it), the statement. specs.cs extract turns each line into a registry row.
+7.3	7.3	Conformance	SHALL	Alternative encodings are permitted by the basic encoding rules as a sender's option. Receivers who claim conformance to the basic encoding rules shall support all alternatives.
+8.1.1.1	8.1.1.1	Structure of an encoding	SHALL	The encoding of a data value shall consist of four components which shall appear in the following order: a) identifier octets (see 8.1.2); b) length octets (see 8.1.3); c) contents octets (see 8.1.4); d) end-of-contents octets (see 8.1.5).
+8.1.1.1b	8.1.1.1	Structure of an encoding	SHALL NOT	The end-of-contents octets shall not be present unless the value of the length octets requires them to be present (see 8.1.3).
+8.1.2.1	8.1.2.1	Identifier octets	SHALL	The identifier octets shall encode the ASN.1 tag (class and number) of the type of the data value.
+8.1.2.2	8.1.2.2	Identifier octets	SHALL	For tags with a number ranging from zero to 30 (inclusive), the identifier octets shall comprise a single octet encoded as follows: a) bits 8 and 7 shall be encoded to represent the class of the tag as specified in Table 1; b) bit 6 shall be a zero or a one according to the rules of 8.1.2.5; c) bits 5 to 1 shall encode the number of the tag as a binary integer with bit 5 as the most significant bit.
+8.1.2.4	8.1.2.4	Identifier octets	SHALL	For tags with a number greater than or equal to 31, the identifier shall comprise a leading octet followed by one or more subsequent octets.
+8.1.2.4.1	8.1.2.4.1	Identifier octets	SHALL	The leading octet shall be encoded as follows: a) bits 8 and 7 shall be encoded to represent the class of the tag as listed in Table 1; b) bit 6 shall be a zero or a one according to the rules of 8.1.2.5; c) bits 5 to 1 shall be encoded as 11111 (binary).
+8.1.2.4.2a	8.1.2.4.2	Identifier octets	SHALL	a) bit 8 of each octet shall be set to one unless it is the last octet of the identifier octets;
+8.1.2.4.2b	8.1.2.4.2	Identifier octets	SHALL	b) bits 7 to 1 of the first subsequent octet, followed by bits 7 to 1 of the second subsequent octet, followed in turn by bits 7 to 1 of each further octet, up to and including the last subsequent octet in the identifier octets shall be the encoding of an unsigned binary integer equal to the tag number, with bit 7 of the first subsequent octet as the most significant bit;
+8.1.2.4.2c	8.1.2.4.2	Identifier octets	SHALL NOT	c) bits 7 to 1 of the first subsequent octet shall not all be zero.
+8.1.2.5	8.1.2.5	Identifier octets	SHALL	Bit 6 shall be set to zero if the encoding is primitive, and shall be set to one if the encoding is constructed.
+8.1.3.2a	8.1.3.2	Length octets	SHALL	A sender shall: a) use the definite form (see 8.1.3.3) if the encoding is primitive;
+8.1.3.3	8.1.3.3	Length octets	SHALL	For the definite form, the length octets shall consist of one or more octets, and shall represent the number of octets in the contents octets using either the short form (see 8.1.3.4) or the long form (see 8.1.3.5) as a sender's option.
+8.1.3.4	8.1.3.4	Length octets	SHALL	In the short form, the length octets shall consist of a single octet in which bit 8 is zero and bits 7 to 1 encode the number of octets in the contents octets (which may be zero), as an unsigned binary integer with bit 7 as the most significant bit.
+8.1.3.5	8.1.3.5	Length octets	SHALL	In the long form, the length octets shall consist of an initial octet and one or more subsequent octets. The initial octet shall be encoded as follows: a) bit 8 shall be one; b) bits 7 to 1 shall encode the number of subsequent octets in the length octets, as an unsigned binary integer with bit 7 as the most significant bit;
+8.1.3.5c	8.1.3.5	Length octets	SHALL NOT	c) the value 11111111 (binary) shall not be used.
+8.1.3.5d	8.1.3.5	Length octets	SHALL	Bits 8 to 1 of the first subsequent octet, followed by bits 8 to 1 of the second subsequent octet, followed in turn by bits 8 to 1 of each further octet up to and including the last subsequent octet, shall be the encoding of an unsigned binary integer equal to the number of octets in the contents octets, with bit 8 of the first subsequent octet as the most significant bit.
+8.1.3.6	8.1.3.6	Length octets	SHALL	For the indefinite form, the length octets indicate that the contents octets are terminated by end-of-contents octets (see 8.1.5), and shall consist of a single octet.
+8.1.3.6.1	8.1.3.6.1	Length octets	SHALL	The single octet shall have bit 8 set to one, and bits 7 to 1 set to zero.
+8.1.3.6.2	8.1.3.6.2	Length octets	SHALL	If this form of length is used, then end-of-contents octets (see 8.1.5) shall be present in the encoding following the contents octets.
+8.1.4	8.1.4	Contents octets	SHALL	The contents octets shall consist of zero, one or more octets, and shall encode the data value as specified in subsequent clauses.
+8.1.5	8.1.5	End-of-contents octets	SHALL	The end-of-contents octets shall be present if the length is encoded as specified in 8.1.3.6, otherwise they shall not be present.
+8.1.5b	8.1.5	End-of-contents octets	SHALL	The end-of-contents octets shall consist of two zero octets.
+8.2.1	8.2.1	Encoding of a boolean value	SHALL	The encoding of a boolean value shall be primitive. The contents octets shall consist of a single octet.
+8.2.2	8.2.2	Encoding of a boolean value	SHALL	If the boolean value is FALSE the octet shall be zero. If the boolean value is TRUE the octet shall have any non-zero value, as a sender's option.
+8.3.1	8.3.1	Encoding of an integer value	SHALL	The encoding of an integer value shall be primitive. The contents octets shall consist of one or more octets.
+8.3.2	8.3.2	Encoding of an integer value	SHALL NOT	If the contents octets of an integer value encoding consist of more than one octet, then the bits of the first octet and bit 8 of the second octet: a) shall not all be ones; and b) shall not all be zero.
+8.3.3	8.3.3	Encoding of an integer value	SHALL	The contents octets shall be a two's complement binary number equal to the integer value, and consisting of bits 8 to 1 of the first octet, followed by bits 8 to 1 of the second octet, followed by bits 8 to 1 of each octet in turn up to and including the last octet of the contents octets.
+8.4	8.4	Encoding of an enumerated value	SHALL	The encoding of an enumerated value shall be that of the integer value with which it is associated.
+8.6.1	8.6.1	Encoding of a bitstring value	SHALL	The encoding of a bitstring value shall be either primitive or constructed at the option of the sender.
+8.6.2	8.6.2	Encoding of a bitstring value	SHALL	The contents octets for the primitive encoding shall contain an initial octet followed by zero, one or more subsequent octets.
+8.6.2.2	8.6.2.2	Encoding of a bitstring value	SHALL	The initial octet shall encode, as an unsigned binary integer with bit 1 as the least significant bit, the number of unused bits in the final subsequent octet. The number shall be in the range zero to seven.
+8.6.2.3	8.6.2.3	Encoding of a bitstring value	SHALL	If the bitstring is empty, there shall be no subsequent octets, and the initial octet shall be zero.
+8.6.3	8.6.3	Encoding of a bitstring value	SHALL	The contents octets for the constructed encoding shall consist of zero, one, or more nested encodings.
+8.6.4	8.6.4	Encoding of a bitstring value	SHALL	To encode a bitstring value in this way, it is segmented. Each segment shall consist of a series of consecutive bits of the value, and with the possible exception of the last, shall contain a number of bits which is a multiple of eight.
+8.6.4.1	8.6.4.1	Encoding of a bitstring value	SHALL	Each encoding in the contents octets shall represent a segment of the overall bitstring, the encoding arising from a recursive application of this subclause. In this recursive application, each segment is treated as if it were a bitstring value. The encodings of the segments shall appear in the contents octets in the order in which their bits appear in the overall value.
+8.7.1	8.7.1	Encoding of an octetstring value	SHALL	The encoding of an octetstring value shall be either primitive or constructed at the option of the sender.
+8.7.3	8.7.3	Encoding of an octetstring value	SHALL	The contents octets for the constructed encoding shall consist of zero, one, or more encodings.
+8.7.3.2	8.7.3.2	Encoding of an octetstring value	SHALL	Each encoding in the contents octets shall represent a segment of the overall octetstring, the encoding arising from a recursive application of this subclause. In this recursive application, each segment is treated as if it were an octetstring value. The encodings of the segments shall appear in the contents octets in the order in which their octets appear in the overall value.
+8.8.1	8.8.1	Encoding of a null value	SHALL	The encoding of a null value shall be primitive.
+8.8.2	8.8.2	Encoding of a null value	SHALL NOT	The contents octets shall not contain any octets.
+8.9.1	8.9.1	Encoding of a sequence value	SHALL	The encoding of a sequence value shall be constructed.
+8.9.2	8.9.2	Encoding of a sequence value	SHALL	The contents octets shall consist of the complete encoding of one data value from each of the types listed in the ASN.1 definition of the sequence type, in the order of their appearance in the definition, unless the type was referenced with the keyword OPTIONAL or the keyword DEFAULT.
+8.9.3	8.9.3	Encoding of a sequence value	SHALL	The encoding of a data value may, but need not, be present for a type which was referenced with the keyword OPTIONAL or the keyword DEFAULT. If present, it shall appear in the encoding at the point corresponding to the appearance of the type in the ASN.1 definition.
+8.10.1	8.10.1	Encoding of a sequence-of value	SHALL	The encoding of a sequence-of value shall be constructed.
+8.10.3	8.10.3	Encoding of a sequence-of value	SHALL	The order of the encodings of the data values shall be the same as the order of the data values in the sequence-of value to be encoded.
+8.11.1	8.11.1	Encoding of a set value	SHALL	The encoding of a set value shall be constructed.
+8.12.1	8.12.1	Encoding of a set-of value	SHALL	The encoding of a set-of value shall be constructed.
+8.13	8.13	Encoding of a choice value	SHALL	The encoding of a choice value shall be the same as the encoding of a value of the chosen type.
+8.14.3	8.14.3	Encoding of a value of a prefixed type	SHALL	If implicit tagging (see Rec. ITU-T X.680 | ISO/IEC 8824-1, 31.2.7) was not used in the definition of the type, the encoding shall be constructed and the contents octets shall be the complete base encoding.
+8.14.4	8.14.4	Encoding of a value of a prefixed type	SHALL	If implicit tagging was used in the definition of the type, then: a) the encoding shall be constructed if the base encoding is constructed, and shall be primitive otherwise; and b) the contents octets shall be the same as the contents octets of the base encoding.
+8.19.1	8.19.1	Encoding of an object identifier value	SHALL	The encoding of an object identifier value shall be primitive.
+8.19.2	8.19.2	Encoding of an object identifier value	SHALL	The contents octets shall be an (ordered) list of encodings of subidentifiers (see 8.19.3 and 8.19.4) concatenated together. Each subidentifier is represented as a series of (one or more) octets. Bit 8 of each octet indicates whether it is the last in the series: bit 8 of the last octet is zero; bit 8 of each preceding octet is one. Bits 7 to 1 of the octets in the series collectively encode the subidentifier. The subidentifier shall be encoded in the fewest possible octets, that is, the leading octet of the subidentifier shall not have the value 80 (hexadecimal).
+8.19.3	8.19.3	Encoding of an object identifier value	SHALL	The number of subidentifiers (N) shall be one less than the number of object identifier components in the object identifier value being encoded.
+8.23.3	8.23.3	Encoding for values of the restricted character string types	SHALL	Each character string type shall be encoded as if it had been declared: [UNIVERSAL x] IMPLICIT OCTET STRING where x is the number of the universal class tag assigned to the character string type in Rec. ITU-T X.680 | ISO/IEC 8824-1.
+8.23.6	8.23.6	Encoding for values of the restricted character string types	REQUIRED	The above example illustrates three of the (many) possible forms available as a sender's option. Receivers are required to handle all permitted forms (see 7.3).
+8.23.7	8.23.7	Encoding for values of the restricted character string types	SHALL	For the UniversalString type, the octet string shall contain the octets specified in ISO/IEC 10646, using the 4-octet canonical form (see 13.2 of ISO/IEC 10646). Signatures shall not be used.
+8.23.8	8.23.8	Encoding for values of the restricted character string types	SHALL	For the BMPString type, the octet string shall contain the octets specified in ISO/IEC 10646, using the 2-octet BMP form (see 13.1 of ISO/IEC 10646). Signatures shall not be used.
+8.23.10	8.23.10	Encoding for values of the restricted character string types	SHALL	For the UTF8String type, the octet string shall contain the octets specified in ISO/IEC 10646, Annex D. Announcers and escape sequences shall not be used, and each character shall be encoded in the smallest number of octets available for that character.
+8.25	8.25	Encoding for values of the useful types	SHALL	The following "useful types" shall be encoded as if they had been replaced by their definitions given in clauses 46-48 of Rec. ITU-T X.680 | ISO/IEC 8824-1: generalized time; universal time; object descriptor.
+10.1	10.1	Length forms	SHALL	The definite form of length encoding shall be used, encoded in the minimum number of octets.
+10.2	10.2	String encoding forms	SHALL NOT	For bitstring, octetstring and restricted character string types, the constructed form of encoding shall not be used.
+10.3	10.3	Set components	SHALL	The encodings of the component values of a set value shall appear in an order determined by their tags as specified in 8.6 of Rec. ITU-T X.680 | ISO/IEC 8824-1.
+11.1	11.1	Boolean values	SHALL	If the encoding represents the boolean value TRUE, its single contents octet shall have all eight bits set to one.
+11.2.1	11.2.1	Unused bits	SHALL	Each unused bit in the final octet of the encoding of a bit string value shall be set to zero.
+11.5	11.5	Set and sequence components with default value	SHALL NOT	The encoding of a set value or sequence value shall not include an encoding for any component value which is equal to its default value.
+11.6	11.6	Set-of components	SHALL	The encodings of the component values of a set-of value shall appear in ascending order, the encodings being compared as octet strings with the shorter components being padded at their trailing end with 0-octets.
+11.7.1	11.7.1	GeneralizedTime	SHALL	The encoding shall terminate with a "Z", as described in the Rec. ITU-T X.680 | ISO/IEC 8824-1 clause on GeneralizedTime.
+11.7.2	11.7.2	GeneralizedTime	SHALL	The seconds element shall always be present.
+11.7.3	11.7.3	GeneralizedTime	SHALL	The fractional-seconds elements, if present, shall omit all trailing zeros; if the elements correspond to 0, they shall be wholly omitted, and the decimal point element also shall be omitted.
+11.7.4	11.7.4	GeneralizedTime	SHALL	The decimal point element, if present, shall be the point option ".".
+11.7.5	11.7.5	GeneralizedTime	SHALL	Midnight (GMT) shall be represented in the form: "YYYYMMDD000000Z" where "YYYYMMDD" represents the day following the midnight in question.
+11.8.1	11.8.1	UTCTime	SHALL	The encoding shall terminate with "Z", as described in the ITU-T X.680 | ISO/IEC 8824-1 clause on UTCTime.
+11.8.2	11.8.2	UTCTime	SHALL	The seconds element shall always be present.
+11.8.3	11.8.3	UTCTime	SHALL	Midnight (GMT) shall be represented in the form: "YYMMDD000000Z" where "YYMMDD" represents the day following the midnight in question.

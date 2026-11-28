@@ -795,6 +795,92 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_hkdf_sha512_expand")]
     internal static partial int HkdfSha512Expand(byte* prk, nuint prkLength, byte* info, nuint infoLength, byte* okm, nuint length);
 
+    /// <summary>int httpasm_asn1_read(httpasm_asn1 *element, const uint8_t *in, size_t length, int rules).</summary>
+    /// <param name="element">Receives the first element (unspecified on -1).</param>
+    /// <param name="input">The encoding: the element, and whatever follows it.</param>
+    /// <param name="length">The octets at <paramref name="input"/> (none past them is read).</param>
+    /// <param name="rules"><see cref="Asn1.Der"/> or <see cref="Asn1.Ber"/>.</param>
+    /// <returns>0, or -1 when the element breaks a rule (or the rules are unknown).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_asn1_read")]
+    internal static partial int Asn1Read(Asn1Element* element, byte* input, nuint length, int rules);
+
+    /// <summary>int httpasm_asn1_check(const httpasm_asn1 *element, uint32_t type, int rules).</summary>
+    /// <param name="element">An element read under another (implicit) tag.</param>
+    /// <param name="type">The universal type whose rules apply (its number; SEQUENCE's and SET's
+    /// form bit allowed).</param>
+    /// <param name="rules"><see cref="Asn1.Der"/> or <see cref="Asn1.Ber"/>.</param>
+    /// <returns>0, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_asn1_check")]
+    internal static partial int Asn1Check(Asn1Element* element, uint type, int rules);
+
+    /// <summary>int httpasm_asn1_check_set_of(const httpasm_asn1 *set, int rules).</summary>
+    /// <param name="set">A SET OF element (any constructed one).</param>
+    /// <param name="rules"><see cref="Asn1.Der"/> (components in ascending order) or <see cref="Asn1.Ber"/>.</param>
+    /// <returns>0, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_asn1_check_set_of")]
+    internal static partial int Asn1CheckSetOf(Asn1Element* set, int rules);
+
+    /// <summary>int64_t httpasm_asn1_octets(const httpasm_asn1 *element, uint8_t *out, size_t capacity, int rules).</summary>
+    /// <param name="element">An OCTET STRING or a restricted character string (or one under an implicit tag).</param>
+    /// <param name="output">Receives the value's octets, the segments' joined.</param>
+    /// <param name="capacity">The room at <paramref name="output"/>.</param>
+    /// <param name="rules"><see cref="Asn1.Der"/> or <see cref="Asn1.Ber"/>.</param>
+    /// <returns>The octets written, or -1 (too long, not such a string, unknown rules).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_asn1_octets")]
+    internal static partial long Asn1Octets(Asn1Element* element, byte* output, nuint capacity, int rules);
+
+    /// <summary>int64_t httpasm_asn1_bits(const httpasm_asn1 *element, uint8_t *out, size_t capacity, uint32_t *unused, int rules).</summary>
+    /// <param name="element">A BIT STRING (or one under an implicit tag).</param>
+    /// <param name="output">Receives the bits' octets, the segments' joined.</param>
+    /// <param name="capacity">The room at <paramref name="output"/>.</param>
+    /// <param name="unused">Receives the final octet's unused bits (unchanged on -1).</param>
+    /// <param name="rules"><see cref="Asn1.Der"/> or <see cref="Asn1.Ber"/>.</param>
+    /// <returns>The octets written, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_asn1_bits")]
+    internal static partial long Asn1Bits(Asn1Element* element, byte* output, nuint capacity, uint* unused, int rules);
+
+    /// <summary>int httpasm_pem_read(httpasm_pem *block, const uint8_t *text, size_t length, uint8_t *der, size_t capacity).</summary>
+    /// <param name="block">Receives the block's label, decoded length and end.</param>
+    /// <param name="text">The PEM text.</param>
+    /// <param name="length">Its octets (none past them is read).</param>
+    /// <param name="der">Receives the decoded octets (only once the block was checked).</param>
+    /// <param name="capacity">The room at <paramref name="der"/>.</param>
+    /// <returns>0; 1 when no BEGIN line is found; -1 for a malformed block; -2 when the octets do
+    /// not fit (the room needed in <see cref="PemBlock.DerLength"/>).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_pem_read")]
+    internal static partial int PemRead(PemBlock* block, byte* text, nuint length, byte* der, nuint capacity);
+
+    /// <summary>int httpasm_private_key_load(httpasm_private_key *key, const uint8_t *data, size_t length).</summary>
+    /// <param name="key">Receives the prepared key (all zeros when refused).</param>
+    /// <param name="data">The key's file: DER, or PEM text.</param>
+    /// <param name="length">Its octets (none past them is read).</param>
+    /// <returns>The kind (HTTPASM_KEY_*); -2 when the only key is encrypted; -1 otherwise.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_private_key_load")]
+    internal static partial int PrivateKeyLoad(PrivateKey* key, byte* data, nuint length);
+
+    /// <summary>int httpasm_certificate_read(httpasm_certificate *c, const uint8_t *der, size_t length).</summary>
+    /// <param name="certificate">Receives the parts (pointers into der).</param>
+    /// <param name="der">The certificate's DER.</param>
+    /// <param name="length">Its octets (none past them is read).</param>
+    /// <returns>0, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_certificate_read")]
+    internal static partial int CertificateRead(Certificate* certificate, byte* der, nuint length);
+
+    /// <summary>int httpasm_public_key_read(httpasm_public_key *key, const uint8_t *spki, size_t length).</summary>
+    /// <param name="key">Receives the key (all zeros when refused).</param>
+    /// <param name="spki">A SubjectPublicKeyInfo's DER.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>The kind (HTTPASM_KEY_*), or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_public_key_read")]
+    internal static partial int PublicKeyRead(PublicKey* key, byte* spki, nuint length);
+
+    /// <summary>int httpasm_private_key_matches(const httpasm_private_key *key, const httpasm_public_key *pub).</summary>
+    /// <param name="key">A loaded private key.</param>
+    /// <param name="publicKey">A read public key.</param>
+    /// <returns>0 for one key pair, else -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_private_key_matches")]
+    internal static partial int PrivateKeyMatches(PrivateKey* key, PublicKey* publicKey);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>

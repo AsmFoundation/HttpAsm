@@ -7,6 +7,7 @@ specs/rfc/** binary
 # "extract --check" compares like with like.
 specs/requirements.tsv text eol=lf
 specs/documents.json text eol=lf
+specs/x690.tsv text eol=lf
 
 # Shell scripts run in Linux containers and on Linux CI runners.
 *.sh text eol=lf

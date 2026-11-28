@@ -521,6 +521,137 @@ HTTPASM_HPACK_MAX_LIMIT         equ 0x1000000   ; the largest table limit (16 Mi
 HA_HPACK_INITIAL_SIZE           equ 4096        ; SETTINGS_HEADER_TABLE_SIZE's initial value (RFC 9113 6.5.2)
 
 ; -----------------------------------------------------------------------------
+; httpasm_asn1: one element of an ASN.1 encoding as httpasm_asn1_read found it (asn1/asn1.asm),
+; 32 octets (struct size id 23). content points into the octets the caller read from: nothing
+; is copied, so the element is valid while they are.
+; -----------------------------------------------------------------------------
+struc httpasm_asn1
+    .content:           resq 1      ; const uint8_t *: the contents octets
+    .content_length:    resq 1      ; their count (an indefinite length's: up to its end-of-contents)
+    .length:            resq 1      ; the whole encoding: identifier, length, contents, end-of-contents
+    .tag:               resd 1      ; the class (bits 31-30), constructed (bit 29), the number (28-0)
+    .flags:             resd 1      ; HTTPASM_ASN1_INDEFINITE
+endstruc
+
+; httpasm_asn1_read's rules
+HTTPASM_ASN1_DER                equ 0       ; the Distinguished Encoding Rules (X.690 clauses 8, 10, 11)
+HTTPASM_ASN1_BER                equ 1       ; the Basic Encoding Rules (clause 8): every sender's option
+; httpasm_asn1.tag's class and form bits, in an identifier octet's places shifted up by 24
+HTTPASM_ASN1_UNIVERSAL          equ 0x00000000
+HTTPASM_ASN1_APPLICATION        equ 0x40000000
+HTTPASM_ASN1_CONTEXT            equ 0x80000000
+HTTPASM_ASN1_PRIVATE            equ 0xC0000000
+HTTPASM_ASN1_CONSTRUCTED        equ 0x20000000
+HTTPASM_ASN1_CLASS              equ 0xC0000000  ; the class's two bits
+HTTPASM_ASN1_NUMBER             equ 0x1FFFFFFF  ; the number's bits
+; the universal types the reader checks (X.680's numbers); SEQUENCE and SET with their form bit
+HTTPASM_ASN1_BOOLEAN            equ 1
+HTTPASM_ASN1_INTEGER            equ 2
+HTTPASM_ASN1_BIT_STRING         equ 3
+HTTPASM_ASN1_OCTET_STRING       equ 4
+HTTPASM_ASN1_NULL               equ 5
+HTTPASM_ASN1_OID                equ 6
+HTTPASM_ASN1_ENUMERATED         equ 10
+HTTPASM_ASN1_UTF8_STRING        equ 12
+HTTPASM_ASN1_SEQUENCE           equ 16 | HTTPASM_ASN1_CONSTRUCTED
+HTTPASM_ASN1_SET                equ 17 | HTTPASM_ASN1_CONSTRUCTED
+HTTPASM_ASN1_NUMERIC_STRING     equ 18
+HTTPASM_ASN1_PRINTABLE_STRING   equ 19
+HTTPASM_ASN1_T61_STRING         equ 20
+HTTPASM_ASN1_VIDEOTEX_STRING    equ 21
+HTTPASM_ASN1_IA5_STRING         equ 22
+HTTPASM_ASN1_UTC_TIME           equ 23
+HTTPASM_ASN1_GENERALIZED_TIME   equ 24
+HTTPASM_ASN1_GRAPHIC_STRING     equ 25
+HTTPASM_ASN1_VISIBLE_STRING     equ 26
+HTTPASM_ASN1_GENERAL_STRING     equ 27
+HTTPASM_ASN1_UNIVERSAL_STRING   equ 28
+HTTPASM_ASN1_BMP_STRING         equ 30
+; httpasm_asn1.flags
+HTTPASM_ASN1_INDEFINITE         equ 1       ; BER's indefinite length: end-of-contents octets end it
+
+; -----------------------------------------------------------------------------
+; httpasm_pem: one block of PEM text (RFC 7468) as httpasm_pem_read found it (asn1/pem.asm),
+; 32 octets (struct size id 24). label points into the text.
+; -----------------------------------------------------------------------------
+struc httpasm_pem
+    .label:             resq 1      ; const uint8_t *: the label ("CERTIFICATE", "PRIVATE KEY", ...)
+    .label_length:      resq 1
+    .der_length:        resq 1      ; the octets decoded (on -2: the room they need)
+    .end:               resq 1      ; the text's offset past the END boundary: the next search's start
+endstruc
+
+; -----------------------------------------------------------------------------
+; httpasm_private_key: a private key of any kind the library signs with, as
+; httpasm_private_key_load prepared it from its file (asn1/keys.asm), 6888 octets (struct size
+; id 25); opaque in httpasm.h but for its kind and size. .secret holds the prepared key of the
+; kind: an httpasm_rsa_private_key (RSA, RSA_PSS), the curve's scalar d (P256: 32 octets, P384:
+; 48, P521: 66), an httpasm_ed25519_private_key or httpasm_ed448_private_key. Its octets are
+; secrets: the caller zeroes them when done.
+; -----------------------------------------------------------------------------
+struc httpasm_private_key
+    .kind:              resd 1      ; HTTPASM_KEY_*
+    .bits:              resd 1      ; the modulus' or the curve's size in bits
+    .pss_hash:          resd 1      ; RSA_PSS: the hash (HTTPASM_HASH_*) its parameters bind, 0: any
+    .pss_salt:          resd 1      ; RSA_PSS: their salt length (0 when absent)
+    .public_length:     resd 1      ; .public's octets (0 for RSA: its public key is in .secret's)
+    .reserved:          resd 3
+    .public:            resb 136    ; the curve's 04 || x || y, or the Edwards key's public key
+    .secret:            resb httpasm_rsa_private_key_size
+endstruc
+
+; -----------------------------------------------------------------------------
+; httpasm_certificate: a certificate's parts as httpasm_certificate_read found them (asn1/x509.asm),
+; 152 octets (struct size id 26): pointers into the DER read, valid while it is.
+; -----------------------------------------------------------------------------
+struc httpasm_certificate
+    .tbs:               resq 1      ; tbsCertificate's whole encoding: what the signature covers
+    .tbs_length:        resq 1
+    .serial:            resq 1      ; serialNumber's contents (two's complement, big-endian)
+    .serial_length:     resq 1
+    .issuer:            resq 1      ; issuer's whole encoding (a Name)
+    .issuer_length:     resq 1
+    .subject:           resq 1      ; subject's
+    .subject_length:    resq 1
+    .spki:              resq 1      ; subjectPublicKeyInfo's whole encoding
+    .spki_length:       resq 1
+    .extensions:        resq 1      ; [3]'s Extensions SEQUENCE, whole, or 0 (none)
+    .extensions_length: resq 1
+    .signature_algorithm: resq 1    ; the outer signatureAlgorithm's whole encoding
+    .signature_algorithm_length: resq 1
+    .signature:         resq 1      ; signatureValue's octets (past its unused-bits octet)
+    .signature_length:  resq 1
+    .not_before:        resq 1      ; int64: seconds since 1970-01-01T00:00:00Z
+    .not_after:         resq 1
+    .version:           resd 1      ; 1, 2 or 3
+    .reserved:          resd 1
+endstruc
+
+; -----------------------------------------------------------------------------
+; httpasm_public_key: a SubjectPublicKeyInfo's key as httpasm_public_key_read prepared it
+; (asn1/x509.asm), 2248 octets (struct size id 27).
+; -----------------------------------------------------------------------------
+struc httpasm_public_key
+    .kind:              resd 1      ; HTTPASM_KEY_*
+    .bits:              resd 1
+    .pss_hash:          resd 1      ; RSA_PSS: the hash its parameters bind, 0: any
+    .pss_salt:          resd 1
+    .point_length:      resd 1      ; .point's octets (0 for RSA)
+    .reserved:          resd 3
+    .point:             resb 136    ; a curve's 04 || x || y, or an Edwards key
+    .rsa:               resb httpasm_rsa_public_key_size    ; RSA: the key prepared
+endstruc
+
+; httpasm_private_key.kind (and httpasm_private_key_load's answer)
+HTTPASM_KEY_RSA                 equ 1       ; rsaEncryption: PKCS#1 v1.5 and PSS signatures
+HTTPASM_KEY_RSA_PSS             equ 2       ; id-RSASSA-PSS: PSS signatures only
+HTTPASM_KEY_P256                equ 3
+HTTPASM_KEY_P384                equ 4
+HTTPASM_KEY_P521                equ 5
+HTTPASM_KEY_ED25519             equ 6
+HTTPASM_KEY_ED448               equ 7
+
+; -----------------------------------------------------------------------------
 ; CPU features: the bits of httpasm_cpu_found, httpasm_cpu_features and httpasm_cpu_limit, and
 ; of the core's ha_cpu. Levels are the x86-64 psABI's; groups are instructions that CPUs of one
 ; level may or may not have. cpu.inc has the rules (what each level adds, which group needs

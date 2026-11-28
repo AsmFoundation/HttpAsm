@@ -153,6 +153,16 @@ extern httpasm_hmac_sha512_final    ; void (httpasm_hmac_sha512_ctx *h, uint8_t 
 extern httpasm_hmac_sha512          ; void (key, key_length, data, n, mac[64])
 extern httpasm_hkdf_sha512_extract  ; void (salt, salt_length, ikm, ikm_length, prk[64])
 extern httpasm_hkdf_sha512_expand   ; int (prk, prk_length, info, info_length, okm, length): 0, -1 past 16320
+extern httpasm_asn1_read            ; int (httpasm_asn1 *element, const uint8_t *in, size_t length, int rules): 0, -1
+extern httpasm_asn1_check           ; int (const httpasm_asn1 *element, uint32_t type, int rules): 0, -1
+extern httpasm_asn1_check_set_of    ; int (const httpasm_asn1 *set, int rules): 0, -1
+extern httpasm_asn1_octets          ; int64_t (element, out, capacity, rules): the octets, -1
+extern httpasm_asn1_bits            ; int64_t (element, out, capacity, uint32_t *unused, rules): the octets, -1
+extern httpasm_pem_read             ; int (httpasm_pem *block, text, length, der, capacity): 0, 1 none, -1 malformed, -2 too small
+extern httpasm_private_key_load     ; int (httpasm_private_key *key, data, length): the kind, -1 refused, -2 encrypted
+extern httpasm_certificate_read     ; int (httpasm_certificate *c, der, length): 0, -1
+extern httpasm_public_key_read      ; int (httpasm_public_key *key, spki, length): the kind, -1
+extern httpasm_private_key_matches  ; int (const httpasm_private_key *key, const httpasm_public_key *pub): 0 a pair, -1
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)
