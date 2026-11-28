@@ -8,9 +8,11 @@
  * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
  * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-521's, P-384's and P-256's,
  * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it), Ed448's, the
- * key loader's (33 KiB, an RSA key's preparation under it: from DER and from PEM) and TLS 1.3's
+ * key loader's (33 KiB, an RSA key's preparation under it: from DER and from PEM), TLS 1.3's
  * handshake readers' (the extension walk's and key_share's 8 KiB bitmaps, a Certificate's entry
- * frame above the walk's) - at v1 and at the best tier:
+ * frame above the walk's) and its server engine's (a ClientHello through the flight: the
+ * engine's frames above ML-KEM-768's encapsulation and Ed25519's signing) - at v1 and at the
+ * best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
  *   - it runs again, in a forked child, on stacks too small for that depth (from 64 octets short
  *     down to 1 KiB, every 1000 octets: the guard page sits at every kind of place in the frame),
@@ -325,6 +327,77 @@ static void put_u16(uint8_t *o, size_t v)
     o[1] = (uint8_t)v;
 }
 
+/* TLS 1.3's server engine (tls/engine.asm, tls/server.asm, tls/kex.asm, tls/sign.asm): a whole
+ * ClientHello received, through the ServerHello and the flight - the engine's own frames (the
+ * receive's, the reassembly's, the server's message frame of about 3 KiB, the exchange's and the
+ * signer's) stacked above ML-KEM-768's encapsulation (X25519MLKEM768, the deepest group's work
+ * under them) and Ed25519's signing. The key and certificate are tests/fuzz/tls_server.c's fuzz
+ * pair; the random source a counter reset at each call, so every stack's run writes the same
+ * output, which the call returns with receive's answer. */
+static const uint8_t tls_key_der[48] = {
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    0x05, 0x55, 0x06, 0x5a, 0xde, 0x7a, 0x65, 0xe3, 0x96, 0x71, 0x53, 0x36, 0x26, 0x7d, 0x7b, 0x22,
+    0xc8, 0x82, 0xde, 0x0a, 0xa2, 0xd4, 0x8a, 0xc0, 0x61, 0x68, 0xee, 0x4e, 0x6e, 0x82, 0xa8, 0x41,
+};
+static const uint8_t tls_cert_der[312] = {
+    0x30, 0x82, 0x01, 0x34, 0x30, 0x81, 0xe7, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x14, 0x4b, 0xd7,
+    0x09, 0x49, 0xd0, 0xc0, 0xda, 0x8f, 0x6a, 0xb7, 0x51, 0x2a, 0x28, 0x13, 0x87, 0x8a, 0x3e, 0x94,
+    0x3f, 0xe2, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x30, 0x0f, 0x31, 0x0d, 0x30, 0x0b, 0x06,
+    0x03, 0x55, 0x04, 0x03, 0x0c, 0x04, 0x66, 0x75, 0x7a, 0x7a, 0x30, 0x20, 0x17, 0x0d, 0x32, 0x36,
+    0x31, 0x31, 0x32, 0x38, 0x30, 0x34, 0x32, 0x35, 0x34, 0x31, 0x5a, 0x18, 0x0f, 0x32, 0x31, 0x32,
+    0x36, 0x31, 0x31, 0x30, 0x34, 0x30, 0x34, 0x32, 0x35, 0x34, 0x31, 0x5a, 0x30, 0x0f, 0x31, 0x0d,
+    0x30, 0x0b, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x04, 0x66, 0x75, 0x7a, 0x7a, 0x30, 0x2a, 0x30,
+    0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0x43, 0xdf, 0x9b, 0xa0, 0x7b, 0xcb, 0xf6,
+    0xd3, 0x6f, 0x1f, 0x2d, 0x95, 0xe6, 0x84, 0xa4, 0xf1, 0x5e, 0x5a, 0x34, 0xa3, 0x60, 0xf8, 0x54,
+    0x64, 0x3a, 0xd4, 0xc9, 0x53, 0x34, 0xcd, 0x2a, 0x19, 0xa3, 0x53, 0x30, 0x51, 0x30, 0x1d, 0x06,
+    0x03, 0x55, 0x1d, 0x0e, 0x04, 0x16, 0x04, 0x14, 0xb9, 0x3c, 0xa5, 0x04, 0x44, 0xe6, 0x1f, 0x04,
+    0x43, 0x15, 0xba, 0x69, 0x64, 0xd7, 0xf6, 0xeb, 0xe9, 0xba, 0x58, 0x90, 0x30, 0x1f, 0x06, 0x03,
+    0x55, 0x1d, 0x23, 0x04, 0x18, 0x30, 0x16, 0x80, 0x14, 0xb9, 0x3c, 0xa5, 0x04, 0x44, 0xe6, 0x1f,
+    0x04, 0x43, 0x15, 0xba, 0x69, 0x64, 0xd7, 0xf6, 0xeb, 0xe9, 0xba, 0x58, 0x90, 0x30, 0x0f, 0x06,
+    0x03, 0x55, 0x1d, 0x13, 0x01, 0x01, 0xff, 0x04, 0x05, 0x30, 0x03, 0x01, 0x01, 0xff, 0x30, 0x05,
+    0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x41, 0x00, 0x1f, 0xdd, 0x64, 0x30, 0x0f, 0x64, 0x6b, 0xb9,
+    0xee, 0x3a, 0x8b, 0xd2, 0x47, 0x5e, 0xb4, 0x84, 0xb9, 0x80, 0xbf, 0x58, 0xe4, 0x8e, 0xaa, 0x8d,
+    0x90, 0x65, 0xea, 0x58, 0xb1, 0x19, 0xce, 0x52, 0x4a, 0x5b, 0x4f, 0x95, 0x26, 0x93, 0x22, 0x4e,
+    0x04, 0x59, 0x01, 0x8d, 0x30, 0x03, 0x03, 0xbd, 0x58, 0x2d, 0x9e, 0x5e, 0x72, 0x0a, 0x13, 0xf5,
+    0xc7, 0x1e, 0xed, 0xc8, 0x82, 0x0c, 0x5b, 0x0b,
+};
+static httpasm_private_key tls_key;
+static httpasm_tls13_server_config tls_config;
+static uint8_t tls_certificate_message[400], tls_memory[64 * 1024], tls_record[1400];
+static size_t tls_record_n;
+static httpasm_tls13_connection tls_connection;
+static uint64_t tls_counter;
+
+/* tls_draw: the engine's random source, a counter's octets (the same for every run).
+ *   context  unused; o, n  where the octets go. Returns 0. */
+static int tls_draw(void *context, uint8_t *o, size_t n)
+{
+    (void)context;
+    for (size_t i = 0; i < n; i++)
+        o[i] = (uint8_t)((++tls_counter * 0x9E3779B97F4A7C15ull) >> 56);
+    return 0;
+}
+
+/* run_tls13_server_hello: a connection started, the prepared ClientHello received, the output
+ * copied out (result: receive's answer, -2 when the start was refused), the connection wiped. */
+static void run_tls13_server_hello(void)
+{
+    httpasm_tls13_event e;
+    const uint8_t *queued;
+    tls_counter = 0;
+    if (httpasm_tls13_server_init(&tls_connection, &tls_config, tls_memory, tls_config.memory) != 0) {
+        result = -2;
+        out_n = 0;
+        return;
+    }
+    result = httpasm_tls13_receive(&tls_connection, tls_record, tls_record_n, &e);
+    out_n = httpasm_tls13_output(&tls_connection, &queued);
+    if (out_n > sizeof out)
+        out_n = sizeof out;
+    memcpy(out, queued, out_n);
+    httpasm_tls13_wipe(&tls_connection);
+}
+
 /* prepare_tls: builds the ClientHello and the Certificate above and checks that the readers accept
  * them (a refusal would leave the bitmaps' frames untaken: nothing proven). Returns 0, or 1 with
  * the reason printed. */
@@ -378,6 +451,55 @@ static int prepare_tls(void)
         fprintf(stderr, "stack: the TLS readers refused their inputs\n");
         return 1;
     }
+
+    /* the server engine's: the key, the configuration, and a ClientHello record sharing only
+       X25519MLKEM768 (an encapsulation key of zero coefficients, which FIPS 203's modulus check
+       takes, and rho; then an X25519 u of 9, the base point), with the extensions a TLS 1.3
+       hello needs (supported_groups, signature_algorithms: ed25519, supported_versions) */
+    const uint8_t *chain[1] = { tls_cert_der };
+    size_t lengths[1] = { sizeof tls_cert_der };
+    tls_config.key = &tls_key;
+    tls_config.random = tls_draw;
+    if (httpasm_private_key_load(&tls_key, tls_key_der, sizeof tls_key_der) != HTTPASM_KEY_ED25519
+        || httpasm_tls13_server_config_init(&tls_config, chain, lengths, 1, tls_certificate_message, sizeof tls_certificate_message) != 0
+        || tls_config.memory > sizeof tls_memory) {
+        fprintf(stderr, "stack: the TLS server's configuration was refused\n");
+        return 1;
+    }
+    uint8_t *r = tls_record;
+    r[0] = 22, r[1] = 3, r[2] = 3;              /* handshake, its length below */
+    uint8_t *m = r + 5;
+    m[0] = 1;                                   /* ClientHello, its length below */
+    uint8_t *b = m + 4;
+    *b++ = 3, *b++ = 3;
+    memset(b, 0x24, 32), b += 32;
+    *b++ = 0;
+    put_u16(b, 2), b[2] = 0x13, b[3] = 0x01, b += 4;
+    *b++ = 1, *b++ = 0;
+    uint8_t *ext_length = b;
+    b += 2;
+    uint8_t *ext = b;
+    static const uint8_t fixed[] = {
+        0, 10, 0, 4, 0, 2, 0x11, 0xEC,          /* supported_groups: X25519MLKEM768 */
+        0, 13, 0, 4, 0, 2, 0x08, 0x07,          /* signature_algorithms: ed25519 */
+        0, 43, 0, 3, 2, 3, 4,                   /* supported_versions: TLS 1.3 */
+    };
+    memcpy(b, fixed, sizeof fixed), b += sizeof fixed;
+    put_u16(b, 51), put_u16(b + 2, 2 + 4 + 1216), put_u16(b + 4, 4 + 1216), b += 6;
+    put_u16(b, 0x11EC), put_u16(b + 2, 1216), b += 4;
+    memset(b, 0, 1152), b += 1152;              /* t: 768 zero coefficients */
+    memset(b, 0x5C, 32), b += 32;               /* rho */
+    memset(b, 0, 32), b[0] = 9, b += 32;        /* X25519: u = 9 */
+    put_u16(ext_length, (size_t)(b - ext));
+    size_t body = (size_t)(b - (m + 4));
+    m[1] = (uint8_t)(body >> 16), m[2] = (uint8_t)(body >> 8), m[3] = (uint8_t)body;
+    put_u16(r + 3, body + 4);
+    tls_record_n = (size_t)(b - r);
+    run_tls13_server_hello();
+    if (result != (long)tls_record_n || out_n < 1200) {
+        fprintf(stderr, "stack: the TLS server refused its hello (%ld, %zu octets out)\n", result, out_n);
+        return 1;
+    }
     return 0;
 }
 
@@ -408,6 +530,7 @@ static const stack_call calls[] = {
     { "private_key_load p256", run_key_load_p256 },
     { "tls_extensions_read", run_tls_extensions_read }, { "tls13_hello_read (key_share)", run_tls13_hello_read },
     { "tls13_certificate_read", run_tls13_certificate_read },
+    { "tls13 server: a ClientHello through the flight (X25519MLKEM768, Ed25519)", run_tls13_server_hello },
 };
 
 /* ---- running a call on a stack of our own ---- */

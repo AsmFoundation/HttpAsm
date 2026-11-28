@@ -136,7 +136,7 @@ public sealed class TlsServerRulesTests
     /// <param name="r">The failing call's answer.</param>
     /// <param name="alert">The alert expected.</param>
     /// <param name="what">The case, for the message.</param>
-    private static void Refused(TlsServerHarness server, TlsTestClient client, TlsServerHarness.Received r, uint alert, string what)
+    internal static void Refused(TlsServerHarness server, TlsTestClient client, TlsServerHarness.Received r, uint alert, string what)
     {
         Assert.True(r.Answer == -1 && r.Event.Kind == TlsEngine.EventFailed && r.Event.Alert == alert && r.Event.Flags == 0,
             $"{what}: answer {r.Answer}, event {r.Event.Kind}, alert {r.Event.Alert} (expected {alert}), flags {r.Event.Flags}");
@@ -170,11 +170,13 @@ public sealed class TlsServerRulesTests
     /// suite in common, no scheme the key makes, no group in common (handshake_failure, 4.2.1);
     /// signature_algorithms, supported_groups or key_share missing without a PSK
     /// (missing_extension, 9.2); a share for a group the client does not list (illegal_parameter,
-    /// 4.3.8's MAY); and a share each group refuses: X25519's all-zero secret, a P-256 point off
-    /// the curve or compressed, a finite field's Y of 1 and of p - 1, an ML-KEM key failing the
-    /// modulus check, a share of the wrong length (illegal_parameter: 4.3.8.1, 4.3.8.2, 7.4.2,
-    /// RFC 10024 4.2). Each alert goes out in the clear (no keys yet) and the connection stays
-    /// failed.
+    /// 4.3.8's MAY); and a share each group refuses: X25519's and X448's all-zero secrets, a
+    /// NIST curve's point off the curve (P-256, P-384, P-521, and the hybrids' P-256 and P-384
+    /// halves) or compressed, a finite field's Y of 1 and of p - 1, an ML-KEM key failing the
+    /// modulus check (each hybrid's), the X25519 half of X25519MLKEM768 making a zero secret,
+    /// and a share of the wrong length in every group (illegal_parameter: 4.3.8.1, 4.3.8.2,
+    /// 7.4.2, RFC 10024 4.2). Each alert goes out in the clear (no keys yet) and the connection
+    /// stays failed.
     /// </summary>
     [Fact]
     [Requirement("RFC9846-4.2.1-3", "RFC9846-4.2.1-8", "RFC9846-4.3.8-10#4", "RFC9846-4.3.8.1-3", "RFC9846-4.3.8.2-5", "RFC9846-9.2-6.1.1", "RFC9846-9.2-6.2.1", "RFC9846-4.2.2-7.2.1#2")]
@@ -189,8 +191,43 @@ public sealed class TlsServerRulesTests
         byte[] p256 = new TlsShare(TlsEngine.Secp256r1).Public;
         byte[] offCurve = (byte[])p256.Clone();
         offCurve[^1] ^= 1;
+        byte[] p384 = new TlsShare(TlsEngine.Secp384r1).Public;
+        byte[] p384Off = (byte[])p384.Clone();
+        p384Off[^1] ^= 1;
+        byte[] p521 = new TlsShare(TlsEngine.Secp521r1).Public;
+        byte[] p521Off = (byte[])p521.Clone();
+        p521Off[^1] ^= 1;
+        // the hybrids' halves: a real encapsulation key (768: from X25519MLKEM768's share, whose
+        // first 1184 octets it is; 1024: SecP384r1MLKEM1024's last 1568), and one failing the
+        // modulus check (a first coefficient of 4095, as above)
+        byte[] ek768 = new TlsShare(TlsEngine.X25519MlKem768).Public[..1184];
+        byte[] ek1024 = new TlsShare(TlsEngine.Secp384r1MlKem1024).Public[97..];
+        byte[] badEk768 = [0xFF, 0x0F, .. ek768[2..]];
+        byte[] badEk1024 = [0xFF, 0x0F, .. ek1024[2..]];
+        // one group alone, its share replaced: the shape of most cases below
+        static Action<TlsTestClient> Share(ushort group, byte[] share) => c =>
+        {
+            c.Groups = [group];
+            c.ShareGroups = [group];
+            c.ShareOverride[group] = share;
+        };
         var cases = new (string What, Action<TlsTestClient> Shape, uint Alert)[]
         {
+            ("X448's zero secret (u = 0)", Share(TlsEngine.X448, new byte[56]), 47),
+            ("X448 short", Share(TlsEngine.X448, new byte[55]), 47),
+            ("P-384 off the curve", Share(TlsEngine.Secp384r1, p384Off), 47),
+            ("P-384 short", Share(TlsEngine.Secp384r1, p384[..^1]), 47),
+            ("P-521 off the curve", Share(TlsEngine.Secp521r1, p521Off), 47),
+            ("P-521 short", Share(TlsEngine.Secp521r1, p521[..^1]), 47),
+            ("ffdhe2048 short", Share(0x0100, [.. new byte[254], 2]), 47),
+            ("X25519MLKEM768 short", Share(TlsEngine.X25519MlKem768, [.. ek768, .. new byte[31]]), 47),
+            ("X25519MLKEM768's X25519 half: a zero secret", Share(TlsEngine.X25519MlKem768, [.. ek768, .. new byte[32]]), 47),
+            ("SecP256r1MLKEM768 short", Share(TlsEngine.Secp256r1MlKem768, [.. p256, .. ek768[..^1]]), 47),
+            ("SecP256r1MLKEM768's P-256 half off the curve", Share(TlsEngine.Secp256r1MlKem768, [.. offCurve, .. ek768]), 47),
+            ("SecP256r1MLKEM768's ML-KEM half: the modulus check", Share(TlsEngine.Secp256r1MlKem768, [.. p256, .. badEk768]), 47),
+            ("SecP384r1MLKEM1024 short", Share(TlsEngine.Secp384r1MlKem1024, [.. p384, .. ek1024[..^1]]), 47),
+            ("SecP384r1MLKEM1024's P-384 half off the curve", Share(TlsEngine.Secp384r1MlKem1024, [.. p384Off, .. ek1024]), 47),
+            ("SecP384r1MLKEM1024's ML-KEM half: the modulus check", Share(TlsEngine.Secp384r1MlKem1024, [.. p384, .. badEk1024]), 47),
             ("no supported_versions", c => c.Omit.Add(43), 70),
             ("legacy_version 0x0301", c => c.LegacyVersion = 0x0301, 70),
             ("legacy_version 0x0304", c => c.LegacyVersion = 0x0304, 70),
@@ -223,10 +260,11 @@ public sealed class TlsServerRulesTests
 
     /// <summary>
     /// The second ClientHello is held to 4.2.2: after a HelloRetryRequest for secp256r1 (the
-    /// server's only group; the client shared x25519), a second hello with another session id,
-    /// without the suite the retry chose, with two shares, with a share of another group, or
-    /// offering early data is refused (illegal_parameter); the second hello as it should be is
-    /// taken. The retry itself names the group, the suite and the session id it echoes.
+    /// server's only group; the client shared x25519), a second hello with another session id
+    /// (of another length, or of the same length with another octet), without the suite the
+    /// retry chose, with two shares, with a share of another group, or offering early data is
+    /// refused (illegal_parameter); the second hello as it should be is taken. The retry itself
+    /// names the group, the suite and the session id it echoes.
     /// </summary>
     [Fact]
     [Requirement("RFC9846-4.2.4-6#2", "RFC9846-4.2.2-1#2")]
@@ -237,6 +275,7 @@ public sealed class TlsServerRulesTests
         {
             ("as it should be", null),
             ("another session id", c => c.SessionId = [9, 9, 9]),
+            ("another session id of the same length", c => c.SessionId = [1, 2, 3, 5]),
             ("the suite dropped", c => c.Suites = [0x1302]),
             ("two shares", c => c.RetryShareGroups = [TlsEngine.Secp256r1, TlsEngine.X25519]),
             ("another group's share", c => c.RetryShareGroups = [TlsEngine.X25519]),

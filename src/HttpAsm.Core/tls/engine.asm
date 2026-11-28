@@ -58,9 +58,12 @@ section .text
 
 ; -----------------------------------------------------------------------------
 ; ha_tls_draw: rbx = the connection, rdi = out, rsi = octets: out filled from the
-;   configuration's random source -> eax = 0, or -HTTPASM_TLS_ALERT_INTERNAL_ERROR when the
-;   source failed (the handshake cannot go on: 6.2's internal_error). Clobbers the caller-saved
-;   registers (the source is the caller's C function).
+;   configuration's random source -> rax = 0, or -HTTPASM_TLS_ALERT_INTERNAL_ERROR when the
+;   source failed (the handshake cannot go on: 6.2's internal_error). The whole of rax: a caller
+;   may hand it on as a 64-bit answer (ha_tls_kex_server does, whose caller tests rax's sign;
+;   an eax-only -80, zero-extended, once read there as a share 2^32 - 80 octets long, written
+;   past the output span: tests/HttpAsm.Tests/TlsServerEdgeTests.FailsAtEachDraw). Clobbers the
+;   caller-saved registers (the source is the caller's C function).
 ; -----------------------------------------------------------------------------
 global ha_tls_draw:function hidden (ha_tls_draw.end - ha_tls_draw)
 align 16
@@ -72,11 +75,12 @@ ha_tls_draw:
     mov     rdi, [rax + httpasm_tls13_server_config.random_context]
     call    [rax + httpasm_tls13_server_config.random]
     add     rsp, 8
-    test    eax, eax
+    test    eax, eax                        ; (the callback's int: its upper half is not its)
     jnz     .failed
+    xor     eax, eax
     ret
 .failed:
-    mov     eax, -HTTPASM_TLS_ALERT_INTERNAL_ERROR
+    mov     rax, -HTTPASM_TLS_ALERT_INTERNAL_ERROR   ; (sign-extended: all of rax)
     ret
 .end:
 

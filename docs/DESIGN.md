@@ -2026,6 +2026,26 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      reordered; a fuzzer driving a server from hostile ClientHellos and flights (every tier the
      same transcript, only the allowed answers); the constant-time check over the engine's
      secret handling.
+     State (2026-11-28): 4c1-4c3 done, and 4c5's application data, KeyUpdate, close_notify and
+     AES-GCM limit; 4c4 and post-handshake authentication next, then the constant-time check.
+     RFC 8448's sections 3 and 7 reproduced octet for octet (section 5's retry carries a cookie,
+     which this server, keeping its state, never sends); 17 SslStream handshakes (every suite
+     and key kind, the retry forced) and 22 with `openssl s_client` (every group and scheme it
+     has, its KeyUpdate); the tests' own client (`TlsTestClient`, written apart from the engine)
+     in every group, the post-quantum hybrids among them (OpenSSL 3.0 has none: their first
+     peer), and every rule of the state machine, the records and the hellos; and the edges
+     (`TlsServerEdgeTests`): the random source failing at each draw of every group and key kind,
+     ECDH scalars out of range drawn again, the output span full, partly taken and at AES-GCM's
+     limit, a configuration edited after init, the peer's record_size_limit down to 64 and a
+     record filled to the octet. The fuzzer `tests/fuzz/tls_server.c` drives hostile client
+     streams at every tier (its spans between guard pages); `tests/native/stack.c` runs a
+     ClientHello through the flight on stacks too small (23,904 octets deep at v3: every
+     smaller stack faults in its guard). Found on the way: `ha_tls_draw` answered its failure in
+     eax only, and the key exchange handed that on as a 64-bit answer the server read as a
+     share 2^32 - 80 octets long, written past the output span: a random source failing at a
+     key-exchange draw corrupted the caller's memory (now the whole of rax); and
+     `httpasm_tls13_server_init` checks again the configuration's bounds that keep a connection
+     inside its memory (a caller may edit a configuration after init).
    - **4d, the client**: the client's state machine (Appendix A.1) on the same engine, against
      the 4c server and against OpenSSL, BoringSSL-style servers and .NET; then **4e**, PSK
      resumption, tickets, ticket requests and 0-RTT with anti-replay.

@@ -112,6 +112,49 @@ public sealed unsafe class TlsConfigTests
     }
 
     /// <summary>
+    /// The chains init refuses past what a Certificate message can carry, or whose leaf no
+    /// TLS 1.3 signer reads (-2 each): a certificate of 2^24 octets (cert_data is
+    /// opaque&lt;1..2^24-1&gt;: refused before it is read), a chain whose message body would pass
+    /// 2^24 - 1 octets (two certificates of 8.4 MB after the leaf: each reads, the sum does not
+    /// fit the uint24), and a leaf whose subjectPublicKeyInfo carries a key the library has no
+    /// signer for (X25519's, RFC 8410: the certificate reads, its key does not).
+    /// </summary>
+    [Fact]
+    public void RefusesChainsNoCertificateMessageCarries()
+    {
+        Platform.RequireLinuxX64();
+        TlsInteropTests.Credential p256 = TlsInteropTests.Make("p256");
+        using var key = new LoadedKey(p256.Key);
+        int room = p256.Certificate.Length + 64;
+        Assert.Equal(-2, Init(key.Key, [p256.Certificate, new byte[1 << 24]], null, room, out _, out _));
+
+        using ECDsa issuer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        byte[] Issue(System.Security.Cryptography.X509Certificates.CertificateRequest request)
+        {
+            var generator = System.Security.Cryptography.X509Certificates.X509SignatureGenerator.CreateForECDsa(issuer);
+            using var c = request.Create(new System.Security.Cryptography.X509Certificates.X500DistinguishedName("CN=issuer"), generator,
+                now.AddDays(-1), now.AddDays(1), [1, 2, 3]);
+            return c.RawData;
+        }
+
+        // 8.4 MB of a private extension's value: twice, plus the leaf, over 2^24 - 1
+        using ECDsa big = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var bigRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=big", big, HashAlgorithmName.SHA256);
+        bigRequest.CertificateExtensions.Add(new System.Security.Cryptography.X509Certificates.X509Extension("1.3.6.1.4.1.99999.1", new byte[8_400_000], false));
+        byte[] large = Issue(bigRequest);
+        Assert.True(8 + p256.Certificate.Length + 5 + 2 * (large.Length + 5) - 4 > 0xFFFFFF);
+        Assert.Equal(-2, Init(key.Key, [p256.Certificate, large, large], null, room, out _, out _));
+
+        // an X25519 public key (id-X25519, no parameters) in the leaf
+        var x25519 = new System.Security.Cryptography.X509Certificates.PublicKey(new Oid("1.3.101.110"), null,
+            new AsnEncodedData(RandomNumberGenerator.GetBytes(32)));
+        byte[] leaf = Issue(new System.Security.Cryptography.X509Certificates.CertificateRequest(
+            new System.Security.Cryptography.X509Certificates.X500DistinguishedName("CN=localhost"), x25519, HashAlgorithmName.SHA256));
+        Assert.Equal(-2, Init(key.Key, [leaf], null, leaf.Length + 64, out _, out _));
+    }
+
+    /// <summary>
     /// What init fills: the Certificate message (RFC 9846 4.5.1: an empty context, each entry
     /// its cert_data and no extensions) octet for octet for a chain of three, the library's
     /// groups and suites in order, max_message's default, and the sizes: output_min recomputed

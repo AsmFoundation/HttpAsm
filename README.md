@@ -33,11 +33,16 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 >   however deep BER nests), PEM (`httpasm_pem_read`), private keys from their files
 >   (`httpasm_private_key_load`: PKCS#8, PKCS#1, SEC1), and certificates' structure and public
 >   keys (`httpasm_certificate_read`, `httpasm_public_key_read`, `httpasm_private_key_matches`;
->   chain validation is M3's); and the first parts of the TLS 1.3 engine: its key schedule and
+>   chain validation is M3's); and the TLS 1.3 engine as far as it goes: its key schedule and
 >   record layer (`httpasm_tls13_*`, proven against every secret and record of RFC 8448's
->   traces) and its handshake messages and extensions, each read strictly and in place
+>   traces), its handshake messages and extensions, each read strictly and in place
 >   (`httpasm_tls13_*_read`, `httpasm_tls_extensions_read`; every message of the traces, a
->   model written apart, a fuzzer).
+>   model written apart, a fuzzer), and the server's handshake (`httpasm_tls13_server_*`,
+>   `httpasm_tls13_receive`, `_send`, `_close`, `_key_update`; sans-I/O, the caller's memory and
+>   random source): every group (the post-quantum hybrids X25519MLKEM768, SecP256r1MLKEM768 and
+>   SecP384r1MLKEM1024 among them) and every signature scheme a server key makes, RFC 8448's
+>   flights octet for octet, against OpenSSL (SslStream, `openssl s_client`) and a client of the
+>   tests' own; client authentication comes next.
 >
 > [docs/DESIGN.md](docs/DESIGN.md) holds the decisions, the architecture and the milestones;
 > [benchmarks/](benchmarks/README.md) holds the measurements.

@@ -106,14 +106,36 @@ section .text
 ;                               uint8_t *memory, size_t length)
 ;   Starts a server connection: zeroed, the configuration kept, memory[0..length) split into the
 ;   reassembly span (config->max_message octets) and the output span (the rest, config->output_min
-;   at least). Returns 0, or -1 when length is under config->memory (nothing written). A leaf:
-;   clobbers rax, rcx, rdx, rdi, r8-r11.
+;   at least). Returns 0, or -1 when length is under config->memory, or when the configuration no
+;   longer holds the bounds init gave it (nothing written). A leaf: clobbers rax, rcx, rdx, rdi,
+;   r8-r11.
+;   The configuration is the caller's memory, read live by every connection, and init checked it
+;   once: one edited since (a caller that changed max_message, the lists' counts or output_min
+;   without calling init again) is checked again here where it bounds memory, so the split never
+;   passes memory's end (max_message + output_min, carried out of 64 bits too, within length)
+;   and the lists stay within the arrays the frames copy them into (1 to 16 groups, 1 to 4
+;   suites: the EncryptedExtensions built in the server's frame holds 16 groups). A smaller
+;   output_min than the flight needs is not caught (nothing here can measure a flight): the
+;   engine's own room checks then fail the handshake with internal_error, inside the spans.
 ; -----------------------------------------------------------------------------
 global httpasm_tls13_server_init:function (httpasm_tls13_server_init.end - httpasm_tls13_server_init)
 align 16
 httpasm_tls13_server_init:
     mov     eax, -1
     cmp     rcx, [rsi + httpasm_tls13_server_config.memory]
+    jb      .done
+    mov     r8d, [rsi + httpasm_tls13_server_config.group_count]
+    dec     r8d
+    cmp     r8d, HTTPASM_TLS_GROUPS_MAX - 1
+    ja      .done                           ; 0, or more than the array holds
+    mov     r8d, [rsi + httpasm_tls13_server_config.suite_count]
+    dec     r8d
+    cmp     r8d, 4 - 1
+    ja      .done
+    mov     r8d, [rsi + httpasm_tls13_server_config.max_message]
+    add     r8, [rsi + httpasm_tls13_server_config.output_min]
+    jc      .done                           ; (an output_min near 2^64: no length holds it)
+    cmp     rcx, r8
     jb      .done
     mov     r8, rdi
     mov     r10, rdx

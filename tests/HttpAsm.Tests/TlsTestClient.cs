@@ -708,6 +708,12 @@ internal sealed class TlsTestClient : IDisposable
     /// <returns>The record.</returns>
     public byte[] SealData(byte[] data) => Seal(23, data);
 
+    /// <summary>Sets the sequence number the server's next record is opened under: the
+    /// counterpart of a test moving the server's own (<see cref="TlsServerHarness.WriteSequence"/>),
+    /// so the two keep agreeing.</summary>
+    /// <param name="sequence">The server's next record's sequence number.</param>
+    public void SetReadSequence(ulong sequence) => read.Sequence = sequence;
+
     /// <summary>Our KeyUpdate, protected under the current key, then our next key (7.2).</summary>
     /// <param name="request">update_requested.</param>
     /// <returns>The record.</returns>

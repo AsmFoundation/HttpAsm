@@ -1756,7 +1756,12 @@ int httpasm_tls13_server_config_init(httpasm_tls13_server_config *config,
 
 /* Starts a server connection in memory[0..length), at least config->memory octets (the
  * reassembly span, then the output span), which the connection uses until it is wiped. The
- * configuration must outlive the connection. Returns 0, or -1 when length is too small. */
+ * configuration must outlive the connection and stay as init left it while any connection uses
+ * it (every connection reads it live). Returns 0, or -1 when length is too small, or when the
+ * configuration was edited since init past the bounds that keep a connection inside its memory
+ * (max_message + output_min over length, 0 or more than 16 groups, 0 or more than 4 suites).
+ * Footgun: an output_min lowered by hand is not caught; such a connection fails its handshake
+ * with internal_error when its flight does not fit, without writing past its spans. */
 int httpasm_tls13_server_init(httpasm_tls13_connection *c, const httpasm_tls13_server_config *config,
                               uint8_t *memory, size_t length);
 

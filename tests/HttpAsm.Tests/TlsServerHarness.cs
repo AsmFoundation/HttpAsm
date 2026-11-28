@@ -22,6 +22,11 @@ internal sealed class RandomScript
     /// internal_error.</summary>
     public bool Broken { get; set; }
 
+    /// <summary>The one draw refused, counted from 1 in the engine's order (0: none): a test
+    /// walks it over every draw of a handshake to reach each draw site's failure path, which a
+    /// source that fails from the start (<see cref="Broken"/>) never passes the first of.</summary>
+    public int FailAt { get; init; }
+
     /// <summary>The lengths of the draws the engine made, in order.</summary>
     public List<int> Lengths { get; } = [];
 
@@ -50,7 +55,7 @@ internal sealed class RandomScript
     public bool Next(Span<byte> output)
     {
         Lengths.Add(output.Length);
-        if (Broken)
+        if (Broken || Lengths.Count == FailAt)
         {
             return false;
         }
@@ -78,17 +83,31 @@ internal sealed class RandomScript
     }
 }
 
+/// <summary>Changes a configuration in place (a pointer type cannot be a generic argument, so
+/// not an Action).</summary>
+/// <param name="config">The configuration.</param>
+internal unsafe delegate void ConfigSetter(TlsServerConfig* config);
+
 /// <summary>
 /// One TLS 1.3 server connection of the library's engine, in native memory this harness owns: the
 /// private key (httpasm_private_key_load), the configuration, the Certificate message's buffer,
 /// the connection and its spans, and an input buffer records are copied into (a protected record
 /// is opened in place there). Records go in (<see cref="Receive"/>), the output comes out
-/// (<see cref="TakeOutput"/>).
+/// (<see cref="TakeOutput()"/>).
 /// </summary>
 internal sealed unsafe class TlsServerHarness : IDisposable
 {
     /// <summary>The input buffer's size: several whole records.</summary>
     private const int InputSize = 1 << 18;
+
+    /// <summary>
+    /// Where the connection keeps our record key's sequence number: httpasm_tls13_connection's
+    /// .write (1696: the fields before it, httpasm_abi.inc's struc, summed) plus the record key's
+    /// .sequence (8). The C header keeps the connection opaque; the tests that reach AES-GCM's
+    /// 2^24.5-record limit set it instead of sealing 23 million records, and check first that it
+    /// holds what it must (the records sent so far), so a moved field fails them loudly.
+    /// </summary>
+    private const int WriteSequenceOffset = 1696 + 8;
 
     /// <summary>The loaded private key.</summary>
     private readonly PrivateKey* key;
@@ -111,6 +130,10 @@ internal sealed unsafe class TlsServerHarness : IDisposable
     /// <summary>The script's handle, the random callback's context.</summary>
     private GCHandle source;
 
+    /// <summary>Whether server_init took the connection (so its spans exist and Dispose wipes
+    /// them).</summary>
+    private bool started;
+
     /// <summary>The random source the engine draws from.</summary>
     public RandomScript Random { get; }
 
@@ -130,10 +153,16 @@ internal sealed unsafe class TlsServerHarness : IDisposable
     /// <param name="suites">Its suites in order (null: the library's).</param>
     /// <param name="flags">HTTPASM_TLS_CLIENT_AUTH_* and HTTPASM_TLS_SERVER_GROUP_ORDER.</param>
     /// <param name="maxMessage">The largest handshake message gathered (0: the default).</param>
+    /// <param name="beforeStart">Changes the configuration after init and before the
+    /// connection starts: what a caller that edits a configuration it already initialized does
+    /// (its sizes then no longer hold), so a test can prove the engine still never writes past
+    /// its spans. Null: nothing changed.</param>
+    /// <param name="libraryRandom">Draw from the library's own source (httpasm_tls_random) instead
+    /// of <see cref="Random"/>, whose script then sees no draws.</param>
     /// <exception cref="InvalidOperationException">The key does not load, or the configuration
     /// is accepted but the connection does not start.</exception>
     public TlsServerHarness(byte[] keyFile, IReadOnlyList<byte[]> chain, RandomScript? random = null, ushort[]? groups = null,
-        ushort[]? suites = null, uint flags = 0, uint maxMessage = 0)
+        ushort[]? suites = null, uint flags = 0, uint maxMessage = 0, ConfigSetter? beforeStart = null, bool libraryRandom = false)
     {
         Random = random ?? new RandomScript();
         source = GCHandle.Alloc(Random);
@@ -142,6 +171,9 @@ internal sealed unsafe class TlsServerHarness : IDisposable
         int total = 8 + chain.Sum(c => c.Length + 5);
         certificate = (byte*)NativeMemory.AllocZeroed((nuint)total);
         connection = (TlsConnection*)NativeMemory.AlignedAlloc((nuint)sizeof(TlsConnection), 16);
+        // zeroed: a connection server_init refused is left as it was (nothing written), and
+        // Dispose must not take garbage for its span pointers (it wipes only a started one too)
+        new Span<byte>(connection, sizeof(TlsConnection)).Clear();
         input = (byte*)NativeMemory.AllocZeroed(InputSize);
         fixed (byte* k = keyFile)
         {
@@ -155,6 +187,14 @@ internal sealed unsafe class TlsServerHarness : IDisposable
         config->Key = key;
         config->Random = &Draw;
         config->RandomContext = (void*)GCHandle.ToIntPtr(source);
+        if (libraryRandom)
+        {
+            // the export the C header documents for this field (its context unused); the
+            // library is the one the bindings already loaded, so Load only finds it
+            nint library = NativeLibrary.Load("httpasm", typeof(Native).Assembly, null);
+            config->Random = (delegate* unmanaged<void*, byte*, nuint, int>)NativeLibrary.GetExport(library, "httpasm_tls_random");
+            config->RandomContext = null;
+        }
         if (groups is not null)
         {
             for (int i = 0; i < groups.Length; i++)
@@ -190,8 +230,13 @@ internal sealed unsafe class TlsServerHarness : IDisposable
             return;
         }
 
-        memory = (byte*)NativeMemory.AllocZeroed(config->Memory);
-        if (Native.Tls13ServerInit(connection, config, memory, config->Memory) != 0)
+        // the memory is sized before the change: a changed configuration meets the memory init
+        // measured (server_init checks the length against config->memory, which init wrote)
+        nuint size = config->Memory;
+        beforeStart?.Invoke(config);
+        memory = (byte*)NativeMemory.AllocZeroed(size);
+        started = Native.Tls13ServerInit(connection, config, memory, size) == 0;
+        if (!started)
         {
             Dispose();
             throw new InvalidOperationException("the connection does not start");
@@ -290,14 +335,48 @@ internal sealed unsafe class TlsServerHarness : IDisposable
 
     /// <summary>Takes everything queued in the output.</summary>
     /// <returns>The octets.</returns>
-    public byte[] TakeOutput()
+    public byte[] TakeOutput() => TakeOutput(int.MaxValue);
+
+    /// <summary>Takes the first octets queued in the output, as a caller whose socket took only
+    /// part of them does: the rest stays queued, ahead of what comes next.</summary>
+    /// <param name="most">The octets to take at most.</param>
+    /// <returns>The octets taken.</returns>
+    public byte[] TakeOutput(int most)
     {
         byte* o;
         nuint n = Native.Tls13Output(connection, &o);
+        n = Math.Min(n, (nuint)most);
         byte[] taken = new ReadOnlySpan<byte>(o, (int)n).ToArray();
         Native.Tls13OutputDone(connection, n);
         return taken;
     }
+
+    /// <summary>The octets queued in the output, left there.</summary>
+    public int Queued
+    {
+        get
+        {
+            byte* o;
+            return (int)Native.Tls13Output(connection, &o);
+        }
+    }
+
+    /// <summary>
+    /// Our record key's next sequence number, read and written in the connection itself
+    /// (<see cref="WriteSequenceOffset"/>): white-box, for the tests of AES-GCM's record limit.
+    /// </summary>
+    /// <remarks>Footgun: written while a test's client keeps its own count, the two disagree
+    /// until the client's is set to match (<see cref="TlsTestClient.SetReadSequence"/>).</remarks>
+    public ulong WriteSequence
+    {
+        get => *(ulong*)((byte*)connection + WriteSequenceOffset);
+        set => *(ulong*)((byte*)connection + WriteSequenceOffset) = value;
+    }
+
+    /// <summary>httpasm_tls13_negotiated with every out pointer NULL (the C header allows each):
+    /// the progress alone.</summary>
+    /// <returns>The progress.</returns>
+    public int Progress() => Native.Tls13Negotiated(connection, null, null, null);
 
     /// <summary>httpasm_tls13_send.</summary>
     /// <param name="data">Application data.</param>
@@ -331,9 +410,11 @@ internal sealed unsafe class TlsServerHarness : IDisposable
     /// <summary>Wipes the connection and frees everything the harness holds.</summary>
     public void Dispose()
     {
-        if (memory != null)
+        // only a started connection has spans to wipe (an unstarted one is zeroed: nothing secret)
+        if (started)
         {
             Native.Tls13Wipe(connection);
+            started = false;
         }
 
         NativeMemory.Free(memory);
