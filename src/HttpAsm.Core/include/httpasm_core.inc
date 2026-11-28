@@ -179,9 +179,11 @@ extern ha_ipv6_literal      ; [rsp] = past an IP-literal's IPv6address and "]", 
 ; effective address, which lea takes: "rbp + X", "rdi + 32") are public from here on, in the
 ; ConstantTime configuration only (elsewhere nothing). For values public by design that are
 ; computed from a secret, such as ML-KEM's matrix seed rho, which comes out of G(d) with the
-; secret sigma and is then published in the encapsulation key. octets is an immediate. address may
-; be rsp-based: it is taken before rsp moves (rax parked in the red zone meanwhile, which signal
-; frames skip). Keeps every register; clobbers the flags.
+; secret sigma and is then published in the encapsulation key. octets is an immediate, or a
+; register other than rax (rax holds the address by the time the length is stored; rdi and rdx
+; are still the caller's then). address may be rsp-based: it is taken before rsp moves (rax
+; parked in the red zone meanwhile, which signal frames skip). Keeps every register; clobbers the
+; flags.
 ; -----------------------------------------------------------------------------
 %macro HA_DECLASSIFY_MEM 2
 %ifdef HTTPASM_CT

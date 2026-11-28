@@ -1130,6 +1130,10 @@ httpasm_private_key_load:
     pop     rcx
     test    eax, eax
     jnz     .ec_no
+    ; d G is the key's public half: computed from the secret d, published by every certificate
+    ; of the key and compared below with the file's copy and later with a certificate's
+    ; (httpasm_private_key_matches); the whole field (its octets past the point are zeros)
+    HA_DECLASSIFY_MEM r12 + httpasm_private_key.public, 136   ; (public by design: the public key)
     lea     rdi, [r12 + httpasm_private_key.secret]   ; the scalar kept
     lea     rsi, [rbp + KF_SEED]
     push    rcx
@@ -1237,12 +1241,18 @@ httpasm_private_key_load:
     rep     movsb                           ; the public key, the prepared key's own
     pop     rcx
     pop     rsi
-    ; a public key given (PKCS#8 v2): the same
+    ; the public key A, derived from the secret seed (the prepared key's copy stays as the signer
+    ; left it), is published by every certificate of the key: compared below with the file's and
+    ; later with a certificate's (httpasm_private_key_matches)
+    HA_DECLASSIFY_MEM r12 + httpasm_private_key.public, 136   ; (public by design: the public key)
+    ; a public key given (PKCS#8 v2): the same, compared with the copy just made public (the
+    ; prepared key's own octets are equal but still marked secret in the ConstantTime build)
     mov     rdx, [rbp + KF_POINT_LENGTH]
     test    rdx, rdx
     jz      .ed_done
     cmp     rdx, rcx
     jne     .ed_no
+    lea     rsi, [r12 + httpasm_private_key.public]
     lea     rdi, [rbp + KF_POINT]
     repe    cmpsb                           ; (public: keys)
     jne     .ed_no

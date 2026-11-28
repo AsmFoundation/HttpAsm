@@ -115,7 +115,9 @@ tests/ct/dudect.sh                                 # constant time on the hardwa
 
 `tests/ct/` checks that no secret steers the code. `run.sh` builds the ConstantTime
 configuration and runs every function of the C ABI that takes a secret under valgrind's memcheck
-with the secret marked undefined, at every tier valgrind's CPU offers: a branch, a memory address
+with the secret marked undefined, at every tier valgrind's CPU offers, and TLS 1.3's server
+engine through 13 whole handshakes (its key and every random octet it draws secret; every group,
+key kind and suite, client authentication, KeyUpdates, forgeries): a branch, a memory address
 or a system call argument that a secret reaches fails it, and a negative control must be caught
 first. `dudect.sh` times the Release library on this CPU, every tier it has included: a fixed
 special secret against random ones, compared by Welch's t-test. It runs locally, like the

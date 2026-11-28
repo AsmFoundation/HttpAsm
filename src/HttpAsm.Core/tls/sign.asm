@@ -262,6 +262,13 @@ ha_tls_sign:
     ; eax = the signer's answer; r15 = the scalar's octets (r's and s's); the raw r || s as DER
     test    eax, eax
     jnz     .internal
+    ; r and s, computed from the secret key and nonce, are the signature the CertificateVerify
+    ; publishes: DER's minimal INTEGERs branch on their leading octets, and the message's length
+    ; (on the wire, in its record's) follows them
+%ifdef HTTPASM_CT
+    lea     rcx, [r15 * 2]                  ; (the length for the declassification only: other
+%endif                                      ; builds assemble neither, so they are unchanged)
+    HA_DECLASSIFY_MEM rsp + SG_RAW, rcx     ; (public by design: the signature)
     lea     rdi, [rsp + SG_DER]
     lea     rsi, [rsp + SG_RAW]
     mov     ecx, r15d
@@ -348,7 +355,8 @@ ha_tls_sign:
 ; .integer: rdi = out, rsi = a big-endian value, ecx = its octets: DER's INTEGER of it (02, the
 ; length, the octets without leading zeros, one kept, and a 0 first when the top bit is set: a
 ; non-negative INTEGER, X.690 8.3) -> rax = the octets written. r and s are public (they are
-; the signature): branching on them is fine. A leaf: clobbers rcx, rdx, rsi, rdi, r8.
+; the signature, declassified as such at .ecdsa before this runs): branching on them is fine. A
+; leaf: clobbers rcx, rdx, rsi, rdi, r8.
 .integer:
     mov     edx, ecx
 .skip:

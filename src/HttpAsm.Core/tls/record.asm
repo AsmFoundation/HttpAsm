@@ -408,6 +408,9 @@ httpasm_tls13_open:
     test    rdx, rdx
     js      .done                           ; zeros only: no content type (5.4)
     movzx   ecx, byte [rsi + rdx]
+    ; the content type, likewise: what the receiver dispatches the content to (handshake, alert,
+    ; application data), which its answer shows whatever the timing
+    HA_DECLASSIFY rcx                       ; (public by design: the record's kind)
     mov     [r15], cl
     mov     rax, rdx                        ; the content's octets: those before its type
 .done:

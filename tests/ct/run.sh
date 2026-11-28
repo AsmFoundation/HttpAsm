@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # run.sh - the constant-time check: every function of the C ABI that takes a secret runs under
-# valgrind's memcheck with its secrets marked undefined (tests/native/ct.c), against the
+# valgrind's memcheck with its secrets marked undefined (tests/native/ct.c), and so does TLS 1.3's
+# server engine through whole handshakes with a client of ct.c's own, against the
 # ConstantTime build (Directory.Build.props: HA_DECLASSIFY's sites, the few values computed from a
 # secret whose outcome is public by design, marked defined; and ADX taken with BMI2, which
 # valgrind's CPU executes but does not report). memcheck reports every branch, memory address or

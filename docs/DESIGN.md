@@ -862,6 +862,35 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      4096 bits with both paddings, key preparation, verification, FFDHE2048) says "no
      difference" at the best tier and at v1, every process within 0.991x to 1.010x. Measured:
      under a minute with the build (the memcheck run itself about five seconds).
+     *The server engine* (2026-11-28, `engine()` in `tests/native/ct.c`): 13 whole TLS 1.3
+     handshakes against a client the check builds from the library's primitives (its own secrets
+     unmarked; it reads the server's output only once that is marked public, so every report is
+     the server's), with the server's key loaded from a PEM text whose base64 is secret and every
+     octet its random source draws secret: every group's key exchange (ffdhe2048 for the five
+     FFDHE groups, whose code is one; the three hybrids), each kind of server key (RSA, RSA-PSS,
+     P-256, P-384, P-521, Ed25519, Ed448), the three suites, a HelloRetryRequest, middlebox
+     compatibility, client authentication (P-256 and RSA clients, one declined, one required),
+     post-handshake authentication answered and declined, KeyUpdates asked by each side,
+     application data and close_notify each way, a forged Finished and a forged record. What the
+     engine publishes by design is declassified where it is published, each site with its
+     reason: the handshake messages it sends, once built (the ServerHello's random and share, the
+     CertificateVerify's signature, the Finished's verify_data, a post-handshake request's
+     context: they go to the peer and into the transcript, which signatures and verifications
+     read); the handshake messages and alerts it receives, once opened (it parses them); an
+     opened record's content type, beside its length; ECDSA's r and s before their DER; and a
+     loaded key's public half (d G, an Edwards key's A). Application data stays secret both
+     ways, and so does every key and the Finished compare's operands. *Its first run found*,
+     beyond those policy sites: the key loader compared a file's EC and Ed25519 public key with
+     the one it derives from the secret scalar or seed, and httpasm_private_key_matches compared
+     a certificate's with it, both while that derived key was still secret (now it is
+     declassified as it is made, and the Edwards compare reads the public copy); and the
+     CertificateVerify's DER encoding of r and s branched on their leading octets, which made
+     the message's length, and its record's, follow them (public, as the signature is: now
+     declassified first). Two mutations prove the check sees the engine: a branch on received
+     application data, and the Finished compare exiting at its first differing octet, each
+     reported at its site (then reverted). Shipped code is unchanged but for the Edwards
+     compare's source (the same octets). Measured: the memcheck run grew from about 5 to about
+     10.5 seconds (WSL, all three tiers).
      *On the hardware,* `tests/ct/dudect.sh` (local only, like the benchmarks: a shared runner's
      timing is noise) applies dudect's method (Reparaz, Balasch and Verbauwhede, DATE 2017) to
      what memcheck cannot run or cannot see: the best tier's SHA-extension and VAES versions (and
@@ -2026,7 +2055,8 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      reordered; a fuzzer driving a server from hostile ClientHellos and flights (every tier the
      same transcript, only the allowed answers); the constant-time check over the engine's
      secret handling.
-     State (2026-11-28): 4c1-4c5 done; the constant-time check over the engine next, then 4d.
+     State (2026-11-28): 4c1-4c5 done, and the engine's constant-time check (M2's proof below:
+     13 whole handshakes under memcheck); 4d next.
      Post-handshake authentication (4c5, 4.7.2): `httpasm_tls13_request_certificate` queues a
      CertificateRequest with 16 random octets of context (one record of 52 octets: the smallest
      record_size_limit holds it) when the client offered post_handshake_auth and the connection

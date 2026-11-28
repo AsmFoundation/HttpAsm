@@ -21,9 +21,16 @@
  * tampered ciphertext: implicit rejection must not branch); FFDHE's public key and shared secret
  * (ffdhe2048); RSA's prepared keys and PKCS#1 v1.5 and PSS signatures at 1024 bits (the generic
  * arithmetic) and 2048 (v3's own k = 16 square and product); the ASN.1 reader, PEM and the
- * private keys' loader over secret key files (encodings(), keys()); and TLS 1.3's key schedule
+ * private keys' loader over secret key files (encodings(), keys()); TLS 1.3's key schedule
  * (every derivation from a secret IKM) and record layer (keys from a secret traffic secret,
- * secret contents sealed and opened, a forged record refused) for its three suites.
+ * secret contents sealed and opened, a forged record refused) for its three suites; and the
+ * server engine (engine()): 13 whole handshakes against a client of this file's own, the
+ * server's key loaded from a secret PEM text and every octet its random source draws secret -
+ * every group's key exchange (ffdhe2048 standing for the five FFDHE groups, whose code is one),
+ * each kind of server key, each suite, a HelloRetryRequest,
+ * client authentication in the handshake and after it, KeyUpdates, application data and
+ * close_notify both ways, a forged Finished and a forged record (see "the engine" below for
+ * what the engine publishes by design, and where).
  *
  * Outside valgrind the client requests do nothing and the run proves nothing: the program then
  * says so and exits 2. Usage: valgrind --error-exitcode=1 ct (tests/ct/run.sh).
@@ -789,6 +796,1096 @@ static void tls13(const char *tier)
     }
 }
 
+/* ---- the engine: whole TLS 1.3 handshakes through the server engine -------------------------
+ * A server connection's secrets: its key's private numbers (the key loaded from a PEM text whose
+ * base64 is secret, as keys() loads one, then used as the loader left it), every octet its random
+ * source draws (ct_draw marks each draw secret: the ephemeral keys, ML-KEM's message, the
+ * signatures' salts and hedging - and the server random and a post-handshake request's context
+ * too, which the engine itself must publish), everything derived from them (shared secrets,
+ * traffic secrets, record keys), and application data (secret when the server sends it; opened
+ * under a secret key when it receives it). What the engine publishes by design, each at its site
+ * with its reason (HA_DECLASSIFY_MEM): the handshake messages it sends, once built (their octets
+ * go to the peer and into the transcript); the handshake messages and alerts it receives, once
+ * opened (it parses and acts on them); an opened record's content type and length
+ * (tls/record.asm); an ECDSA signature's r and s before their DER (tls/sign.asm). Nothing else
+ * of a secret may steer a branch, an address or a system call, down every path a secret takes:
+ * each group's key exchange (ffdhe2048 for the five FFDHE groups, which share their code), each
+ * kind of server key's CertificateVerify, the three suites, a HelloRetryRequest, middlebox
+ * compatibility's change_cipher_spec, client authentication in the handshake (with a key, and
+ * declined) and after it (answered, and declined), KeyUpdates both ways, application data both
+ * ways, close_notify both ways, a forged Finished and a forged record.
+ * The client is this file's own, built from the library's primitives (key shares, the key
+ * schedule, the record layer, signatures): just enough TLS 1.3 to take the server down those
+ * paths. Its own secrets are not marked (it is not under test), and it reads the server's output
+ * only after marking it public (those octets are on the wire), so memcheck's reports can come
+ * from the server's side only. */
+
+#define CT_TLS_BUFFER 32768                     /* a transcript's, a flight's, a hello's room */
+#define CT_NONE (-1)                            /* ct_scenario: no client key, no request */
+
+/* The key kinds a server signs with, in ct_keys. */
+enum { CK_RSA, CK_RSA_PSS, CK_P256, CK_P384, CK_P521, CK_ED25519, CK_ED448, CK_COUNT };
+
+/* ct_key: a key of one kind: its PKCS#8 file (DER), a certificate of its public key, the scheme
+ * it signs with here, and the same key prepared for this file's client, whose client
+ * authentication signs with it. Built once (ct_key_files); the server's copies are loaded from
+ * the files at each tier (ct_server_keys), secret. */
+typedef struct {
+    int kind;                                   /* HTTPASM_KEY_* */
+    uint16_t scheme;                            /* the SignatureScheme (the client offers only it) */
+    uint8_t der[2400];
+    size_t der_length;
+    uint8_t certificate[1600];
+    size_t certificate_length;
+    uint8_t scalar[66];                         /* a curve key's d, the curve's octets */
+    httpasm_ed25519_private_key ed25519;
+    httpasm_ed448_private_key ed448;
+    httpasm_rsa_private_key rsa;
+} ct_key;
+
+static ct_key ct_keys[CK_COUNT];
+static httpasm_private_key ct_server_keys[CK_COUNT];
+
+/* ct_name: a Name of one attribute (CN "ct"), the certificates' issuer and subject. */
+static const uint8_t ct_name[] = { 0x30, 0x0D, 0x31, 0x0B, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x02, 'c', 't' };
+
+/* ct_certificate: a v1 certificate (RFC 5280 4.1: no version field, so no extensions) of a
+ * subjectPublicKeyInfo, signed by nobody: its signature 64 zero octets under Ed25519's
+ * identifier. The engine reads its own chain's structure and key only, and the client's leaf
+ * likewise (chain validation is M3's), so nothing verifies it.
+ *   spki, n  the subjectPublicKeyInfo's DER; out  1600 octets of room.
+ * Returns the certificate's octets. */
+static size_t ct_certificate(const uint8_t *spki, size_t n, uint8_t *out)
+{
+    static const uint8_t algorithm[] = { 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70 };
+    static const uint8_t validity[] = {
+        0x30, 0x1E, 0x17, 0x0D, '2', '6', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0', 'Z',
+        0x17, 0x0D, '3', '6', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0', 'Z',
+    };
+    uint8_t tbs[1500], body[1600], signature[65] = { 0 };   /* (0 unused bits, then the zeros) */
+    size_t t = 0;
+    tbs[t++] = 0x02, tbs[t++] = 0x01, tbs[t++] = 0x01;      /* serialNumber 1 */
+    memcpy(tbs + t, algorithm, sizeof algorithm), t += sizeof algorithm;
+    memcpy(tbs + t, ct_name, sizeof ct_name), t += sizeof ct_name;
+    memcpy(tbs + t, validity, sizeof validity), t += sizeof validity;
+    memcpy(tbs + t, ct_name, sizeof ct_name), t += sizeof ct_name;
+    memcpy(tbs + t, spki, n), t += n;
+    size_t b = put_tlv(body, 0x30, tbs, t);
+    memcpy(body + b, algorithm, sizeof algorithm), b += sizeof algorithm;
+    b += put_tlv(body + b, 0x03, signature, sizeof signature);
+    return put_tlv(out, 0x30, body, b);
+}
+
+/* ct_integer: a non-negative INTEGER of a big-endian value at out (a 0 octet first when its top
+ * bit is set; leading zeros kept off but one), as DER writes RSA's numbers and ECDSA's r and s.
+ *   v, m  the value's octets (at most 299); out  258 octets of room at least (put_tlv's bound).
+ * Returns the element's octets. */
+static size_t ct_integer(const uint8_t *v, size_t m, uint8_t *out)
+{
+    uint8_t number[300];
+    while (m > 1 && v[0] == 0)
+        v++, m--;
+    size_t pad = (v[0] & 0x80) ? 1 : 0;
+    number[0] = 0;
+    memcpy(number + pad, v, m);
+    return put_tlv(out, 0x02, number, m + pad);
+}
+
+/* ct_key_files: ct_keys, each as a PKCS#8 file, a certificate and the client's prepared key: the
+ * RSA keys from the 2048-bit numbers above (rsaEncryption, then id-RSASSA-PSS without
+ * parameters: PSS signatures only); P-256, P-384 and P-521 with scalars below n (the top octet 1)
+ * and their public keys in the files (ECPrivateKey's [1] publicKey, which the loader compares
+ * with the d G it computes); Ed25519 as OneAsymmetricKey v2 (its publicKey [1], compared
+ * likewise) and Ed448 as v1. Built from public octets: the secrecy is the server's loading's.
+ * Returns 0, or 1 with the reason printed. */
+static int ct_key_files(void)
+{
+    static const uint8_t version0[] = { 0x02, 0x01, 0x00 };
+    static uint8_t body[2400], inner[2400], spki[1700], bits[512], numbers[7][257];
+    size_t at, lengths[7];
+    for (int i = 0; i < 7; i++)
+        lengths[i] = hex_octets(rsa_2048[i], numbers[i]);
+    /* RSA: RSAPrivateKey { 0, n, e, d (q's octets stand in: the loader ignores d), p, q, dp, dq,
+     * qinv }, RSAPublicKey { n, e }; the two algorithms */
+    static const int order[8] = { 0, 1, 3, 2, 3, 4, 5, 6 };
+    static uint8_t rsakey[2100], rsapub[600];
+    at = 0;
+    uint8_t zero = 0;
+    at += put_tlv(body + at, 0x02, &zero, 1);
+    for (int i = 0; i < 8; i++)
+        at += ct_integer(numbers[order[i]], lengths[order[i]], body + at);
+    size_t rsa_length = put_tlv(rsakey, 0x30, body, at);
+    at = ct_integer(numbers[0], lengths[0], body);
+    at += ct_integer(numbers[1], lengths[1], body + at);
+    size_t pub_length = put_tlv(rsapub + 1, 0x30, body, at) + 1;
+    rsapub[0] = 0;                                          /* the BIT STRING's unused bits */
+    static const uint8_t rsa_algorithms[2][15] = {
+        { 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00 },
+        { 0x30, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A },
+    };
+    httpasm_rsa_private_numbers prepared = {
+        numbers[0], lengths[0], numbers[1], lengths[1], numbers[2], lengths[2], numbers[3], lengths[3],
+        numbers[4], lengths[4], numbers[5], lengths[5], numbers[6], lengths[6],
+    };
+    for (int r = 0; r < 2; r++) {
+        ct_key *k = &ct_keys[r == 0 ? CK_RSA : CK_RSA_PSS];
+        size_t algorithm_length = r == 0 ? 15 : 13;
+        k->kind = r == 0 ? HTTPASM_KEY_RSA : HTTPASM_KEY_RSA_PSS;
+        k->scheme = r == 0 ? HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA256 : HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA256;
+        at = 0;
+        memcpy(body + at, version0, 3), at += 3;
+        memcpy(body + at, rsa_algorithms[r], algorithm_length), at += algorithm_length;
+        at += put_tlv(body + at, 0x04, rsakey, rsa_length);
+        k->der_length = put_tlv(k->der, 0x30, body, at);
+        at = 0;
+        memcpy(body + at, rsa_algorithms[r], algorithm_length), at += algorithm_length;
+        at += put_tlv(body + at, 0x03, rsapub, pub_length);
+        k->certificate_length = ct_certificate(spki, put_tlv(spki, 0x30, body, at), k->certificate);
+        if (httpasm_rsa_private_key_init(&k->rsa, &prepared) != 0) {
+            fprintf(stderr, "ct: the engine's RSA key did not prepare\n");
+            return 1;
+        }
+    }
+    /* the curves: PKCS#8 { 0, { id-ecPublicKey, the curve }, ECPrivateKey { 1, d, [1] point } } */
+    static const struct { int index, kind; size_t size; uint8_t oid[10]; size_t oid_length; uint16_t scheme; } curves[3] = {
+        { CK_P256, HTTPASM_KEY_P256, 32, { 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 }, 10,
+          HTTPASM_TLS_SCHEME_ECDSA_SECP256R1_SHA256 },
+        { CK_P384, HTTPASM_KEY_P384, 48, { 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22 }, 7, HTTPASM_TLS_SCHEME_ECDSA_SECP384R1_SHA384 },
+        { CK_P521, HTTPASM_KEY_P521, 66, { 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23 }, 7, HTTPASM_TLS_SCHEME_ECDSA_SECP521R1_SHA512 },
+    };
+    static const uint8_t ec_oid[] = { 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+    for (size_t c = 0; c < 3; c++) {
+        ct_key *k = &ct_keys[curves[c].index];
+        size_t size = curves[c].size;
+        k->kind = curves[c].kind;
+        k->scheme = curves[c].scheme;
+        fill(k->scalar, size, (unsigned)(600 + c));
+        k->scalar[0] = 1;                                   /* below n */
+        uint8_t point[133];
+        int made = size == 32 ? httpasm_p256_public_key(point, k->scalar)
+                 : size == 48 ? httpasm_p384_public_key(point, k->scalar) : httpasm_p521_public_key(point, k->scalar);
+        if (made != 0) {
+            fprintf(stderr, "ct: the engine's curve key %zu made no public key\n", c);
+            return 1;
+        }
+        bits[0] = 0;
+        memcpy(bits + 1, point, 2 * size + 1);
+        uint8_t bit_string[512], ec[512], algorithm[512], alg[512];   /* (room past need: put_tlv may write 255 + 3) */
+        size_t bl = put_tlv(bit_string, 0x03, bits, 2 * size + 2), e = 0;
+        uint8_t one = 1;
+        e += put_tlv(ec + e, 0x02, &one, 1);
+        e += put_tlv(ec + e, 0x04, k->scalar, size);
+        e += put_tlv(ec + e, 0xA1, bit_string, bl);
+        size_t il = put_tlv(inner, 0x30, ec, e), a = 0;
+        memcpy(alg + a, ec_oid, sizeof ec_oid), a += sizeof ec_oid;
+        memcpy(alg + a, curves[c].oid, curves[c].oid_length), a += curves[c].oid_length;
+        size_t al = put_tlv(algorithm, 0x30, alg, a);
+        at = 0;
+        memcpy(body + at, version0, 3), at += 3;
+        memcpy(body + at, algorithm, al), at += al;
+        at += put_tlv(body + at, 0x04, inner, il);
+        k->der_length = put_tlv(k->der, 0x30, body, at);
+        at = 0;
+        memcpy(body + at, algorithm, al), at += al;
+        memcpy(body + at, bit_string, bl), at += bl;
+        k->certificate_length = ct_certificate(spki, put_tlv(spki, 0x30, body, at), k->certificate);
+    }
+    /* the Edwards keys: PKCS#8 { version, { the OID }, OCTET STRING { OCTET STRING seed } [, [1]
+     * publicKey] } */
+    static const struct { int index, kind; size_t size; uint8_t oid; uint16_t scheme; int v2; } edwards_keys[2] = {
+        { CK_ED25519, HTTPASM_KEY_ED25519, 32, 0x70, HTTPASM_TLS_SCHEME_ED25519, 1 },
+        { CK_ED448, HTTPASM_KEY_ED448, 57, 0x71, HTTPASM_TLS_SCHEME_ED448, 0 },
+    };
+    for (size_t d = 0; d < 2; d++) {
+        ct_key *k = &ct_keys[edwards_keys[d].index];
+        size_t size = edwards_keys[d].size;
+        uint8_t seed[57], pub[57], curve_key[512];   /* (room past need: put_tlv may write 255 + 3) */
+        k->kind = edwards_keys[d].kind;
+        k->scheme = edwards_keys[d].scheme;
+        fill(seed, size, (unsigned)(700 + d));
+        if (size == 32) {
+            httpasm_ed25519_public_key(pub, seed);
+            httpasm_ed25519_private_key_init(&k->ed25519, seed);
+        } else {
+            httpasm_ed448_public_key(pub, seed);
+            httpasm_ed448_private_key_init(&k->ed448, seed);
+        }
+        const uint8_t algorithm[7] = { 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, edwards_keys[d].oid };
+        const uint8_t version[3] = { 0x02, 0x01, (uint8_t)edwards_keys[d].v2 };
+        size_t cl = put_tlv(curve_key, 0x04, seed, size);
+        bits[0] = 0;
+        memcpy(bits + 1, pub, size);
+        at = 0;
+        memcpy(body + at, version, 3), at += 3;
+        memcpy(body + at, algorithm, 7), at += 7;
+        at += put_tlv(body + at, 0x04, curve_key, cl);
+        if (edwards_keys[d].v2)
+            at += put_tlv(body + at, 0x81, bits, size + 1);  /* [1] IMPLICIT BIT STRING */
+        k->der_length = put_tlv(k->der, 0x30, body, at);
+        at = 0;
+        memcpy(body + at, algorithm, 7), at += 7;
+        at += put_tlv(body + at, 0x03, bits, size + 1);
+        k->certificate_length = ct_certificate(spki, put_tlv(spki, 0x30, body, at), k->certificate);
+    }
+    return 0;
+}
+
+/* A handshake to run: the client's offer, the server's configuration, what the client answers. */
+typedef struct {
+    const char *name;
+    uint16_t suite;                             /* the client's only cipher suite */
+    uint16_t share;                             /* the group of its first key share */
+    uint16_t groups[2];                         /* its supported_groups (0: share's alone) */
+    int server_key;                             /* CK_*: the server's key */
+    uint32_t flags;                             /* the configuration's (HTTPASM_TLS_CLIENT_AUTH_*, _SERVER_GROUP_ORDER) */
+    uint16_t server_groups[2];                  /* the configuration's groups (0: the library's) */
+    int client_key;                             /* CK_* for the handshake's request; CT_NONE: an empty Certificate */
+    int post_key;                               /* CK_* for a post-handshake request (a second one
+                                                 * is then declined); CT_NONE: no request */
+    int compat;                                 /* a legacy_session_id (the server's change_cipher_spec, E.4) */
+    int forge;                                  /* CT_FORGE_* */
+} ct_scenario;
+
+enum { CT_FORGE_NOTHING, CT_FORGE_FINISHED, CT_FORGE_RECORD };
+
+/* ct_client: this file's TLS 1.3 client, one connection's state (see above). */
+typedef struct {
+    const ct_scenario *s;
+    int hash;                                   /* the suite's hash: HTTPASM_HASH_SHA256 or _SHA384 */
+    size_t hash_length;
+    uint16_t group;                             /* the group of the share last sent */
+    uint8_t transcript[CT_TLS_BUFFER];          /* the handshake's messages so far, whole */
+    size_t transcript_length;
+    size_t base_length;                         /* through our Finished: post-handshake exchanges start there (4.4) */
+    uint8_t scalar[66];                         /* our (EC)DH private part */
+    uint8_t exponent[32];                       /* FFDHE's */
+    uint8_t ek[HTTPASM_MLKEM1024_EK], dk[HTTPASM_MLKEM1024_DK];
+    uint8_t share[HTTPASM_MLKEM1024_EK + 133];
+    size_t share_length;
+    uint8_t handshake_secret[48], client_hs[48], server_hs[48], read_secret[48], write_secret[48];
+    httpasm_tls13_record_key read, write;
+    int keyed;                                  /* the server's records are protected from here */
+    int requested;                              /* the handshake's CertificateRequest came */
+    int finished;                               /* the server's Finished came (ours is queued) */
+    int answers;                                /* post-handshake requests answered */
+    int key_updates;                            /* the server's KeyUpdates read */
+    int alert;                                  /* the server's alert (-1: none) */
+    const char *broken;                         /* what went wrong on the client's side (NULL: nothing) */
+    uint8_t pending[CT_TLS_BUFFER];             /* handshake octets read, not yet a whole message */
+    size_t pending_length;
+    uint8_t data[4096];                         /* application data received */
+    size_t data_length;
+    uint8_t out[CT_TLS_BUFFER];                 /* records for the server */
+    size_t out_length;
+} ct_client;
+
+static ct_client ct_the_client;
+static httpasm_tls13_server_config ct_config;
+static uint8_t ct_certificate_message[4096], ct_memory[160 * 1024];
+static httpasm_tls13_connection ct_connection;
+static unsigned ct_draws;
+
+/* ct_draw: the server's random source: fill's octets (each draw seeded by a counter, so every
+ * tier draws the same), every one of them secret until the engine publishes it. A draw never
+ * fails here: the engine's refusals of a failing source are the .NET tests' (FailAt).
+ *   context  unused; out, length  where the octets go. Returns 0. */
+static int ct_draw(void *context, uint8_t *out, size_t length)
+{
+    (void)context;
+    fill(out, length, 5000 + ct_draws++);
+    secret(out, length);
+    return 0;
+}
+
+/* ct_u16, ct_u24: v's low 16 or 24 bits as big-endian octets at p (TLS's uint16 and uint24
+ * lengths; a larger v is cut, which no caller here makes).
+ *   p  2 or 3 octets of room; v  the value. */
+static void ct_u16(uint8_t *p, size_t v)
+{
+    p[0] = (uint8_t)(v >> 8), p[1] = (uint8_t)v;
+}
+
+static void ct_u24(uint8_t *p, size_t v)
+{
+    p[0] = (uint8_t)(v >> 16), p[1] = (uint8_t)(v >> 8), p[2] = (uint8_t)v;
+}
+
+/* ct_hash: data hashed with the suite's hash (the client hashes its whole transcript each time:
+ * simpler than running hashes, and the client's cost is not under test).
+ *   cl  the client (its hash); data, n  the octets; out  cl->hash_length octets of room. */
+static void ct_hash(const ct_client *cl, const uint8_t *data, size_t n, uint8_t *out)
+{
+    if (cl->hash == HTTPASM_HASH_SHA384)
+        httpasm_sha384(data, n, out);
+    else
+        httpasm_sha256(data, n, out);
+}
+
+/* ct_add: a whole handshake message appended to the client's transcript; one past its room
+ * breaks the client (cl->broken) instead of writing past it.
+ *   cl  the client; m, n  the message, its header included. */
+static void ct_add(ct_client *cl, const uint8_t *m, size_t n)
+{
+    if (cl->transcript_length + n > sizeof cl->transcript) {
+        cl->broken = "the transcript outgrew its room";
+        return;
+    }
+    memcpy(cl->transcript + cl->transcript_length, m, n);
+    cl->transcript_length += n;
+}
+
+/* ct_seal: one record sealed under the client's current write key (no padding) and appended to
+ * its output for the server; a refusal (no room, a content too long) breaks the client.
+ *   cl  the client; type  the inner content type; content, n  the content (2^14 at most). */
+static void ct_seal(ct_client *cl, int type, const uint8_t *content, size_t n)
+{
+    int64_t r = httpasm_tls13_seal(&cl->write, type, content, n, 0, cl->out + cl->out_length,
+                                   sizeof cl->out - cl->out_length);
+    if (r < 0) {
+        cl->broken = "the client's seal refused a record";
+        return;
+    }
+    cl->out_length += (size_t)r;
+}
+
+/* ct_share: the client's private part for a group (fill's octets, fixed by the group; a curve's
+ * scalar's top bits cleared so it lies below n) and its key_exchange (4.2.8.2, 4.2.8.1; the
+ * hybrids' concatenations, RFC 10024: X25519MLKEM768's ML-KEM first, the SecP ones' ECDH
+ * first), kept in cl->share; a group it lacks breaks the client.
+ *   cl  the client; group  the NamedGroup. */
+static void ct_share(ct_client *cl, uint16_t group)
+{
+    uint8_t seed[HTTPASM_MLKEM_SEED];
+    fill(seed, sizeof seed, 910u + group);
+    cl->group = group;
+    switch (group) {
+    case HTTPASM_TLS_GROUP_X25519:
+        fill(cl->scalar, 32, 900);
+        httpasm_x25519_public_key(cl->share, cl->scalar);
+        cl->share_length = 32;
+        break;
+    case HTTPASM_TLS_GROUP_X448:
+        fill(cl->scalar, 56, 901);
+        httpasm_x448_public_key(cl->share, cl->scalar);
+        cl->share_length = 56;
+        break;
+    case HTTPASM_TLS_GROUP_SECP256R1:
+    case HTTPASM_TLS_GROUP_SECP256R1MLKEM768:
+        fill(cl->scalar, 32, 902);
+        cl->scalar[0] &= 0x7F;                              /* below n */
+        httpasm_p256_public_key(cl->share, cl->scalar);
+        cl->share_length = 65;
+        if (group == HTTPASM_TLS_GROUP_SECP256R1MLKEM768) {
+            httpasm_mlkem768_keypair(cl->ek, cl->dk, seed);
+            memcpy(cl->share + 65, cl->ek, HTTPASM_MLKEM768_EK);
+            cl->share_length += HTTPASM_MLKEM768_EK;
+        }
+        break;
+    case HTTPASM_TLS_GROUP_SECP384R1:
+    case HTTPASM_TLS_GROUP_SECP384R1MLKEM1024:
+        fill(cl->scalar, 48, 903);
+        cl->scalar[0] &= 0x7F;
+        httpasm_p384_public_key(cl->share, cl->scalar);
+        cl->share_length = 97;
+        if (group == HTTPASM_TLS_GROUP_SECP384R1MLKEM1024) {
+            httpasm_mlkem1024_keypair(cl->ek, cl->dk, seed);
+            memcpy(cl->share + 97, cl->ek, HTTPASM_MLKEM1024_EK);
+            cl->share_length += HTTPASM_MLKEM1024_EK;
+        }
+        break;
+    case HTTPASM_TLS_GROUP_SECP521R1:
+        fill(cl->scalar, 66, 904);
+        cl->scalar[0] = 0;                                  /* below n */
+        httpasm_p521_public_key(cl->share, cl->scalar);
+        cl->share_length = 133;
+        break;
+    case HTTPASM_TLS_GROUP_FFDHE2048:
+        fill(cl->exponent, sizeof cl->exponent, 905);
+        httpasm_ffdhe_public_key(HTTPASM_FFDHE2048, cl->share, cl->exponent, sizeof cl->exponent);
+        cl->share_length = 256;
+        break;
+    case HTTPASM_TLS_GROUP_X25519MLKEM768:
+        httpasm_mlkem768_keypair(cl->ek, cl->dk, seed);
+        memcpy(cl->share, cl->ek, HTTPASM_MLKEM768_EK);
+        fill(cl->scalar, 32, 906);
+        httpasm_x25519_public_key(cl->share + HTTPASM_MLKEM768_EK, cl->scalar);
+        cl->share_length = HTTPASM_MLKEM768_EK + 32;
+        break;
+    default:
+        cl->broken = "a group the client lacks";
+    }
+}
+
+/* ct_shared: the shared secret of the client's share and the server's key_exchange (its length
+ * checked against the group's; the hybrids' secrets concatenated in their shares' order).
+ *   cl  the client (its group and private parts); share, n  the server's key_exchange; out
+ *   1100 octets of room (ffdhe2048's 256 at most here). Returns the secret's octets, or 0 with
+ *   cl->broken set (a wrong length, or a primitive's refusal). */
+static size_t ct_shared(ct_client *cl, const uint8_t *share, size_t n, uint8_t *out)
+{
+    int ok = -1;
+    size_t length = 0;
+    switch (cl->group) {
+    case HTTPASM_TLS_GROUP_X25519:
+        ok = n == 32 ? httpasm_x25519(out, cl->scalar, share) : -1, length = 32;
+        break;
+    case HTTPASM_TLS_GROUP_X448:
+        ok = n == 56 ? httpasm_x448(out, cl->scalar, share) : -1, length = 56;
+        break;
+    case HTTPASM_TLS_GROUP_SECP256R1:
+        ok = n == 65 ? httpasm_p256_ecdh(out, cl->scalar, share) : -1, length = 32;
+        break;
+    case HTTPASM_TLS_GROUP_SECP384R1:
+        ok = n == 97 ? httpasm_p384_ecdh(out, cl->scalar, share) : -1, length = 48;
+        break;
+    case HTTPASM_TLS_GROUP_SECP521R1:
+        ok = n == 133 ? httpasm_p521_ecdh(out, cl->scalar, share) : -1, length = 66;
+        break;
+    case HTTPASM_TLS_GROUP_FFDHE2048:
+        ok = n == 256 ? httpasm_ffdhe_shared(HTTPASM_FFDHE2048, out, cl->exponent, sizeof cl->exponent, share) : -1;
+        length = 256;
+        break;
+    case HTTPASM_TLS_GROUP_X25519MLKEM768:
+        if (n == HTTPASM_MLKEM768_CT + 32 && httpasm_mlkem768_decaps(out, cl->dk, share) == 0)
+            ok = httpasm_x25519(out + 32, cl->scalar, share + HTTPASM_MLKEM768_CT);
+        length = 64;
+        break;
+    case HTTPASM_TLS_GROUP_SECP256R1MLKEM768:
+        if (n == 65 + HTTPASM_MLKEM768_CT && httpasm_p256_ecdh(out, cl->scalar, share) == 0)
+            ok = httpasm_mlkem768_decaps(out + 32, cl->dk, share + 65);
+        length = 64;
+        break;
+    case HTTPASM_TLS_GROUP_SECP384R1MLKEM1024:
+        if (n == 97 + HTTPASM_MLKEM1024_CT && httpasm_p384_ecdh(out, cl->scalar, share) == 0)
+            ok = httpasm_mlkem1024_decaps(out + 48, cl->dk, share + 97);
+        length = 80;
+        break;
+    }
+    if (ok != 0) {
+        cl->broken = "the server's share made no secret";
+        return 0;
+    }
+    return length;
+}
+
+/* ct_hello: the client's ClientHello for a share in `group` (the first one, or the second after a
+ * HelloRetryRequest: the same octets but the share, 4.1.2), into the transcript and the output as
+ * one plaintext record: TLS 1.3 only, the scenario's suite, its groups, the server key's scheme
+ * alone (so the server's choice is known), the share, post_handshake_auth when a post-handshake
+ * request is to come, and a legacy_session_id under middlebox compatibility.
+ *   cl  the client (its scenario); group  the NamedGroup of its one share. */
+static void ct_hello(ct_client *cl, uint16_t group)
+{
+    const ct_scenario *s = cl->s;
+    static uint8_t m[4096];
+    ct_share(cl, group);
+    size_t at = 4;
+    m[at++] = 3, m[at++] = 3;
+    fill(m + at, 32, 800), at += 32;                        /* random */
+    m[at++] = s->compat ? 32 : 0;
+    if (s->compat)
+        fill(m + at, 32, 801), at += 32;
+    ct_u16(m + at, 2), ct_u16(m + at + 2, s->suite), at += 4;
+    m[at++] = 1, m[at++] = 0;                               /* compression: null */
+    size_t extensions = at;
+    at += 2;
+    static const uint8_t versions[] = { 0, 43, 0, 3, 2, 3, 4 };
+    memcpy(m + at, versions, sizeof versions), at += sizeof versions;
+    size_t count = s->groups[1] ? 2 : 1;
+    ct_u16(m + at, 10), ct_u16(m + at + 2, 2 + 2 * count), ct_u16(m + at + 4, 2 * count), at += 6;
+    for (size_t g = 0; g < count; g++)
+        ct_u16(m + at, s->groups[0] ? s->groups[g] : s->share), at += 2;
+    ct_u16(m + at, 13), ct_u16(m + at + 2, 4), ct_u16(m + at + 4, 2), ct_u16(m + at + 6, ct_keys[s->server_key].scheme), at += 8;
+    ct_u16(m + at, 51), ct_u16(m + at + 2, 2 + 4 + cl->share_length), ct_u16(m + at + 4, 4 + cl->share_length);
+    ct_u16(m + at + 6, group), ct_u16(m + at + 8, cl->share_length), at += 10;
+    memcpy(m + at, cl->share, cl->share_length), at += cl->share_length;
+    if (s->post_key != CT_NONE)
+        ct_u16(m + at, 49), ct_u16(m + at + 2, 0), at += 4;   /* post_handshake_auth */
+    ct_u16(m + extensions, at - extensions - 2);
+    m[0] = HTTPASM_TLS_CLIENT_HELLO;
+    ct_u24(m + 1, at - 4);
+    ct_add(cl, m, at);
+    uint8_t *r = cl->out + cl->out_length;
+    r[0] = HTTPASM_TLS_CONTENT_HANDSHAKE, r[1] = 3, r[2] = 1;
+    ct_u16(r + 3, at);
+    memcpy(r + 5, m, at);
+    cl->out_length += 5 + at;
+}
+
+/* ct_extension: a ServerHello's (or HelloRetryRequest's) extension, found by walking the fixed
+ * fields then the extensions block (bounds checked: a short message finds nothing).
+ *   m, n  the message, its header included; type  the ExtensionType; length  its data's octets
+ *   when found. Returns its extension_data, or NULL when absent. */
+static const uint8_t *ct_extension(const uint8_t *m, size_t n, unsigned type, size_t *length)
+{
+    size_t at = 4 + 2 + 32;
+    if (at >= n)
+        return NULL;
+    at += 1 + m[at] + 2 + 1;                                /* session id echo, suite, compression */
+    if (at + 2 > n)
+        return NULL;
+    size_t end = at + 2 + ((size_t)m[at] << 8 | m[at + 1]);
+    at += 2;
+    while (at + 4 <= end && end <= n) {
+        unsigned t = (unsigned)m[at] << 8 | m[at + 1];
+        size_t l = (size_t)m[at + 2] << 8 | m[at + 3];
+        if (t == type) {
+            *length = l;
+            return m + at + 4;
+        }
+        at += 4 + l;
+    }
+    return NULL;
+}
+
+/* ct_derive: Derive-Secret (7.1) with the suite's hash; a refusal breaks the client.
+ *   cl  the client; secret_in  the secret (hash_length octets); label  without "tls13 "; h  the
+ *   transcript hash, or NULL for the hash of no messages; out  hash_length octets of room. */
+static void ct_derive(ct_client *cl, const uint8_t *secret_in, const char *label, const uint8_t *h, uint8_t *out)
+{
+    if (httpasm_tls13_derive_secret(cl->hash, secret_in, (const uint8_t *)label, strlen(label), h, out) != 0)
+        cl->broken = "Derive-Secret refused";
+}
+
+/* ct_sign: a CertificateVerify's content signed with one of ct_keys under its scheme: EdDSA over
+ * the content itself, ECDSA (r || s, then DER's ECDSA-Sig-Value) and RSA-PSS (SHA-256, a salt of
+ * its length) over its digest; the entropy and salt are fill's (the client's are not secret).
+ *   k  CK_*; content, n  what is signed; out  512 octets of room. Returns the signature's
+ *   octets, or 0 when the signer refused. */
+static size_t ct_sign(int k, const uint8_t *content, size_t n, uint8_t *out)
+{
+    const ct_key *key = &ct_keys[k];
+    uint8_t digest[64], raw[132], entropy[66], body[512];   /* (room past need: put_tlv may write 255 + 3) */
+    fill(entropy, sizeof entropy, 990);
+    size_t size = 0;
+    switch (key->kind) {
+    case HTTPASM_KEY_ED25519:
+        httpasm_ed25519_sign(out, &key->ed25519, content, n);
+        return 64;
+    case HTTPASM_KEY_ED448:
+        return httpasm_ed448_sign(out, &key->ed448, content, n, NULL, 0) == 0 ? 114 : 0;
+    case HTTPASM_KEY_RSA:
+    case HTTPASM_KEY_RSA_PSS:
+        httpasm_sha256(content, n, digest);
+        return httpasm_rsa_sign_pss(&key->rsa, HTTPASM_HASH_SHA256, digest, entropy, 32, out, 256) == 0 ? 256 : 0;
+    case HTTPASM_KEY_P256:
+        httpasm_sha256(content, n, digest);
+        if (httpasm_p256_sign(raw, key->scalar, digest, 32, entropy) != 0)
+            return 0;
+        size = 32;
+        break;
+    case HTTPASM_KEY_P384:
+        httpasm_sha384(content, n, digest);
+        if (httpasm_p384_sign(raw, key->scalar, digest, 48, entropy) != 0)
+            return 0;
+        size = 48;
+        break;
+    case HTTPASM_KEY_P521:
+        httpasm_sha512(content, n, digest);
+        entropy[0] &= 1;
+        if (httpasm_p521_sign(raw, key->scalar, digest, 64, entropy) != 0)
+            return 0;
+        size = 66;
+        break;
+    default:
+        return 0;
+    }
+    size_t b = ct_integer(raw, size, body);
+    b += ct_integer(raw + size, size, body + b);
+    return put_tlv(out, 0x30, body, b);
+}
+
+/* ct_authenticate: the client's Certificate (the request's context; the key's certificate, or an
+ * empty list for CT_NONE: declined) and, with a key, its CertificateVerify over the transcript
+ * through that Certificate (4.4.3), each into the transcript and sealed under the current write
+ * key (the handshake's, or after it the application's).
+ *   cl  the client; key  CK_* or CT_NONE; context, context_length  the request's context (NULL
+ *   and 0 for the handshake's). */
+static void ct_authenticate(ct_client *cl, int key, const uint8_t *context, size_t context_length)
+{
+    static uint8_t m[4096];
+    size_t at = 4;
+    m[at++] = (uint8_t)context_length;
+    memcpy(m + at, context, context_length), at += context_length;
+    if (key == CT_NONE) {
+        ct_u24(m + at, 0), at += 3;
+    } else {
+        size_t n = ct_keys[key].certificate_length;
+        ct_u24(m + at, 3 + n + 2), ct_u24(m + at + 3, n), at += 6;
+        memcpy(m + at, ct_keys[key].certificate, n), at += n;
+        ct_u16(m + at, 0), at += 2;                         /* the entry's extensions: none */
+    }
+    m[0] = 11;
+    ct_u24(m + 1, at - 4);
+    ct_add(cl, m, at);
+    ct_seal(cl, HTTPASM_TLS_CONTENT_HANDSHAKE, m, at);
+    if (key == CT_NONE)
+        return;
+    uint8_t content[64 + 34 + 48];
+    memset(content, 0x20, 64);
+    memcpy(content + 64, "TLS 1.3, client CertificateVerify", 34);   /* (its 0 octet too) */
+    ct_hash(cl, cl->transcript, cl->transcript_length, content + 98);
+    size_t signature = ct_sign(key, content, 98 + cl->hash_length, m + 8);
+    if (signature == 0) {
+        cl->broken = "the client's key did not sign";
+        return;
+    }
+    m[0] = 15;
+    ct_u24(m + 1, 4 + signature);
+    ct_u16(m + 4, ct_keys[key].scheme);
+    ct_u16(m + 6, signature);
+    ct_add(cl, m, 8 + signature);
+    ct_seal(cl, HTTPASM_TLS_CONTENT_HANDSHAKE, m, 8 + signature);
+}
+
+/* ct_finished: the client's Finished over its transcript, into the transcript and sealed.
+ *   cl  the client; base  the Base Key (4.4: its handshake traffic secret, or after the handshake
+ *   its current application one); forged  nonzero to flip verify_data's first bit (the server
+ *   must answer decrypt_error, its verdict the only public outcome of the compare). */
+static void ct_finished(ct_client *cl, const uint8_t *base, int forged)
+{
+    uint8_t m[4 + 48], h[48];
+    ct_hash(cl, cl->transcript, cl->transcript_length, h);
+    httpasm_tls13_finished(cl->hash, base, h, m + 4);
+    m[0] = 20;
+    ct_u24(m + 1, cl->hash_length);
+    if (forged)
+        m[4] ^= 1;
+    ct_add(cl, m, 4 + cl->hash_length);
+    ct_seal(cl, HTTPASM_TLS_CONTENT_HANDSHAKE, m, 4 + cl->hash_length);
+}
+
+/* ct_next_key: an application traffic secret replaced by its next generation (7.2), and its
+ * record key made from it (sequence 0 again).
+ *   cl  the client (its suite and hash); secret_io  the secret, replaced; key  the key, remade. */
+static void ct_next_key(ct_client *cl, uint8_t *secret_io, httpasm_tls13_record_key *key)
+{
+    uint8_t next[48];
+    httpasm_tls13_update_secret(cl->hash, secret_io, next);
+    memcpy(secret_io, next, cl->hash_length);
+    httpasm_tls13_record_key_init(key, cl->s->suite, secret_io);
+}
+
+/* ct_key_update: a KeyUpdate of the client's sealed under its current write key, then its next
+ * write key (the order 4.7.3 gives: the message is the old key's last record).
+ *   cl  the client; request  1 for update_requested (the server must answer with its own). */
+static void ct_key_update(ct_client *cl, int request)
+{
+    const uint8_t m[5] = { 24, 0, 0, 1, (uint8_t)request };
+    ct_seal(cl, HTTPASM_TLS_CONTENT_HANDSHAKE, m, sizeof m);
+    ct_next_key(cl, cl->write_secret, &cl->write);
+}
+
+/* ct_message: one whole handshake message from the server, handled: ServerHello (the handshake
+ * keys), HelloRetryRequest (message_hash, the second hello), EncryptedExtensions,
+ * CertificateRequest (in the handshake: noted; after it: answered at once, the first with the
+ * scenario's post_key, later ones declined), Certificate and CertificateVerify (taken into the
+ * transcript: the server's proofs are the other tests'), Finished (verified; the application
+ * keys; our Certificate and CertificateVerify when asked, our Finished), KeyUpdate (our read key
+ * moved; ours when asked). Anything else breaks the client.
+ *   cl  the client; m, n  the message, its header included. */
+static void ct_message(ct_client *cl, const uint8_t *m, size_t n)
+{
+    static const uint8_t hrr_random[32] = {
+        0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11, 0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+        0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E, 0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+    };
+    uint8_t h[48], expected[48];
+    size_t length = 0;
+    const uint8_t *p;
+    switch (m[0]) {
+    case 2:
+        if (n >= 38 && memcmp(m + 6, hrr_random, 32) == 0) {
+            /* HelloRetryRequest: the first hello becomes message_hash (4.4.1), then the second */
+            ct_hash(cl, cl->transcript, cl->transcript_length, h);
+            cl->transcript[0] = 254, cl->transcript[1] = 0, cl->transcript[2] = 0;
+            cl->transcript[3] = (uint8_t)cl->hash_length;
+            memcpy(cl->transcript + 4, h, cl->hash_length);
+            cl->transcript_length = 4 + cl->hash_length;
+            ct_add(cl, m, n);
+            p = ct_extension(m, n, 51, &length);
+            if (p == NULL || length != 2) {
+                cl->broken = "a HelloRetryRequest without its group";
+                return;
+            }
+            ct_hello(cl, (uint16_t)(p[0] << 8 | p[1]));
+            return;
+        }
+        ct_add(cl, m, n);
+        p = ct_extension(m, n, 51, &length);
+        if (p == NULL || length < 4) {
+            cl->broken = "a ServerHello without its share";
+            return;
+        }
+        {
+            static uint8_t shared[1100], early[48], derived[48];
+            size_t secret_length = ct_shared(cl, p + 4, length - 4, shared);
+            if (secret_length == 0)
+                return;
+            httpasm_tls13_extract(cl->hash, NULL, 0, NULL, 0, early);
+            ct_derive(cl, early, "derived", NULL, derived);
+            httpasm_tls13_extract(cl->hash, derived, cl->hash_length, shared, secret_length, cl->handshake_secret);
+            ct_hash(cl, cl->transcript, cl->transcript_length, h);
+            ct_derive(cl, cl->handshake_secret, "c hs traffic", h, cl->client_hs);
+            ct_derive(cl, cl->handshake_secret, "s hs traffic", h, cl->server_hs);
+            httpasm_tls13_record_key_init(&cl->read, cl->s->suite, cl->server_hs);
+            httpasm_tls13_record_key_init(&cl->write, cl->s->suite, cl->client_hs);
+            cl->keyed = 1;
+        }
+        return;
+    case 8:                                                 /* EncryptedExtensions */
+    case 11:                                                /* the server's Certificate */
+    case 15:                                                /* its CertificateVerify */
+        ct_add(cl, m, n);
+        return;
+    case 13:
+        if (!cl->finished) {
+            cl->requested = 1;
+            ct_add(cl, m, n);
+            return;
+        }
+        /* post-handshake (4.7.2): over ClientHello .. our Finished + the request, each answer */
+        {
+            uint8_t context[256];
+            size_t context_length = n > 4 ? m[4] : 0;
+            memcpy(context, m + 5, context_length);
+            cl->transcript_length = cl->base_length;
+            ct_add(cl, m, n);
+            ct_authenticate(cl, cl->answers == 0 ? cl->s->post_key : CT_NONE, context, context_length);
+            ct_finished(cl, cl->write_secret, 0);
+            cl->transcript_length = cl->base_length;
+            cl->answers++;
+        }
+        return;
+    case 20:
+        ct_hash(cl, cl->transcript, cl->transcript_length, h);
+        httpasm_tls13_finished(cl->hash, cl->server_hs, h, expected);
+        if (n != 4 + cl->hash_length || memcmp(m + 4, expected, cl->hash_length) != 0) {
+            cl->broken = "the server's Finished did not verify";
+            return;
+        }
+        ct_add(cl, m, n);
+        {
+            static uint8_t derived[48], master[48];
+            ct_derive(cl, cl->handshake_secret, "derived", NULL, derived);
+            httpasm_tls13_extract(cl->hash, derived, cl->hash_length, NULL, 0, master);
+            ct_hash(cl, cl->transcript, cl->transcript_length, h);
+            ct_derive(cl, master, "c ap traffic", h, cl->write_secret);
+            ct_derive(cl, master, "s ap traffic", h, cl->read_secret);
+            httpasm_tls13_record_key_init(&cl->read, cl->s->suite, cl->read_secret);
+        }
+        if (cl->requested)
+            ct_authenticate(cl, cl->s->client_key, NULL, 0);
+        ct_finished(cl, cl->client_hs, cl->s->forge == CT_FORGE_FINISHED);
+        httpasm_tls13_record_key_init(&cl->write, cl->s->suite, cl->write_secret);
+        cl->base_length = cl->transcript_length;
+        cl->finished = 1;
+        return;
+    case 24:
+        if (n != 5) {
+            cl->broken = "a KeyUpdate of the wrong length";
+            return;
+        }
+        ct_next_key(cl, cl->read_secret, &cl->read);
+        cl->key_updates++;
+        if (m[4] == 1)
+            ct_key_update(cl, 0);
+        return;
+    default:
+        cl->broken = "a handshake message the client does not take";
+    }
+}
+
+/* ct_read: the server's octets taken by the client, record by record (the engine queues whole
+ * records): protected ones opened under the read key in force at each (a key changes at a
+ * record's end), handshake octets gathered into whole messages and each handled at once
+ * (ct_message), alerts and application data kept; anything else breaks the client.
+ *   cl  the client; in, n  the octets (public: on the wire). */
+static void ct_read(ct_client *cl, const uint8_t *in, size_t n)
+{
+    static uint8_t record[HTTPASM_TLS_RECORD_HEADER + HTTPASM_TLS_CIPHERTEXT_MAX];
+    size_t at = 0;
+    while (at < n && cl->broken == NULL) {
+        int64_t length = httpasm_tls_record_length(in + at, n - at);
+        if (length <= 0) {
+            cl->broken = "the server's output is not whole records";
+            return;
+        }
+        memcpy(record, in + at, (size_t)length);
+        at += (size_t)length;
+        uint8_t type = record[0];
+        int64_t content = length - HTTPASM_TLS_RECORD_HEADER;
+        if (type == HTTPASM_TLS_CONTENT_CHANGE_CIPHER_SPEC)
+            continue;                                       /* (E.4: dropped) */
+        if (type == HTTPASM_TLS_CONTENT_APPLICATION_DATA) {
+            content = cl->keyed ? httpasm_tls13_open(&cl->read, record, (size_t)length, &type) : -1;
+            if (content < 0) {
+                cl->broken = "a server record did not open";
+                return;
+            }
+        }
+        const uint8_t *c = record + HTTPASM_TLS_RECORD_HEADER;
+        if (type == HTTPASM_TLS_CONTENT_ALERT) {
+            cl->alert = content == 2 ? c[1] : 256;
+            continue;
+        }
+        if (type == HTTPASM_TLS_CONTENT_APPLICATION_DATA) {
+            if (cl->data_length + (size_t)content > sizeof cl->data) {
+                cl->broken = "more application data than the test sent";
+                return;
+            }
+            memcpy(cl->data + cl->data_length, c, (size_t)content);
+            cl->data_length += (size_t)content;
+            continue;
+        }
+        if (type != HTTPASM_TLS_CONTENT_HANDSHAKE || cl->pending_length + (size_t)content > sizeof cl->pending) {
+            cl->broken = "a record the client cannot take";
+            return;
+        }
+        memcpy(cl->pending + cl->pending_length, c, (size_t)content);
+        cl->pending_length += (size_t)content;
+        while (cl->pending_length >= 4 && cl->broken == NULL) {
+            static uint8_t message[CT_TLS_BUFFER];
+            size_t m = 4 + ((size_t)cl->pending[1] << 16 | (size_t)cl->pending[2] << 8 | cl->pending[3]);
+            if (m > cl->pending_length)
+                break;
+            memcpy(message, cl->pending, m);
+            memmove(cl->pending, cl->pending + m, cl->pending_length - m);
+            cl->pending_length -= m;
+            ct_message(cl, message, m);
+        }
+    }
+}
+
+/* What the server reported over one ct_pump. */
+typedef struct {
+    unsigned kinds;                             /* 1 << each HTTPASM_TLS_EVENT_* seen */
+    uint32_t alert;                             /* a failure's alert */
+    uint8_t data[4096];                         /* application data delivered (public once taken) */
+    size_t data_length;
+} ct_events;
+
+/* ct_pump: the client's records to the server, one receive each (what it reports kept in ev; a
+ * failure stops the feeding), then the server's output to the client (marked public first: it
+ * is on the wire); again until neither side has anything to send (32 rounds at most).
+ *   cl  the client; ev  zeroed, then the events, a failure's alert, the data delivered. */
+static void ct_pump(ct_client *cl, ct_events *ev)
+{
+    memset(ev, 0, sizeof *ev);
+    for (int round = 0; round < 32 && cl->broken == NULL; round++) {
+        int moved = 0;
+        size_t at = 0;
+        while (at < cl->out_length) {
+            httpasm_tls13_event e;
+            int64_t taken = httpasm_tls13_receive(&ct_connection, cl->out + at, cl->out_length - at, &e);
+            ev->kinds |= 1u << e.kind;
+            if (taken <= 0) {
+                ev->alert = e.alert;
+                break;
+            }
+            if (e.kind == HTTPASM_TLS_EVENT_DATA) {
+                public(e.data, e.length);                   /* the caller's to read now */
+                if (ev->data_length + e.length <= sizeof ev->data) {
+                    memcpy(ev->data + ev->data_length, e.data, e.length);
+                    ev->data_length += e.length;
+                }
+            }
+            at += (size_t)taken;
+            moved = 1;
+        }
+        cl->out_length = 0;
+        const uint8_t *queued;
+        size_t n = httpasm_tls13_output(&ct_connection, &queued);
+        if (n > 0) {
+            public(queued, n);
+            ct_read(cl, queued, n);
+            httpasm_tls13_output_done(&ct_connection, n);
+            moved = 1;
+        }
+        if (!moved)
+            break;
+    }
+}
+
+/* ct_handshake: one scenario: the server configured and started, the handshake pumped through,
+ * then (unless a forgery ends it) application data each way, a KeyUpdate asked by each side,
+ * the post-handshake requests, a forged record, close_notify each way; each step's outcome
+ * checked (a failure is counted and printed with the scenario's name), the connection wiped.
+ *   s  the scenario; tier  its name, for the messages. */
+static void ct_handshake(const ct_scenario *s, const char *tier)
+{
+    ct_client *cl = &ct_the_client;
+    memset(cl, 0, sizeof *cl);
+    cl->s = s;
+    cl->alert = -1;
+    cl->hash = s->suite == HTTPASM_TLS_AES_256_GCM_SHA384 ? HTTPASM_HASH_SHA384 : HTTPASM_HASH_SHA256;
+    cl->hash_length = cl->hash == HTTPASM_HASH_SHA384 ? 48 : 32;
+    char what[200];
+    memset(&ct_config, 0, sizeof ct_config);
+    ct_config.key = &ct_server_keys[s->server_key];
+    ct_config.random = ct_draw;
+    ct_config.flags = s->flags;
+    for (int g = 0; g < 2 && s->server_groups[g]; g++)
+        ct_config.groups[ct_config.group_count++] = s->server_groups[g];
+    const uint8_t *chain[1] = { ct_keys[s->server_key].certificate };
+    size_t lengths[1] = { ct_keys[s->server_key].certificate_length };
+    snprintf(what, sizeof what, "the engine (%s): its configuration", s->name);
+    if (httpasm_tls13_server_config_init(&ct_config, chain, lengths, 1, ct_certificate_message, sizeof ct_certificate_message) != 0
+        || ct_config.memory > sizeof ct_memory
+        || httpasm_tls13_server_init(&ct_connection, &ct_config, ct_memory, ct_config.memory) != 0) {
+        expect(0, what, tier);
+        return;
+    }
+    ct_events ev;
+    ct_hello(cl, s->share);
+    ct_pump(cl, &ev);
+    if (s->forge == CT_FORGE_FINISHED) {
+        snprintf(what, sizeof what, "the engine (%s): decrypt_error", s->name);
+        expect(cl->broken == NULL && (ev.kinds & 1u << HTTPASM_TLS_EVENT_FAILED) && ev.alert == HTTPASM_TLS_ALERT_DECRYPT_ERROR
+               && cl->alert == HTTPASM_TLS_ALERT_DECRYPT_ERROR, what, tier);
+        httpasm_tls13_wipe(&ct_connection);
+        return;
+    }
+    uint32_t suite = 0, group = 0, scheme = 0;
+    snprintf(what, sizeof what, "the engine (%s): the handshake (%s)", s->name, cl->broken ? cl->broken : "the server refused");
+    expect(cl->broken == NULL && (ev.kinds & 1u << HTTPASM_TLS_EVENT_CONNECTED)
+           && httpasm_tls13_negotiated(&ct_connection, &suite, &group, &scheme) == 2 && suite == s->suite
+           && scheme == ct_keys[s->server_key].scheme, what, tier);
+    if (cl->broken || !(ev.kinds & 1u << HTTPASM_TLS_EVENT_CONNECTED)) {
+        httpasm_tls13_wipe(&ct_connection);
+        return;
+    }
+    int expected_count = (s->flags & (HTTPASM_TLS_CLIENT_AUTH_REQUEST | HTTPASM_TLS_CLIENT_AUTH_REQUIRE)) == 0 ? -1
+                       : s->client_key == CT_NONE ? 0 : 1;
+    snprintf(what, sizeof what, "the engine (%s): the client's chain", s->name);
+    expect(httpasm_tls13_peer_certificates(&ct_connection, NULL, NULL) == expected_count, what, tier);
+
+    /* application data each way: ours secret, the client's opened under the server's secret key */
+    static uint8_t data[300], back[200];
+    fill(data, sizeof data, 1100);
+    secret(data, sizeof data);
+    snprintf(what, sizeof what, "the engine (%s): application data out", s->name);
+    expect(httpasm_tls13_send(&ct_connection, data, sizeof data) == (int64_t)sizeof data, what, tier);
+    public(data, sizeof data);
+    ct_pump(cl, &ev);
+    expect(cl->broken == NULL && cl->data_length == sizeof data && memcmp(cl->data, data, sizeof data) == 0, what, tier);
+    fill(back, sizeof back, 1101);
+    ct_seal(cl, HTTPASM_TLS_CONTENT_APPLICATION_DATA, back, sizeof back);
+    ct_pump(cl, &ev);
+    snprintf(what, sizeof what, "the engine (%s): application data in", s->name);
+    expect(ev.data_length == sizeof back && memcmp(ev.data, back, sizeof back) == 0, what, tier);
+
+    /* KeyUpdates: the client's asking for the server's (which its next send carries), then the
+     * server's asking for the client's; data under the new keys each way */
+    ct_key_update(cl, 1);
+    ct_pump(cl, &ev);
+    cl->data_length = 0;
+    secret(data, 100);
+    snprintf(what, sizeof what, "the engine (%s): KeyUpdates", s->name);
+    expect(httpasm_tls13_send(&ct_connection, data, 100) == 100, what, tier);
+    public(data, 100);
+    ct_pump(cl, &ev);
+    expect(cl->key_updates == 1 && cl->data_length == 100 && memcmp(cl->data, data, 100) == 0, what, tier);
+    expect(httpasm_tls13_key_update(&ct_connection, 1) == 0, what, tier);
+    ct_pump(cl, &ev);
+    ct_seal(cl, HTTPASM_TLS_CONTENT_APPLICATION_DATA, back, 50);
+    ct_pump(cl, &ev);
+    expect(cl->broken == NULL && cl->key_updates == 2 && ev.data_length == 50 && memcmp(ev.data, back, 50) == 0, what, tier);
+
+    /* post-handshake authentication: answered with post_key's certificate, then declined */
+    if (s->post_key != CT_NONE) {
+        for (int round = 0; round < 2; round++) {
+            snprintf(what, sizeof what, "the engine (%s): post-handshake authentication %d", s->name, round + 1);
+            expect(httpasm_tls13_request_certificate(&ct_connection) == 0, what, tier);
+            ct_pump(cl, &ev);
+            expect(cl->broken == NULL && (ev.kinds & 1u << HTTPASM_TLS_EVENT_AUTHENTICATED)
+                   && httpasm_tls13_peer_certificates(&ct_connection, NULL, NULL) == (round == 0 ? 1 : 0), what, tier);
+        }
+    }
+
+    if (s->forge == CT_FORGE_RECORD) {
+        /* a record whose tag does not verify: bad_record_mac, the verdict public by design */
+        ct_seal(cl, HTTPASM_TLS_CONTENT_APPLICATION_DATA, back, 60);
+        cl->out[cl->out_length - 1] ^= 1;
+        ct_pump(cl, &ev);
+        snprintf(what, sizeof what, "the engine (%s): bad_record_mac", s->name);
+        expect((ev.kinds & 1u << HTTPASM_TLS_EVENT_FAILED) && ev.alert == HTTPASM_TLS_ALERT_BAD_RECORD_MAC
+               && cl->alert == HTTPASM_TLS_ALERT_BAD_RECORD_MAC, what, tier);
+        httpasm_tls13_wipe(&ct_connection);
+        return;
+    }
+
+    /* close_notify each way */
+    snprintf(what, sizeof what, "the engine (%s): close_notify", s->name);
+    expect(httpasm_tls13_close(&ct_connection) == 0, what, tier);
+    ct_pump(cl, &ev);
+    expect(cl->alert == 0, what, tier);
+    static const uint8_t close_notify[2] = { 1, 0 };
+    ct_seal(cl, HTTPASM_TLS_CONTENT_ALERT, close_notify, 2);
+    ct_pump(cl, &ev);
+    expect(cl->broken == NULL && (ev.kinds & 1u << HTTPASM_TLS_EVENT_CLOSED), what, tier);
+    httpasm_tls13_wipe(&ct_connection);
+}
+
+/* The handshakes: every group (the client's share in it; the server takes it), each server key
+ * kind, each suite, and the paths around them. */
+static const ct_scenario ct_scenarios[] = {
+    { "x25519, AES-128-GCM, Ed25519, compatibility mode", HTTPASM_TLS_AES_128_GCM_SHA256, HTTPASM_TLS_GROUP_X25519,
+      { 0 }, CK_ED25519, 0, { 0 }, CT_NONE, CT_NONE, 1, CT_FORGE_NOTHING },
+    { "x448, AES-256-GCM, Ed448", HTTPASM_TLS_AES_256_GCM_SHA384, HTTPASM_TLS_GROUP_X448,
+      { 0 }, CK_ED448, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "secp256r1, ChaCha20-Poly1305, ECDSA P-256", HTTPASM_TLS_CHACHA20_POLY1305_SHA256, HTTPASM_TLS_GROUP_SECP256R1,
+      { 0 }, CK_P256, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "secp384r1, AES-256-GCM, ECDSA P-384", HTTPASM_TLS_AES_256_GCM_SHA384, HTTPASM_TLS_GROUP_SECP384R1,
+      { 0 }, CK_P384, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "secp521r1, AES-128-GCM, ECDSA P-521", HTTPASM_TLS_AES_128_GCM_SHA256, HTTPASM_TLS_GROUP_SECP521R1,
+      { 0 }, CK_P521, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "ffdhe2048, AES-128-GCM, RSA-PSS (rsaEncryption)", HTTPASM_TLS_AES_128_GCM_SHA256, HTTPASM_TLS_GROUP_FFDHE2048,
+      { 0 }, CK_RSA, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "X25519MLKEM768, ChaCha20-Poly1305, RSA-PSS (id-RSASSA-PSS)", HTTPASM_TLS_CHACHA20_POLY1305_SHA256,
+      HTTPASM_TLS_GROUP_X25519MLKEM768, { 0 }, CK_RSA_PSS, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_NOTHING },
+    { "SecP256r1MLKEM768, AES-128-GCM, Ed25519, a P-256 client", HTTPASM_TLS_AES_128_GCM_SHA256,
+      HTTPASM_TLS_GROUP_SECP256R1MLKEM768, { 0 }, CK_ED25519, HTTPASM_TLS_CLIENT_AUTH_REQUEST, { 0 }, CK_P256, CT_NONE, 0,
+      CT_FORGE_NOTHING },
+    { "SecP384r1MLKEM1024, AES-256-GCM, ECDSA P-256, an RSA client required", HTTPASM_TLS_AES_256_GCM_SHA384,
+      HTTPASM_TLS_GROUP_SECP384R1MLKEM1024, { 0 }, CK_P256, HTTPASM_TLS_CLIENT_AUTH_REQUIRE, { 0 }, CK_RSA, CT_NONE, 0,
+      CT_FORGE_NOTHING },
+    { "a HelloRetryRequest (x25519's share, secp256r1 the server's first)", HTTPASM_TLS_AES_128_GCM_SHA256,
+      HTTPASM_TLS_GROUP_X25519, { HTTPASM_TLS_GROUP_X25519, HTTPASM_TLS_GROUP_SECP256R1 }, CK_ED25519,
+      HTTPASM_TLS_SERVER_GROUP_ORDER, { HTTPASM_TLS_GROUP_SECP256R1, HTTPASM_TLS_GROUP_X25519 }, CT_NONE, CT_NONE, 1,
+      CT_FORGE_NOTHING },
+    { "post-handshake authentication (declined in the handshake; Ed448, then declined)", HTTPASM_TLS_AES_128_GCM_SHA256,
+      HTTPASM_TLS_GROUP_X25519, { 0 }, CK_ED25519, HTTPASM_TLS_CLIENT_AUTH_REQUEST, { 0 }, CT_NONE, CK_ED448, 0,
+      CT_FORGE_NOTHING },
+    { "a forged Finished", HTTPASM_TLS_AES_128_GCM_SHA256, HTTPASM_TLS_GROUP_X25519,
+      { 0 }, CK_ED25519, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_FINISHED },
+    { "a forged record", HTTPASM_TLS_CHACHA20_POLY1305_SHA256, HTTPASM_TLS_GROUP_X25519,
+      { 0 }, CK_ED25519, 0, { 0 }, CT_NONE, CT_NONE, 0, CT_FORGE_RECORD },
+};
+
+/* engine: the server engine's handshakes (ct_scenarios) at this tier, its keys loaded from PEM
+ * texts whose base64 is secret (so the loader's own outputs are checked as the engine uses them:
+ * what it leaves secret stays so), made public and zeroed again after the last.
+ *   tier  the tier's name, for the messages. */
+static void engine(const char *tier)
+{
+    static char text[4096];
+    for (int k = 0; k < CK_COUNT; k++) {
+        size_t body, body_length;
+        size_t n = pem_key("PRIVATE KEY", ct_keys[k].der, ct_keys[k].der_length, text, &body, &body_length);
+        secret(text + body, body_length);
+        expect(httpasm_private_key_load(&ct_server_keys[k], (const uint8_t *)text, n) == ct_keys[k].kind,
+               "private_key_load (the engine's keys)", tier);
+        public(text, n);
+    }
+    for (size_t s = 0; s < sizeof ct_scenarios / sizeof ct_scenarios[0]; s++)
+        ct_handshake(&ct_scenarios[s], tier);
+    for (int k = 0; k < CK_COUNT; k++) {
+        public(&ct_server_keys[k], sizeof ct_server_keys[k]);
+        memset(&ct_server_keys[k], 0, sizeof ct_server_keys[k]);
+    }
+}
+
 /* checks: every primitive at every tier valgrind's CPU offers (a tier whose features equal the
  * one before is skipped: valgrind's CPU tops out below it). */
 static void *checks(void *unused)
@@ -797,6 +1894,12 @@ static void *checks(void *unused)
     static const uint64_t caps[] = { HTTPASM_CPU_CAP_V1, HTTPASM_CPU_CAP_V2, HTTPASM_CPU_CAP_V3, HTTPASM_CPU_CAP_V4 };
     static const char *const names[] = { "v1", "v2", "v3", "v4" };
     uint64_t seen = ~(uint64_t)0;
+    /* the engine's keys and certificates, once (public octets: the server's loading of them at
+     * each tier is what is secret) */
+    if (ct_key_files() != 0) {
+        failures++;
+        return NULL;
+    }
     for (size_t t = 0; t < sizeof caps / sizeof caps[0]; t++) {
         uint64_t features = httpasm_cpu_limit(caps[t]);
         if (features == seen)
@@ -816,6 +1919,7 @@ static void *checks(void *unused)
         encodings(names[t]);
         keys(names[t]);
         tls13(names[t]);
+        engine(names[t]);
     }
     return NULL;
 }

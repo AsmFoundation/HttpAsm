@@ -801,6 +801,11 @@ httpasm_tls13_receive:
     movzx   eax, byte [rsp]
     cmp     eax, HTTPASM_TLS_CONTENT_APPLICATION_DATA
     je      .data
+    ; a handshake message's octets or an alert, opened under a secret key: the protocol's own
+    ; messages, which the peer wrote and both ends hash into the transcript, and which the
+    ; engine parses and acts on. Application data (above) stays secret: it is the caller's, and
+    ; the engine only hands it over, never branching on it.
+    HA_DECLASSIFY_MEM rsi, rdx              ; (public by design: the peer's messages)
     cmp     eax, HTTPASM_TLS_CONTENT_ALERT
     je      .alert
     cmp     eax, HTTPASM_TLS_CONTENT_HANDSHAKE

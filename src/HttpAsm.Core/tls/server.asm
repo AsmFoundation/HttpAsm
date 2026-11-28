@@ -233,6 +233,8 @@ httpasm_tls13_request_certificate:
     lea     rsi, [rel ha_tls_request + 5]
     mov     ecx, TE_REQUEST_LENGTH - 5
     rep     movsb
+    ; the context is drawn (a secret until now) and published by this message
+    HA_DECLASSIFY_MEM rsp + RQ_MESSAGE, RQ_LENGTH   ; (public by design: a message we send)
     ; one record (52 octets of content: within the smallest record_size_limit, 64)
     mov     esi, HTTPASM_TLS_CONTENT_HANDSHAKE
     lea     rdx, [rsp + RQ_MESSAGE]
@@ -675,6 +677,10 @@ ha_tls_server_message:
     bswap   eax
     mov     al, HTTPASM_TLS_SERVER_HELLO
     mov     [rdi], eax
+    ; the ServerHello goes out as it is: its random and our share, drawn and computed from
+    ; secrets, are published with it (and hashed into the transcript, which signatures and
+    ; verifications then read)
+    HA_DECLASSIFY_MEM rdi, r12              ; (public by design: a message we send)
     mov     rsi, rdi
     mov     rdx, r12
     call    ha_tls_transcript_add
@@ -1271,6 +1277,9 @@ ha_tls_server_message:
 ; .put: rsi = octets, rdx = their count: into the transcript and the flight -> eax = 0 or minus
 ; an alert. Called from the body (rsp then 8 below 16-aligned: realigned here); keeps r12-r15.
 .put:
+    ; the flight's messages are published as built: our CertificateVerify's signature and our
+    ; Finished's verify_data come from secrets, and both go to the peer and into the transcript
+    HA_DECLASSIFY_MEM rsi, rdx              ; (public by design: a message we send)
     push    r12
     push    r13
     sub     rsp, 8
