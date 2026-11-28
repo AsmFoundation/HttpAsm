@@ -50,6 +50,7 @@ extern ha_tls_transcript_add
 extern ha_tls_transcript_hash
 extern ha_tls_out_free
 extern ha_tls_out_plain
+extern ha_tls_out_record
 extern ha_tls_flight_begin
 extern ha_tls_flight_put
 extern ha_tls_flight_end
@@ -84,6 +85,9 @@ SV_CONTEXT      equ SV_SHARE                        ; the client's Certificate (
 SV_CONTEXT_LENGTH equ SV_SHARE_LENGTH               ; its length, its certificate_list and its
 SV_LIST         equ SV_RANK                         ; length, in the hello's slots (a call reads a
 SV_LIST_LENGTH  equ SV_SH                           ; hello or a Certificate, never both)
+SV_EXPECT       equ SV_SIGNATURE                    ; .take_certificate: the context the request
+SV_EXPECT_LENGTH equ SV_SIGNATURE + 8               ; carried, its octets (a Certificate's call
+                                                    ; signs nothing: the slots are free)
 SV_SECRET       equ SV_EXTENSIONS + 8               ; the exchange's secret (1024: ffdhe8192's)
 SV_SIGNATURE    equ SV_SECRET + 1024                ; the CertificateVerify's signature (1024)
 SV_FRAME        equ (SV_SIGNATURE + 1024 + 15) / 16 * 16   ; (five pushes + this: aligned)
@@ -181,6 +185,87 @@ httpasm_tls13_server_init:
 .end:
 
 ; -----------------------------------------------------------------------------
+; int httpasm_tls13_request_certificate(httpasm_tls13_connection *c)
+;   Post-handshake authentication (4.7.2): queues a CertificateRequest - a context of TA_CONTEXT
+;   random octets (unpredictable, 4.4.2-4.2.1#3: the configuration's source draws them) and the
+;   handshake's signature_algorithms - in one record under our application key. The client's
+;   answer (Certificate, CertificateVerify for one with certificates, Finished) is then taken by
+;   httpasm_tls13_receive, application data and KeyUpdates allowed before it begins (4.7.2-3#1)
+;   and refused between its messages (4.7.2-1#5); its end is the event AUTHENTICATED, and the
+;   chain httpasm_tls13_peer_certificates' (0 entries: declined; the engine refuses nothing for
+;   that: the caller decides). Returns 0; or -1 with nothing sent or changed: the handshake not
+;   completed, the connection failed or our close_notify sent, the client not having offered
+;   post_handshake_auth (4.3.6-1#1), no peer-chain span (client authentication not configured
+;   when the connection started), a request already outstanding (one at a time), the random
+;   source failing, or no room in the output (drain it and call again).
+;   Frame: the message (51 octets). Clobbers the caller-saved registers.
+; -----------------------------------------------------------------------------
+RQ_MESSAGE      equ 0                       ; the CertificateRequest built
+RQ_LENGTH       equ 4 + 1 + TA_CONTEXT + 2 + (TE_REQUEST_LENGTH - 7)  ; 51: the handshake's
+                                            ; request with our context in its empty one's place
+global httpasm_tls13_request_certificate:function (httpasm_tls13_request_certificate.end - httpasm_tls13_request_certificate)
+align 16
+httpasm_tls13_request_certificate:
+    push    rbx
+    sub     rsp, 64                         ; (one push + 64: rsp 16-aligned at the calls)
+    mov     rbx, rdi
+    mov     eax, -1
+    cmp     dword [rbx + httpasm_tls13_connection.state], TS_CONNECTED
+    jne     .done                           ; (FAILED included)
+    test    dword [rbx + httpasm_tls13_connection.flags], TF_CLOSED
+    jnz     .done
+    test    dword [rbx + httpasm_tls13_connection.flags], TF_POST_AUTH
+    jz      .done                           ; the client did not offer it (4.3.6-1#1)
+    cmp     qword [rbx + httpasm_tls13_connection.peer], 0
+    je      .done                           ; nowhere to keep its chain
+    cmp     dword [rbx + httpasm_tls13_connection.auth_state], TA_NONE
+    jne     .done                           ; one outstanding already
+    ; the message: 13, its length; the context; signature_algorithms as the handshake's request
+    ; carries it (ha_tls_request: its extensions' length and block after its empty context)
+    mov     dword [rsp + RQ_MESSAGE], ((RQ_LENGTH - 4) << 24) | HTTPASM_TLS_CERTIFICATE_REQUEST
+    mov     byte [rsp + RQ_MESSAGE + 4], TA_CONTEXT
+    lea     rdi, [rsp + RQ_MESSAGE + 5]
+    mov     esi, TA_CONTEXT
+    call    ha_tls_draw
+    test    rax, rax
+    jnz     .refused
+    lea     rdi, [rsp + RQ_MESSAGE + 5 + TA_CONTEXT]
+    lea     rsi, [rel ha_tls_request + 5]
+    mov     ecx, TE_REQUEST_LENGTH - 5
+    rep     movsb
+    ; one record (52 octets of content: within the smallest record_size_limit, 64)
+    mov     esi, HTTPASM_TLS_CONTENT_HANDSHAKE
+    lea     rdx, [rsp + RQ_MESSAGE]
+    mov     ecx, RQ_LENGTH
+    xor     r8d, r8d                        ; (the alert reserve stays)
+    call    ha_tls_out_record
+    test    eax, eax
+    jnz     .refused
+    ; the exchange's transcript: the handshake's kept aside, the request after it (4.4's
+    ; Handshake Context: ClientHello .. client Finished + CertificateRequest)
+    lea     rdi, [rbx + httpasm_tls13_connection.auth_base]
+    lea     rsi, [rbx + httpasm_tls13_connection.transcript]
+    mov     ecx, httpasm_sha512_ctx_size
+    rep     movsb
+    lea     rdi, [rbx + httpasm_tls13_connection.auth_context]
+    lea     rsi, [rsp + RQ_MESSAGE + 5]
+    mov     ecx, TA_CONTEXT
+    rep     movsb
+    lea     rsi, [rsp + RQ_MESSAGE]
+    mov     edx, RQ_LENGTH
+    call    ha_tls_transcript_add
+    mov     dword [rbx + httpasm_tls13_connection.auth_state], TA_CERT
+    xor     eax, eax
+    jmp     .done
+.refused:
+    mov     eax, -1
+.done:
+    add     rsp, 64
+    pop     rbx
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
 ; ha_tls_server_message: rbx = the connection (before TS_CONNECTED), rsi = a whole handshake
 ;   message (header and body), rdx = its octets -> eax = TM_* flags, or minus an alert (the
 ;   connection is failed by the caller). START and WAIT_CH2 take a ClientHello, WAIT_CERT the
@@ -207,8 +292,10 @@ ha_tls_server_message:
     je      .wait_cert
     cmp     ecx, TS_WAIT_CV
     je      .wait_cv
+    cmp     ecx, TS_CONNECTED
+    je      .post_auth                      ; (tls/engine.asm took a KeyUpdate itself)
     cmp     ecx, TS_WAIT_CH2
-    ja      .unexpected                     ; (never: CONNECTED and FAILED do not call in)
+    ja      .unexpected                     ; (never: FAILED does not call in)
     cmp     eax, HTTPASM_TLS_CLIENT_HELLO
     jne     .unexpected
 
@@ -774,44 +861,18 @@ ha_tls_server_message:
     ; CertificateVerify and for the caller (httpasm_tls13_peer_certificates).
     cmp     eax, HTTPASM_TLS_CERTIFICATE
     jne     .unexpected
-    lea     rdi, [r12 + 4]                  ; read(body, length, &context, &n, &list, &n)
-    lea     rsi, [r13 - 4]
-    lea     rdx, [rbp + SV_CONTEXT]
-    lea     rcx, [rbp + SV_CONTEXT_LENGTH]
-    lea     r8, [rbp + SV_LIST]
-    lea     r9, [rbp + SV_LIST_LENGTH]
-    call    httpasm_tls13_certificate_read
-    test    rax, rax
-    js      .answer                         ; (eax: minus its alert)
-    mov     r14, rax                        ; the entries
-    cmp     qword [rbp + SV_CONTEXT_LENGTH], 0
-    jne     .illegal                        ; not our request's (empty) context
-    test    r14, r14
-    jnz     .chain
+    xor     esi, esi                        ; the main handshake's request: an empty context
+    xor     edx, edx
+    call    .take_certificate               ; -> 1 (certificates), 0 (none), or minus an alert
+    test    eax, eax
+    js      .answer
+    jnz     .main_chain
     mov     rax, [rbx + httpasm_tls13_connection.config]
     test    dword [rax + httpasm_tls13_server_config.flags], HTTPASM_TLS_CLIENT_AUTH_REQUIRE
     jnz     .certificate_required
-    mov     qword [rbx + httpasm_tls13_connection.peer_length], 0
-    mov     dword [rbx + httpasm_tls13_connection.peer_count], 0
-    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
     mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_FINISHED   ; no CertificateVerify
     jmp     .client_message
-.chain:
-    mov     rsi, [rbp + SV_LIST]
-    mov     rdx, [rbp + SV_LIST_LENGTH]
-    call    ha_tls_peer_leaf
-    test    eax, eax
-    jnz     .answer
-    mov     rcx, [rbp + SV_LIST_LENGTH]
-    cmp     rcx, [rbx + httpasm_tls13_connection.peer_capacity]
-    ja      .internal                       ; (never: the message was within max_message, the
-                                            ; span's size, both server_init's)
-    mov     [rbx + httpasm_tls13_connection.peer_length], rcx
-    mov     [rbx + httpasm_tls13_connection.peer_count], r14d
-    mov     rdi, [rbx + httpasm_tls13_connection.peer]
-    mov     rsi, [rbp + SV_LIST]
-    rep     movsb
-    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+.main_chain:
     mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_CV
 .client_message:
     ; the client's Certificate or CertificateVerify into the transcript, after it was judged
@@ -834,6 +895,84 @@ ha_tls_server_message:
     test    eax, eax
     jnz     .answer
     mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_FINISHED
+    jmp     .client_message
+
+.post_auth:
+    ; ---- after the handshake (4.7.2): the client's answer to our post-handshake CertificateRequest
+    ; (httpasm_tls13_request_certificate), its messages in their order - Certificate (our
+    ; request's context), CertificateVerify for one with certificates, Finished - each judged as
+    ; the handshake's are, over ClientHello .. client Finished + the request (.transcript; the
+    ; handshake's own is kept in .auth_base). Any other message, or one out of its turn, is
+    ; unexpected_message (KeyUpdates and application data between the messages are refused
+    ; where they arrive: tls/engine.asm).
+    mov     ecx, [rbx + httpasm_tls13_connection.auth_state]
+    cmp     eax, HTTPASM_TLS_CERTIFICATE
+    je      .post_certificate
+    cmp     eax, HTTPASM_TLS_CERTIFICATE_VERIFY
+    je      .post_verify
+    cmp     eax, HTTPASM_TLS_FINISHED
+    jne     .unexpected
+    cmp     ecx, TA_FINISHED
+    jne     .unexpected
+    ; the Finished (4.4): its MAC under the client's current application traffic secret (the
+    ; Base Key of 4.4's table for post-handshake authentication), compared whole in constant
+    ; time as the handshake's is
+    movzx   ecx, byte [rbx + httpasm_tls13_connection.hash_length]
+    lea     rax, [rcx + 4]
+    cmp     r13, rax
+    jne     .decode
+    lea     rdi, [rbp + SV_HASH]
+    call    ha_tls_transcript_hash
+    movzx   edi, byte [rbx + httpasm_tls13_connection.hash]
+    lea     rsi, [rbx + httpasm_tls13_connection.client_secret]
+    lea     rdx, [rbp + SV_HASH]
+    lea     rcx, [rbp + SV_VERIFY]
+    call    httpasm_tls13_finished
+    movzx   ecx, byte [rbx + httpasm_tls13_connection.hash_length]
+    xor     eax, eax
+    xor     edx, edx
+.post_compare:
+    movzx   esi, byte [r12 + 4 + rdx]
+    xor     sil, [rbp + SV_VERIFY + rdx]
+    or      eax, esi
+    inc     edx
+    cmp     edx, ecx
+    jb      .post_compare
+    HA_DECLASSIFY rax
+    test    eax, eax
+    jnz     .decrypt_error
+    ; the exchange is over: the transcript back to the handshake's (each request's context
+    ; starts from ClientHello .. client Finished), no request outstanding
+    lea     rdi, [rbx + httpasm_tls13_connection.transcript]
+    lea     rsi, [rbx + httpasm_tls13_connection.auth_base]
+    mov     ecx, httpasm_sha512_ctx_size
+    rep     movsb
+    mov     dword [rbx + httpasm_tls13_connection.auth_state], TA_NONE
+    mov     eax, TM_AUTHENTICATED
+    jmp     .answer
+.post_certificate:
+    cmp     ecx, TA_CERT
+    jne     .unexpected
+    lea     rsi, [rbx + httpasm_tls13_connection.auth_context]
+    mov     edx, TA_CONTEXT
+    call    .take_certificate
+    test    eax, eax
+    js      .answer
+    mov     ecx, TA_FINISHED                ; declined: its Finished next, no CertificateVerify
+    mov     edx, TA_CV
+    test    eax, eax
+    cmovnz  ecx, edx
+    mov     [rbx + httpasm_tls13_connection.auth_state], ecx
+    jmp     .client_message
+.post_verify:
+    cmp     ecx, TA_CV
+    jne     .unexpected
+    mov     rsi, r12
+    mov     rdx, r13
+    call    ha_tls_verify
+    test    eax, eax
+    jnz     .answer
+    mov     dword [rbx + httpasm_tls13_connection.auth_state], TA_FINISHED
     jmp     .client_message
 
 .wait_finished:
@@ -1062,6 +1201,71 @@ ha_tls_server_message:
     mov     dl, HTTPASM_TLS_ENCRYPTED_EXTENSIONS
     mov     [rax], edx
     mov     rax, rdi
+    ret
+
+; .take_certificate: r12 = the client's Certificate message (header and body), r13 = its octets,
+; rsi = the context our request carried, rdx = its octets (0 for the main handshake's): the
+; message read (httpasm_tls13_certificate_read), its context the request's exactly (4.5.1:
+; illegal_parameter otherwise), each entry judged (tls/sign.asm's ha_tls_peer_leaf), and its
+; certificate_list kept in the peer-chain span with .peer_length, .peer_count and TF_PEER_CHAIN
+; (a later answer replaces an earlier chain) -> eax = 1 with certificates, 0 for an empty list
+; (the client declined), or minus an alert. The state and the transcript are the caller's. Called
+; from the body (one push with the return address: rsp 16-aligned for the calls); keeps r12, r13,
+; r14 and r15.
+.take_certificate:
+    push    r14
+    mov     [rbp + SV_EXPECT], rsi
+    mov     [rbp + SV_EXPECT_LENGTH], rdx
+    lea     rdi, [r12 + 4]                  ; read(body, length, &context, &n, &list, &n)
+    lea     rsi, [r13 - 4]
+    lea     rdx, [rbp + SV_CONTEXT]
+    lea     rcx, [rbp + SV_CONTEXT_LENGTH]
+    lea     r8, [rbp + SV_LIST]
+    lea     r9, [rbp + SV_LIST_LENGTH]
+    call    httpasm_tls13_certificate_read
+    test    rax, rax
+    js      .take_done                      ; (eax: minus its alert)
+    mov     r14, rax                        ; the entries
+    mov     rcx, [rbp + SV_CONTEXT_LENGTH]
+    cmp     rcx, [rbp + SV_EXPECT_LENGTH]
+    jne     .take_illegal
+    mov     rsi, [rbp + SV_CONTEXT]
+    mov     rdi, [rbp + SV_EXPECT]
+    repe    cmpsb                           ; (no octets: ZF still the length compare's)
+    jne     .take_illegal
+    test    r14, r14
+    jz      .take_empty
+    mov     rsi, [rbp + SV_LIST]
+    mov     rdx, [rbp + SV_LIST_LENGTH]
+    call    ha_tls_peer_leaf
+    test    eax, eax
+    jnz     .take_done
+    ; kept: the message lies in the caller's record or the reassembly span, neither of which lasts
+    mov     rcx, [rbp + SV_LIST_LENGTH]
+    cmp     rcx, [rbx + httpasm_tls13_connection.peer_capacity]
+    ja      .take_internal                  ; (never: the message was within max_message, the
+                                            ; span's size, both server_init's)
+    mov     [rbx + httpasm_tls13_connection.peer_length], rcx
+    mov     [rbx + httpasm_tls13_connection.peer_count], r14d
+    mov     rdi, [rbx + httpasm_tls13_connection.peer]
+    mov     rsi, [rbp + SV_LIST]
+    rep     movsb
+    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+    mov     eax, 1
+    jmp     .take_done
+.take_empty:
+    mov     qword [rbx + httpasm_tls13_connection.peer_length], 0
+    mov     dword [rbx + httpasm_tls13_connection.peer_count], 0
+    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+    xor     eax, eax
+    jmp     .take_done
+.take_illegal:
+    mov     eax, -HTTPASM_TLS_ALERT_ILLEGAL_PARAMETER
+    jmp     .take_done
+.take_internal:
+    mov     eax, -HTTPASM_TLS_ALERT_INTERNAL_ERROR
+.take_done:
+    pop     r14
     ret
 
 ; .put: rsi = octets, rdx = their count: into the transcript and the flight -> eax = 0 or minus

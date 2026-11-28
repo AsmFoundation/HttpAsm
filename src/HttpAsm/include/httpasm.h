@@ -1703,6 +1703,10 @@ int httpasm_tls13_key_update_read(const uint8_t *body, size_t length);
 #define HTTPASM_TLS_EVENT_DATA      2   /* application data: event->data, ->length, in the input */
 #define HTTPASM_TLS_EVENT_CLOSED    3   /* the peer's close_notify: it sends nothing more */
 #define HTTPASM_TLS_EVENT_FAILED    4   /* the connection failed: event->alert */
+#define HTTPASM_TLS_EVENT_AUTHENTICATED 5   /* the client answered our post-handshake
+                                         * CertificateRequest (httpasm_tls13_request_certificate):
+                                         * its chain is httpasm_tls13_peer_certificates' (0
+                                         * entries: it declined) */
 #define HTTPASM_TLS_EVENT_PEER      1   /* event->flags: the alert was the peer's */
 
 #define HTTPASM_TLS_MESSAGE_DEFAULT 16384   /* the largest handshake message gathered by default */
@@ -1745,10 +1749,10 @@ typedef struct httpasm_tls13_event {
     uint32_t reserved;
 } httpasm_tls13_event;
 
-/* One connection's state (2784 octets), opaque; its secrets are secret: httpasm_tls13_wipe it.
+/* One connection's state (3008 octets), opaque; its secrets are secret: httpasm_tls13_wipe it.
  * Best 16-aligned (its record keys are then 16-aligned inside it). */
 typedef struct httpasm_tls13_connection {
-    uint64_t opaque[348];
+    uint64_t opaque[376];
 } httpasm_tls13_connection;
 
 /* Checks a server's configuration and fills its "out" fields: the Certificate message built from
@@ -1814,6 +1818,18 @@ int httpasm_tls13_close(httpasm_tls13_connection *c);
  * write key (RFC 9846 4.7.3). Returns 0, or -1 before the handshake completed, after a failure
  * or close_notify, or when the output is full. */
 int httpasm_tls13_key_update(httpasm_tls13_connection *c, int request);
+
+/* Post-handshake authentication (RFC 9846 4.7.2): queues a CertificateRequest (16 random octets
+ * of context, the handshake's signature schemes). The client's answer comes through
+ * httpasm_tls13_receive - its Certificate, its CertificateVerify, its Finished, each judged as
+ * in the handshake - and ends with HTTPASM_TLS_EVENT_AUTHENTICATED, its chain then
+ * httpasm_tls13_peer_certificates' (0 entries: the client declined; whether to go on is the
+ * caller's). Application data and KeyUpdates may come before the answer begins, not between its
+ * messages (unexpected_message). Returns 0; or -1 with nothing sent: the handshake not
+ * completed, a failure or our close_notify, a client that did not offer post_handshake_auth, a
+ * connection started without client authentication configured (its chain would have no span),
+ * a request already outstanding, the random source failing, or the output full. */
+int httpasm_tls13_request_certificate(httpasm_tls13_connection *c);
 
 /* What the handshake chose: the suite, the group and the signature scheme (0 for those not
  * chosen yet). Returns the connection's state's progress: 0 before a ServerHello, 1 while the

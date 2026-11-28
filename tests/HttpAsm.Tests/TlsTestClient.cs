@@ -694,6 +694,16 @@ internal sealed class TlsTestClient : IDisposable
                 EncryptedExtensions = body;
                 messages.Add(message);
                 break;
+            case 13 when ServerFinished:
+                {
+                    // a post-handshake request (4.7.2): kept apart from the handshake's
+                    // transcript, which each such exchange starts from (4.4)
+                    int context = body[0];
+                    PostRequestContext = body[1..(1 + context)];
+                    postRequest = message;
+                    break;
+                }
+
             case 13:
                 {
                     // CertificateRequest (4.4.2): its context, and signature_algorithms' list
@@ -897,6 +907,65 @@ internal sealed class TlsTestClient : IDisposable
     /// <param name="v">The value (under 2^24).</param>
     /// <returns>Its three octets.</returns>
     public static byte[] U24(int v) => [(byte)(v >> 16), (byte)(v >> 8), (byte)v];
+
+    /// <summary>The server's post-handshake CertificateRequest's context, once one came (null:
+    /// none since the last answer).</summary>
+    public byte[]? PostRequestContext { get; private set; }
+
+    /// <summary>That request, whole (it opens the exchange's transcript after the handshake's).</summary>
+    private byte[]? postRequest;
+
+    /// <summary>
+    /// Our answer to the server's post-handshake CertificateRequest (RFC 9846 4.7.2), each message
+    /// in a record of its own under our current application key: our Certificate (the request's
+    /// context, <see cref="ClientChain"/>; empty when there is none), our CertificateVerify for one
+    /// with certificates (over ClientHello .. client Finished + the request + the Certificate),
+    /// our Finished (its MAC under our current application traffic secret, 4.4's Base Key for this
+    /// mode). The same knobs as <see cref="Finished"/>'s shape it; the handshake's transcript is
+    /// left as it was, as each exchange starts from it.
+    /// </summary>
+    /// <returns>The records.</returns>
+    /// <exception cref="InvalidOperationException">No post-handshake request came, or a
+    /// CertificateVerify is due and <see cref="ClientKey"/> is not set.</exception>
+    public byte[] PostAnswer()
+    {
+        byte[] request = postRequest ?? throw new InvalidOperationException("no post-handshake request");
+        var exchange = new List<byte[]>(messages) { request };
+        byte[] ExchangeHash() => Digest([.. exchange.SelectMany(m => m)]);
+        var records = new List<byte>();
+        IReadOnlyList<byte[]> chain = ClientChain ?? [];
+        byte[] entries = [.. chain.SelectMany((c, i) => (byte[])[.. U24(c.Length), .. c, .. V16(i == 0 && LeafExtensions is { } e ? e : [])])];
+        byte[] certificate = Message(11, [.. V8(AnswerContext ?? PostRequestContext!), .. U24(entries.Length), .. entries]);
+        exchange.Add(certificate);
+        records.AddRange(Seal(22, certificate));
+        if ((chain.Count > 0 && !OmitCertificateVerify) || VerifyEmpty)
+        {
+            (ushort scheme, Func<byte[], byte[]> sign) = ClientKey ?? throw new InvalidOperationException("no ClientKey for the CertificateVerify");
+            byte[] content = [.. Enumerable.Repeat((byte)0x20, 64), .. "TLS 1.3, client CertificateVerify"u8, 0, .. ExchangeHash()];
+            byte[] signature = sign(content);
+            if (CorruptSignature)
+            {
+                signature[^1] ^= 1;
+            }
+
+            byte[] verify = Message(15, [.. U16(AnswerScheme ?? scheme), .. V16(signature)]);
+            exchange.Add(verify);
+            records.AddRange(Seal(22, verify));
+        }
+
+        if (!OmitFinished)
+        {
+            records.AddRange(Seal(22, Message(20, FinishedMac(ClientApplication, ExchangeHash()))));
+        }
+
+        postRequest = null;
+        PostRequestContext = null;
+        return [.. records];
+    }
+
+    /// <summary>When set, <see cref="PostAnswer"/> leaves out its Finished (a test seals one of
+    /// its own after the answer's other records).</summary>
+    public bool OmitFinished { get; set; }
 
     /// <summary>A protected record under our current write key (the handshake key before our
     /// Finished, the application key after).</summary>

@@ -1150,6 +1150,17 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_tls13_negotiated")]
     internal static partial int Tls13Negotiated(TlsConnection* connection, uint* suite, uint* group, uint* scheme);
 
+    /// <summary>int httpasm_tls13_request_certificate(connection): queues a post-handshake
+    /// CertificateRequest (RFC 9846 4.7.2) under the current application key; the client's answer
+    /// then comes through <see cref="Tls13Receive"/> and ends with EVENT_AUTHENTICATED. One
+    /// request at a time: a second call before that event is refused.</summary>
+    /// <param name="connection">A connection past its handshake whose client offered
+    /// post_handshake_auth, started with client authentication configured.</param>
+    /// <returns>0 (queued: drain the output), or -1 with nothing sent or changed (the reasons:
+    /// httpasm.h).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_request_certificate")]
+    internal static partial int Tls13RequestCertificate(TlsConnection* connection);
+
     /// <summary>int httpasm_tls13_peer_certificates(connection, &amp;list, &amp;length): the client's
     /// certificate_list kept by the connection.</summary>
     /// <param name="connection">The connection.</param>

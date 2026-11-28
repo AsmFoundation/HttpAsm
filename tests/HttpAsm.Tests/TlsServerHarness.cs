@@ -390,6 +390,14 @@ internal sealed unsafe class TlsServerHarness : IDisposable
         return (count, count < 0 ? [] : new ReadOnlySpan<byte>(list, (int)length).ToArray());
     }
 
+    /// <summary>httpasm_tls13_request_certificate on this connection: post-handshake
+    /// authentication's CertificateRequest queued in the output (take it with
+    /// <see cref="TakeOutput()"/>); the client's answer then goes through <see cref="Receive"/>.
+    /// The request's context comes from the configured random source, so a FailAt counted to
+    /// that draw makes this call fail.</summary>
+    /// <returns>0 (queued), or -1 with nothing sent or changed.</returns>
+    public int RequestCertificate() => Native.Tls13RequestCertificate(connection);
+
     /// <summary>httpasm_tls13_peer_certificates with both out pointers NULL (the C header allows
     /// either): the count alone.</summary>
     /// <returns>The entries, or -1.</returns>

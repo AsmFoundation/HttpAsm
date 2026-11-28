@@ -97,5 +97,15 @@ TE_REQUEST_LENGTH   equ 35      ; our CertificateRequest's octets, header includ
 TM_BOUNDARY         equ 1       ; the message must end its record (a key change, 5.1; or a
                                 ; HelloRetryRequest sent: nothing may follow a ClientHello)
 TM_CONNECTED        equ 2       ; the handshake completed with this message
+TM_AUTHENTICATED    equ 4       ; a post-handshake authentication completed with this message
+
+; httpasm_tls13_connection.auth_state: post-handshake authentication (4.7.2), the server's
+TA_NONE             equ 0       ; no request outstanding
+TA_CERT             equ 1       ; our CertificateRequest sent: the client's Certificate next
+TA_CV               equ 2       ; its CertificateVerify next (a Certificate with certificates came)
+TA_FINISHED         equ 3       ; its Finished next
+TA_CONTEXT          equ 16      ; the request's context's octets (random: 4.4.2-4.2.1#3); with
+                                ; the 11 schemes the message is 51 octets, so its record fits the
+                                ; smallest record_size_limit a peer may set (64)
 
 %endif

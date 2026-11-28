@@ -237,11 +237,13 @@ ha_tls_out_plain:
 
 ; -----------------------------------------------------------------------------
 ; ha_tls_out_record: rbx = the connection, esi = the content type, rdx = the content, rcx = its
-;   octets (a few: an alert, a KeyUpdate), r8d = 1 when the alert reserve may be used: one
-;   record, sealed under .write once TF_WRITE_KEY is set (6.2: alerts are protected once keys
-;   are in use), plaintext before. -> eax = 0, or nonzero when it does not fit or the key
-;   refuses (its record limit).
+;   octets (a few: an alert, a KeyUpdate, a post-handshake CertificateRequest), r8d = 1 when the
+;   alert reserve may be used: one record, sealed under .write once TF_WRITE_KEY is set (6.2:
+;   alerts are protected once keys are in use), plaintext before. -> eax = 0, or nonzero when it
+;   does not fit or the key refuses (its record limit, or a content over the peer's
+;   record_size_limit). Nothing is queued then.
 ; -----------------------------------------------------------------------------
+global ha_tls_out_record:function hidden (ha_tls_out_record.end - ha_tls_out_record)
 align 16
 ha_tls_out_record:
     test    dword [rbx + httpasm_tls13_connection.flags], TF_WRITE_KEY
@@ -282,6 +284,7 @@ ha_tls_out_record:
     pop     r13
     pop     r12
     ret
+.end:
 
 ; -----------------------------------------------------------------------------
 ; A flight: handshake messages in protected records under .write, built in place in the output.
@@ -514,7 +517,9 @@ ha_tls_key_update_send:
 ; ha_tls_message: rbx = the connection, rsi = a whole handshake message (header and body), rdx =
 ;   its octets -> eax = TM_* flags, or minus an alert. Before the handshake completes, the role
 ;   reads it (tls/server.asm; the client's machine is 4d's); after, the messages either side may
-;   get: KeyUpdate (4.7.3) here, the rest with 4c5 and 4d (unexpected_message until then).
+;   get: KeyUpdate (4.7.3) here, and the server's post-handshake authentication's (the client's
+;   answer to our CertificateRequest: tls/server.asm, which refuses whatever else comes); the
+;   client's NewSessionTicket with 4d.
 ; -----------------------------------------------------------------------------
 align 16
 ha_tls_message:
@@ -526,7 +531,16 @@ ha_tls_message:
     jmp     ha_tls_server_message           ; (a tail call)
 .post:
     cmp     byte [rsi], HTTPASM_TLS_KEY_UPDATE
-    jne     .unexpected
+    je      .key_update
+    test    dword [rbx + httpasm_tls13_connection.flags], TF_CLIENT
+    jnz     .unexpected
+    mov     dword [rbx + httpasm_tls13_connection.ignored], 0  ; (an answer's message is progress)
+    jmp     ha_tls_server_message           ; (a tail call: CONNECTED's messages, 4.7.2)
+.key_update:
+    ; inside the client's answer to our request a KeyUpdate is a message of another type, which
+    ; may not come between its Certificate, CertificateVerify and Finished (4.7.2-1#5)
+    cmp     dword [rbx + httpasm_tls13_connection.auth_state], TA_CV
+    jae     .unexpected
     push    r12
     push    r13
     sub     rsp, 56                         ; [rsp]: the next secret (two pushes + 56: aligned)
@@ -810,6 +824,9 @@ httpasm_tls13_receive:
     jne     .unexpected
     cmp     qword [rbx + httpasm_tls13_connection.message_length], 0
     jne     .unexpected                     ; inside a handshake message (5.1: no interleaving)
+    cmp     dword [rbx + httpasm_tls13_connection.auth_state], TA_CV
+    jae     .unexpected                     ; inside the client's answer to our post-handshake
+                                            ; request, between its messages (4.7.2-1#5)
     test    rdx, rdx
     jz      .nothing                        ; an empty record (5.4 allows it): counted
     mov     dword [rbx + httpasm_tls13_connection.ignored], 0
@@ -841,9 +858,14 @@ httpasm_tls13_receive:
     call    ha_tls_handshake
     test    eax, eax
     js      .alert_answer
+    test    eax, TM_AUTHENTICATED
+    jnz     .authenticated
     test    eax, TM_CONNECTED
     jz      .consumed
     mov     dword [r14 + httpasm_tls13_event.kind], HTTPASM_TLS_EVENT_CONNECTED
+    jmp     .consumed
+.authenticated:
+    mov     dword [r14 + httpasm_tls13_event.kind], HTTPASM_TLS_EVENT_AUTHENTICATED
     jmp     .consumed
 .alert:
     ; rsi, rdx = an alert's octets: exactly two (6: one alert to a record, whole)

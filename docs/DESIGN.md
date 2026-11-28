@@ -2026,8 +2026,20 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      reordered; a fuzzer driving a server from hostile ClientHellos and flights (every tier the
      same transcript, only the allowed answers); the constant-time check over the engine's
      secret handling.
-     State (2026-11-28): 4c1-4c4 done, and 4c5's application data, KeyUpdate, close_notify and
-     AES-GCM limit; post-handshake authentication next, then the constant-time check.
+     State (2026-11-28): 4c1-4c5 done; the constant-time check over the engine next, then 4d.
+     Post-handshake authentication (4c5, 4.7.2): `httpasm_tls13_request_certificate` queues a
+     CertificateRequest with 16 random octets of context (one record of 52 octets: the smallest
+     record_size_limit holds it) when the client offered post_handshake_auth and the connection
+     has the peer-chain span (client authentication configured); one request at a time. The
+     client's answer is judged as in the handshake (the context its request's), over ClientHello
+     .. client Finished + the request (the handshake's transcript kept aside in .auth_base, so
+     each exchange starts from it, 4.4), its Finished under the client's current application
+     secret (after its KeyUpdates too); application data and KeyUpdates may come before the answer
+     begins and not between its messages (4.7.2-1#5); the end is the event AUTHENTICATED (the
+     chain through `httpasm_tls13_peer_certificates`; 0 entries: declined, the caller's to
+     judge). The connection grew to 3008 octets. Proven by the tests' client (three key kinds,
+     two exchanges in a row and one after a KeyUpdate, every refusal of the call and of the
+     answer) and by `openssl s_client -enable_pha`, which answers on its own.
      Client authentication (4c4): HTTPASM_TLS_CLIENT_AUTH_REQUEST puts a CertificateRequest after
      EncryptedExtensions (an empty context; signature_algorithms naming the 11 schemes the engine
      verifies: ecdsa_secp256r1_sha256, ed25519, ecdsa_secp384r1_sha384, ed448, ecdsa_secp521r1_

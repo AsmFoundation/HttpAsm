@@ -1505,11 +1505,11 @@ internal unsafe struct TlsEvent
     public uint Reserved;
 }
 
-/// <summary>httpasm_tls13_connection (httpasm.h): one connection's state, 2,784 octets, opaque.</summary>
+/// <summary>httpasm_tls13_connection (httpasm.h): one connection's state, 3,008 octets, opaque.</summary>
 internal unsafe struct TlsConnection
 {
     /// <summary>The state (its secrets included: httpasm_tls13_wipe it).</summary>
-    public fixed ulong Opaque[348];
+    public fixed ulong Opaque[376];
 }
 
 /// <summary>The engine's constants (httpasm.h): NamedGroups, SignatureSchemes, their bits, the
@@ -1574,6 +1574,10 @@ internal static class TlsEngine
 
     /// <summary>HTTPASM_TLS_EVENT_FAILED.</summary>
     public const uint EventFailed = 4;
+
+    /// <summary>HTTPASM_TLS_EVENT_AUTHENTICATED: the client answered a post-handshake
+    /// CertificateRequest (its chain: httpasm_tls13_peer_certificates).</summary>
+    public const uint EventAuthenticated = 5;
 
     /// <summary>HTTPASM_TLS_EVENT_PEER: a failure's alert was the peer's.</summary>
     public const uint EventPeer = 1;

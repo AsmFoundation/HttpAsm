@@ -862,6 +862,8 @@ HTTPASM_TLS_EVENT_CONNECTED     equ 1       ; the handshake completed
 HTTPASM_TLS_EVENT_DATA          equ 2       ; application data: .data, .length, inside the input given
 HTTPASM_TLS_EVENT_CLOSED        equ 3       ; the peer's close_notify: it sends nothing more
 HTTPASM_TLS_EVENT_FAILED        equ 4       ; the connection failed: .alert (ours, sent; or the peer's)
+HTTPASM_TLS_EVENT_AUTHENTICATED equ 5       ; the client answered our post-handshake CertificateRequest
+                                            ; (its chain: httpasm_tls13_peer_certificates; 0 entries: declined)
 HTTPASM_TLS_EVENT_PEER          equ 1       ; httpasm_tls13_event.flags: the alert was the peer's
 
 HTTPASM_TLS_MESSAGE_DEFAULT     equ 16384   ; the largest handshake message gathered by default
@@ -897,7 +899,7 @@ struc httpasm_tls13_event
     .reserved:          resd 1
 endstruc
 
-; httpasm_tls13_connection: one connection's state (2784 octets, struct size id 33), in the
+; httpasm_tls13_connection: one connection's state (3008 octets, struct size id 33), in the
 ; caller's memory; opaque to callers (the C header gives its size only). Its secrets and keys
 ; are secret: wipe it when done (httpasm_tls13_wipe).
 struc httpasm_tls13_connection
@@ -941,7 +943,13 @@ struc httpasm_tls13_connection
     .peer_capacity:     resq 1      ; its size (the configuration's max_message)
     .peer_length:       resq 1      ; the client's certificate_list's octets kept there
     .peer_count:        resd 1      ; its entries (TF_PEER_CHAIN: the client's Certificate came)
-    .reserved2:         resd 1      ; (the size stays a multiple of 16)
+    ; post-handshake authentication (4c5, 4.7.2): one request outstanding at most
+    .auth_state:        resd 1      ; TA_* (tls/engine.inc): none, or which of the client's
+                                    ; Certificate, CertificateVerify, Finished comes next
+    .auth_context:      resb 16     ; the request's certificate_request_context (random)
+    .auth_base:         resb httpasm_sha512_ctx_size    ; the transcript through the client's
+                                    ; Finished, kept while an exchange adds its messages to
+                                    ; .transcript (each exchange's starts there, 4.4)
 endstruc
 
 ; -----------------------------------------------------------------------------

@@ -192,6 +192,7 @@ extern httpasm_tls13_output_done     ; void (connection, n)
 extern httpasm_tls13_send            ; int64_t (connection, data, length): octets taken, -1
 extern httpasm_tls13_close           ; int (connection): 0, -1
 extern httpasm_tls13_key_update      ; int (connection, request): 0, -1
+extern httpasm_tls13_request_certificate ; int (connection): 0, -1 (post-handshake authentication)
 extern httpasm_tls13_negotiated      ; int (connection, *suite, *group, *scheme): 0, 1, 2, -1
 extern httpasm_tls13_peer_certificates ; int (connection, *list, *length): entries, -1 before the client's Certificate
 extern httpasm_tls13_wipe            ; void (connection)
