@@ -20,7 +20,10 @@
  * signatures; ML-KEM-512/768/1024 key pairs, encapsulations and decapsulations (a valid and a
  * tampered ciphertext: implicit rejection must not branch); FFDHE's public key and shared secret
  * (ffdhe2048); RSA's prepared keys and PKCS#1 v1.5 and PSS signatures at 1024 bits (the generic
- * arithmetic) and 2048 (v3's own k = 16 square and product).
+ * arithmetic) and 2048 (v3's own k = 16 square and product); the ASN.1 reader, PEM and the
+ * private keys' loader over secret key files (encodings(), keys()); and TLS 1.3's key schedule
+ * (every derivation from a secret IKM) and record layer (keys from a secret traffic secret,
+ * secret contents sealed and opened, a forged record refused) for its three suites.
  *
  * Outside valgrind the client requests do nothing and the run proves nothing: the program then
  * says so and exits 2. Usage: valgrind --error-exitcode=1 ct (tests/ct/run.sh).
@@ -721,6 +724,71 @@ static void keys(const char *tier)
     public(der, at);
 }
 
+/* tls13: the key schedule from a secret (EC)DHE output and PSK through every derivation
+ * (Extract, Expand-Label, Derive-Secret, Finished, the update, the exporter), and the record
+ * layer under a secret traffic secret: keys made, records of secret contents sealed with
+ * padding (their wire octets then public), opened back (the content and its length come out:
+ * the opener's scan is constant time and its result public by design), and a forged record
+ * refused (the verdict public), for each of the three suites. */
+static void tls13(const char *tier)
+{
+    static httpasm_tls13_record_key writer, reader;
+    static uint8_t ikm[48], secret_in[48], derived[48], out[64], record[400], content[300];
+    static const uint8_t label[] = "c hs traffic", transcript[48] = { 7 };
+    for (int hash = HTTPASM_HASH_SHA256; hash <= HTTPASM_HASH_SHA384; hash++) {
+        size_t n = hash == HTTPASM_HASH_SHA256 ? 32 : 48;
+        fill(ikm, n, (unsigned)hash);
+        secret(ikm, n);
+        expect(httpasm_tls13_extract(hash, NULL, 0, ikm, n, secret_in) == 0, "tls13_extract", tier);
+        expect(httpasm_tls13_extract(hash, NULL, 0, NULL, 0, derived) == 0, "tls13_extract (no IKM)", tier);
+        public(derived, n);                             /* (from zeros alone: public) */
+        expect(httpasm_tls13_derive_secret(hash, secret_in, label, sizeof label - 1, transcript, derived) == 0,
+               "tls13_derive_secret", tier);
+        expect(httpasm_tls13_derive_secret(hash, secret_in, (const uint8_t *)"derived", 7, NULL, out) == 0,
+               "tls13_derive_secret (derived)", tier);
+        expect(httpasm_tls13_expand_label(hash, derived, (const uint8_t *)"key", 3, NULL, 0, out, 32) == 0,
+               "tls13_expand_label", tier);
+        expect(httpasm_tls13_finished(hash, derived, transcript, out) == 0, "tls13_finished", tier);
+        public(out, n);                                 /* verify_data goes on the wire */
+        expect(httpasm_tls13_update_secret(hash, derived, out) == 0, "tls13_update_secret", tier);
+        expect(httpasm_tls13_export(hash, derived, (const uint8_t *)"EXPORTER-ct", 11, transcript, 10, out, 64) == 0,
+               "tls13_export", tier);
+        public(out, sizeof out);
+        public(secret_in, n);
+        public(derived, n);
+    }
+    static const int suites[] = { HTTPASM_TLS_AES_128_GCM_SHA256, HTTPASM_TLS_AES_256_GCM_SHA384,
+                                  HTTPASM_TLS_CHACHA20_POLY1305_SHA256 };
+    for (size_t s = 0; s < 3; s++) {
+        fill(secret_in, sizeof secret_in, 900 + (unsigned)s);
+        secret(secret_in, sizeof secret_in);
+        expect(httpasm_tls13_record_key_init(&writer, suites[s], secret_in) == 0, "tls13_record_key_init", tier);
+        expect(httpasm_tls13_record_key_init(&reader, suites[s], secret_in) == 0, "tls13_record_key_init", tier);
+        for (size_t len = 0; len <= 300; len += 100) {
+            fill(content, len, 1000 + (unsigned)len);
+            secret(content, len);
+            int64_t sealed = httpasm_tls13_seal(&writer, HTTPASM_TLS_CONTENT_APPLICATION_DATA, content, len, 7, record, sizeof record);
+            expect(sealed == (int64_t)(5 + len + 1 + 7 + 16), "tls13_seal", tier);
+            public(record, sizeof record);              /* the record goes on the wire */
+            uint8_t type = 0;
+            int64_t opened = httpasm_tls13_open(&reader, record, (size_t)sealed, &type);
+            expect(opened == (int64_t)len, "tls13_open", tier);
+            public(record, sizeof record);              /* the content, delivered */
+            public(&type, 1);
+        }
+        expect(httpasm_tls13_seal(&writer, HTTPASM_TLS_CONTENT_HANDSHAKE, content, 50, 0, record, sizeof record) > 0, "tls13_seal", tier);
+        public(record, sizeof record);
+        record[20] ^= 1;
+        uint8_t type = 0;
+        expect(httpasm_tls13_open(&reader, record, 5 + 50 + 1 + 16, &type) == -HTTPASM_TLS_ALERT_BAD_RECORD_MAC,
+               "tls13_open (forged)", tier);
+        public(record, sizeof record);
+        public(&writer, sizeof writer);
+        public(&reader, sizeof reader);
+        public(secret_in, sizeof secret_in);
+    }
+}
+
 /* checks: every primitive at every tier valgrind's CPU offers (a tier whose features equal the
  * one before is skipped: valgrind's CPU tops out below it). */
 static void *checks(void *unused)
@@ -747,6 +815,7 @@ static void *checks(void *unused)
         rsa(rsa_2048, names[t]);
         encodings(names[t]);
         keys(names[t]);
+        tls13(names[t]);
     }
     return NULL;
 }

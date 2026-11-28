@@ -255,7 +255,8 @@ uint32_t httpasm_abi_version(void);
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
  * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
  * 22 httpasm_hmac_sha512_ctx, 23 httpasm_asn1, 24 httpasm_pem, 25 httpasm_private_key,
- * 26 httpasm_certificate, 27 httpasm_public_key; 0 for any other value. */
+ * 26 httpasm_certificate, 27 httpasm_public_key, 28 httpasm_tls13_record_key; 0 for any other
+ * value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -1329,6 +1330,149 @@ int httpasm_public_key_read(httpasm_public_key *key, const uint8_t *spki, size_t
  * RSA kind with either), a curve and its point, an Edwards key. Returns 0 for one key pair,
  * else -1. */
 int httpasm_private_key_matches(const httpasm_private_key *key, const httpasm_public_key *pub);
+
+/* ------------------------------------------------------------------------------------------
+ * TLS 1.3 (RFC 9846): the key schedule (7.1-7.5) and the record layer (5). The handshake that
+ * chains them is built on these; they are usable alone (tests, a QUIC stack's own labels).
+ * Hashes are HTTPASM_HASH_SHA256 or HTTPASM_HASH_SHA384; labels are given without the
+ * "tls13 " prefix HKDF-Expand-Label adds.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_TLS_AES_128_GCM_SHA256       0x1301  /* RFC 9846 9.1's MUST */
+#define HTTPASM_TLS_AES_256_GCM_SHA384       0x1302
+#define HTTPASM_TLS_CHACHA20_POLY1305_SHA256 0x1303
+
+#define HTTPASM_TLS_CONTENT_CHANGE_CIPHER_SPEC 20    /* ContentType (5.1) */
+#define HTTPASM_TLS_CONTENT_ALERT              21
+#define HTTPASM_TLS_CONTENT_HANDSHAKE          22
+#define HTTPASM_TLS_CONTENT_APPLICATION_DATA   23
+
+/* AlertDescription (6): the record layer answers minus one of these where the connection must
+ * end with that alert. */
+#define HTTPASM_TLS_ALERT_CLOSE_NOTIFY            0
+#define HTTPASM_TLS_ALERT_UNEXPECTED_MESSAGE      10
+#define HTTPASM_TLS_ALERT_BAD_RECORD_MAC          20
+#define HTTPASM_TLS_ALERT_RECORD_OVERFLOW         22
+#define HTTPASM_TLS_ALERT_HANDSHAKE_FAILURE       40
+#define HTTPASM_TLS_ALERT_BAD_CERTIFICATE         42
+#define HTTPASM_TLS_ALERT_UNSUPPORTED_CERTIFICATE 43
+#define HTTPASM_TLS_ALERT_CERTIFICATE_REVOKED     44
+#define HTTPASM_TLS_ALERT_CERTIFICATE_EXPIRED     45
+#define HTTPASM_TLS_ALERT_CERTIFICATE_UNKNOWN     46
+#define HTTPASM_TLS_ALERT_ILLEGAL_PARAMETER       47
+#define HTTPASM_TLS_ALERT_UNKNOWN_CA              48
+#define HTTPASM_TLS_ALERT_ACCESS_DENIED           49
+#define HTTPASM_TLS_ALERT_DECODE_ERROR            50
+#define HTTPASM_TLS_ALERT_DECRYPT_ERROR           51
+#define HTTPASM_TLS_ALERT_PROTOCOL_VERSION        70
+#define HTTPASM_TLS_ALERT_INSUFFICIENT_SECURITY   71
+#define HTTPASM_TLS_ALERT_INTERNAL_ERROR          80
+#define HTTPASM_TLS_ALERT_INAPPROPRIATE_FALLBACK  86
+#define HTTPASM_TLS_ALERT_USER_CANCELED           90
+#define HTTPASM_TLS_ALERT_MISSING_EXTENSION       109
+#define HTTPASM_TLS_ALERT_UNSUPPORTED_EXTENSION   110
+#define HTTPASM_TLS_ALERT_UNRECOGNIZED_NAME       112
+#define HTTPASM_TLS_ALERT_BAD_CERTIFICATE_STATUS_RESPONSE 113
+#define HTTPASM_TLS_ALERT_UNKNOWN_PSK_IDENTITY    115
+#define HTTPASM_TLS_ALERT_CERTIFICATE_REQUIRED    116
+#define HTTPASM_TLS_ALERT_GENERAL_ERROR           117
+#define HTTPASM_TLS_ALERT_NO_APPLICATION_PROTOCOL 120
+
+#define HTTPASM_TLS_RECORD_HEADER  5        /* type, legacy_record_version, length */
+#define HTTPASM_TLS_PLAINTEXT_MAX  16384    /* 2^14: a record's content at most (5.1) */
+#define HTTPASM_TLS_INNER_MAX      16385    /* TLSInnerPlaintext at most: the content and its type (5.4) */
+#define HTTPASM_TLS_CIPHERTEXT_MAX 16640    /* 2^14 + 256: a protected record's fragment at most (5.2) */
+#define HTTPASM_TLS_TAG            16       /* every suite's AEAD tag */
+#define HTTPASM_TLS_GCM_RECORDS    23726566 /* floor(2^24.5): AES-GCM's records under one key (5.5) */
+
+/* HKDF-Extract(salt, IKM) into secret[0..Hash.length) (7.1). An IKM of no octets is TLS's "0":
+ * Hash.length zeros (the master secret's, and an early secret's without a PSK); no salt is
+ * HKDF's default, the same zeros. Returns 0, or -1 for an unknown hash (nothing written). */
+int httpasm_tls13_extract(int hash, const uint8_t *salt, size_t salt_length, const uint8_t *ikm,
+                          size_t ikm_length, uint8_t *secret);
+
+/* HKDF-Expand-Label(Secret, Label, Context, Length) (7.1): HKDF-Expand over HkdfLabel { uint16
+ * Length, "tls13 " + Label, Context } into out[0..length); secret holds Hash.length octets and
+ * must not overlap out, nor may the context. Returns 0, or -1 (nothing written) for an unknown
+ * hash, a label empty or over 249 octets, a context over 255, or a length over 255 *
+ * Hash.length. */
+int httpasm_tls13_expand_label(int hash, const uint8_t *secret, const uint8_t *label,
+                               size_t label_length, const uint8_t *context, size_t context_length,
+                               uint8_t *out, size_t length);
+
+/* Derive-Secret(Secret, Label, Messages) (7.1) into out[0..Hash.length), the caller having
+ * hashed the messages into transcript_hash (Hash.length octets); NULL is the hash of none,
+ * Hash(""): the "derived" steps and the exporter's. Returns 0, or -1 as expand_label refuses. */
+int httpasm_tls13_derive_secret(int hash, const uint8_t *secret, const uint8_t *label,
+                                size_t label_length, const uint8_t *transcript_hash, uint8_t *out);
+
+/* A Finished message's verify_data (4.5.3): HMAC(HKDF-Expand-Label(base_key, "finished", "",
+ * Hash.length), transcript_hash), Hash.length octets; base_key is the sender's handshake (or,
+ * after the handshake, application) traffic secret. Compare what was received with this in
+ * constant time. Returns 0, or -1 for an unknown hash. */
+int httpasm_tls13_finished(int hash, const uint8_t *base_key, const uint8_t *transcript_hash,
+                           uint8_t *verify_data);
+
+/* application_traffic_secret_N+1 = HKDF-Expand-Label(secret_N, "traffic upd", "",
+ * Hash.length) (7.2) into next (not overlapping secret); wipe the old one once its keys are
+ * made. Returns 0, or -1 for an unknown hash. */
+int httpasm_tls13_update_secret(int hash, const uint8_t *secret, uint8_t *next);
+
+/* TLS-Exporter(label, context, length) (7.5) from the exporter_master_secret (or the early
+ * exporter's, by a separate call: 7.5's separate interface): HKDF-Expand-Label(Derive-Secret(
+ * secret, label, ""), "exporter", Hash(context), length). No context and an empty one give the
+ * same value. Returns 0, or -1 as expand_label refuses the label or the length. */
+int httpasm_tls13_export(int hash, const uint8_t *exporter_secret, const uint8_t *label,
+                         size_t label_length, const uint8_t *context, size_t context_length,
+                         uint8_t *out, size_t length);
+
+/* One direction's record protection under one traffic secret (1056 octets): the suite, the
+ * write key made ready for its AEAD, the IV, the sequence number. Its octets are a secret:
+ * wipe it when done (explicit_bzero). */
+typedef struct httpasm_tls13_record_key {
+    uint32_t suite;                     /* HTTPASM_TLS_* */
+    uint32_t limit;                     /* TLSInnerPlaintext's octets at most: 2^14 + 1, or lower
+                                           for record_size_limit (RFC 8449), set after init */
+    uint64_t sequence;                  /* the next record's (5.3) */
+    uint8_t iv[12];
+    uint32_t reserved;
+    union {
+        httpasm_aes_gcm_key gcm;
+        uint8_t chacha20[32];
+    } aead;
+} httpasm_tls13_record_key;
+
+/* The record at the start of in[0..length) (5.1): its whole length (the 5-octet header and the
+ * fragment) when all of it is there; 0 when more octets are needed; or
+ * -HTTPASM_TLS_ALERT_RECORD_OVERFLOW for a fragment longer than a TLS 1.3 record carries
+ * (2^14 + 256 octets for application_data, 2^14 for the other types). The type's value and
+ * the legacy version are not judged (the engine knows what it may receive). */
+int64_t httpasm_tls_record_length(const uint8_t *in, size_t length);
+
+/* Makes a record key from a traffic secret (Hash.length octets of the suite's hash) under
+ * suite: key and IV by 7.3's labels, sequence 0, limit 2^14 + 1. Returns 0, or -1 for an
+ * unknown suite (key then all zeros). */
+int httpasm_tls13_record_key_init(httpasm_tls13_record_key *key, int suite,
+                                  const uint8_t *traffic_secret);
+
+/* Seals one record into out[0..capacity): header, AEAD of content || content_type || padding
+ * zeros, tag; the sequence number advances. content may be out + 5 (built in place) or must
+ * not overlap out. Returns the record's length; -1 (nothing written) for content_type 0,
+ * content over 2^14 octets, TLSInnerPlaintext over key->limit or a record over capacity; -2
+ * when the key has sealed all its AEAD may (AES-GCM's 2^24.5 records, 5.5): KeyUpdate first. */
+int64_t httpasm_tls13_seal(httpasm_tls13_record_key *key, int content_type,
+                           const uint8_t *content, size_t length, size_t padding, uint8_t *out,
+                           size_t capacity);
+
+/* Opens one record, record[0..length) as httpasm_tls_record_length framed it, in place: the
+ * content is then record[5 ..) and *content_type its type, and the sequence number advances.
+ * Returns the content's length; or minus the alert to end the connection with:
+ * UNEXPECTED_MESSAGE (an outer type other than application_data, or a plaintext of zeros only),
+ * DECODE_ERROR (the header's length is not length - 5), RECORD_OVERFLOW (a fragment over 2^14 +
+ * 256, or TLSInnerPlaintext over key->limit), BAD_RECORD_MAC (the tag does not verify: the
+ * fragment is then zeros), INTERNAL_ERROR (the sequence number would wrap). */
+int64_t httpasm_tls13_open(httpasm_tls13_record_key *key, uint8_t *record, size_t length,
+                           uint8_t *content_type);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)

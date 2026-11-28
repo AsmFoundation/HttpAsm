@@ -652,6 +652,65 @@ HTTPASM_KEY_ED25519             equ 6
 HTTPASM_KEY_ED448               equ 7
 
 ; -----------------------------------------------------------------------------
+; TLS 1.3 (RFC 9846): the cipher suites, the alerts, the record layer's sizes, and
+; httpasm_tls13_record_key, one direction's protection under one traffic secret
+; (tls/record.asm), 1056 octets (struct size id 28).
+; -----------------------------------------------------------------------------
+HTTPASM_TLS_AES_128_GCM_SHA256          equ 0x1301
+HTTPASM_TLS_AES_256_GCM_SHA384          equ 0x1302
+HTTPASM_TLS_CHACHA20_POLY1305_SHA256    equ 0x1303
+
+HTTPASM_TLS_CONTENT_CHANGE_CIPHER_SPEC  equ 20      ; record content types (RFC 9846 5.1)
+HTTPASM_TLS_CONTENT_ALERT               equ 21
+HTTPASM_TLS_CONTENT_HANDSHAKE           equ 22
+HTTPASM_TLS_CONTENT_APPLICATION_DATA    equ 23
+
+HTTPASM_TLS_ALERT_CLOSE_NOTIFY          equ 0       ; AlertDescription (RFC 9846 6)
+HTTPASM_TLS_ALERT_UNEXPECTED_MESSAGE    equ 10
+HTTPASM_TLS_ALERT_BAD_RECORD_MAC        equ 20
+HTTPASM_TLS_ALERT_RECORD_OVERFLOW       equ 22
+HTTPASM_TLS_ALERT_HANDSHAKE_FAILURE     equ 40
+HTTPASM_TLS_ALERT_BAD_CERTIFICATE       equ 42
+HTTPASM_TLS_ALERT_UNSUPPORTED_CERTIFICATE equ 43
+HTTPASM_TLS_ALERT_CERTIFICATE_REVOKED   equ 44
+HTTPASM_TLS_ALERT_CERTIFICATE_EXPIRED   equ 45
+HTTPASM_TLS_ALERT_CERTIFICATE_UNKNOWN   equ 46
+HTTPASM_TLS_ALERT_ILLEGAL_PARAMETER     equ 47
+HTTPASM_TLS_ALERT_UNKNOWN_CA            equ 48
+HTTPASM_TLS_ALERT_ACCESS_DENIED         equ 49
+HTTPASM_TLS_ALERT_DECODE_ERROR          equ 50
+HTTPASM_TLS_ALERT_DECRYPT_ERROR         equ 51
+HTTPASM_TLS_ALERT_PROTOCOL_VERSION      equ 70
+HTTPASM_TLS_ALERT_INSUFFICIENT_SECURITY equ 71
+HTTPASM_TLS_ALERT_INTERNAL_ERROR        equ 80
+HTTPASM_TLS_ALERT_INAPPROPRIATE_FALLBACK equ 86
+HTTPASM_TLS_ALERT_USER_CANCELED         equ 90
+HTTPASM_TLS_ALERT_MISSING_EXTENSION     equ 109
+HTTPASM_TLS_ALERT_UNSUPPORTED_EXTENSION equ 110
+HTTPASM_TLS_ALERT_UNRECOGNIZED_NAME     equ 112
+HTTPASM_TLS_ALERT_BAD_CERTIFICATE_STATUS_RESPONSE equ 113
+HTTPASM_TLS_ALERT_UNKNOWN_PSK_IDENTITY  equ 115
+HTTPASM_TLS_ALERT_CERTIFICATE_REQUIRED  equ 116
+HTTPASM_TLS_ALERT_GENERAL_ERROR         equ 117
+HTTPASM_TLS_ALERT_NO_APPLICATION_PROTOCOL equ 120
+
+HTTPASM_TLS_RECORD_HEADER       equ 5               ; type, legacy_record_version, length
+HTTPASM_TLS_PLAINTEXT_MAX       equ 16384           ; 2^14: a record's content at most (5.1)
+HTTPASM_TLS_INNER_MAX           equ 16385           ; TLSInnerPlaintext: the content and its type (5.4)
+HTTPASM_TLS_CIPHERTEXT_MAX      equ 16640           ; 2^14 + 256: a protected record's fragment (5.2)
+HTTPASM_TLS_TAG                 equ 16              ; every suite's AEAD tag
+HTTPASM_TLS_GCM_RECORDS         equ 23726566        ; floor(2^24.5): AES-GCM's records under one key (5.5)
+
+struc httpasm_tls13_record_key
+    .suite:             resd 1      ; HTTPASM_TLS_*: the cipher suite
+    .limit:             resd 1      ; TLSInnerPlaintext's octets at most: 2^14 + 1, or record_size_limit's
+    .sequence:          resq 1      ; the next record's sequence number (5.3)
+    .iv:                resb 12     ; the write IV (7.3)
+    .reserved:          resd 1
+    .aead:              resb httpasm_aes_gcm_key_size   ; the AES-GCM key, or ChaCha20-Poly1305's 32 octets
+endstruc
+
+; -----------------------------------------------------------------------------
 ; CPU features: the bits of httpasm_cpu_found, httpasm_cpu_features and httpasm_cpu_limit, and
 ; of the core's ha_cpu. Levels are the x86-64 psABI's; groups are instructions that CPUs of one
 ; level may or may not have. cpu.inc has the rules (what each level adds, which group needs

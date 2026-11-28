@@ -58,6 +58,9 @@
     <None Include="../../specs/rfc/rfc8032.txt" Link="specs/rfc/rfc8032.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- RFC 7919 itself: the FFDHE tests read Appendix A's primes from it (their model's moduli). -->
     <None Include="../../specs/rfc/rfc7919.txt" Link="specs/rfc/rfc7919.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- RFC 8448 itself: the TLS 1.3 key schedule and record tests read its five handshake
+         traces (every secret, key, IV and record) from it (Rfc8448.cs). -->
+    <None Include="../../specs/rfc/rfc8448.txt" Link="specs/rfc/rfc8448.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

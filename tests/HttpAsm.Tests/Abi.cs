@@ -833,6 +833,40 @@ internal static class Abi
     /// <summary>HTTPASM_HASH_SHA512: the largest hash a PSS key may bind.</summary>
     public const int HashSha512 = 5;
 
+    /// <summary>HTTPASM_TLS_AES_128_GCM_SHA256: RFC 9846 9.1's mandatory suite.</summary>
+    public const int TlsAes128GcmSha256 = 0x1301;
+
+    /// <summary>HTTPASM_TLS_AES_256_GCM_SHA384.</summary>
+    public const int TlsAes256GcmSha384 = 0x1302;
+
+    /// <summary>HTTPASM_TLS_CHACHA20_POLY1305_SHA256.</summary>
+    public const int TlsChaCha20Poly1305Sha256 = 0x1303;
+
+    /// <summary>HTTPASM_TLS_CONTENT_ALERT.</summary>
+    public const int TlsAlert = 21;
+
+    /// <summary>HTTPASM_TLS_CONTENT_HANDSHAKE.</summary>
+    public const int TlsHandshake = 22;
+
+    /// <summary>HTTPASM_TLS_CONTENT_APPLICATION_DATA: every protected record's outer type.</summary>
+    public const int TlsApplicationData = 23;
+
+    /// <summary>HTTPASM_TLS_ALERT_UNEXPECTED_MESSAGE: what the opener answers negated for an
+    /// outer type other than application_data or a plaintext of zeros.</summary>
+    public const int AlertUnexpectedMessage = 10;
+
+    /// <summary>HTTPASM_TLS_ALERT_BAD_RECORD_MAC.</summary>
+    public const int AlertBadRecordMac = 20;
+
+    /// <summary>HTTPASM_TLS_ALERT_RECORD_OVERFLOW.</summary>
+    public const int AlertRecordOverflow = 22;
+
+    /// <summary>HTTPASM_TLS_ALERT_DECODE_ERROR.</summary>
+    public const int AlertDecodeError = 50;
+
+    /// <summary>HTTPASM_TLS_ALERT_INTERNAL_ERROR: the sequence number would wrap.</summary>
+    public const int AlertInternalError = 80;
+
     /// <summary>HTTPASM_KEY_RSA: an rsaEncryption key (both paddings).</summary>
     public const int KeyRsa = 1;
 
@@ -1239,6 +1273,34 @@ internal unsafe struct PublicKey
 
     /// <summary>The RSA key prepared (httpasm_rsa_public_key, 2080 octets).</summary>
     public fixed ulong Rsa[260];
+}
+
+/// <summary>
+/// httpasm_tls13_record_key (httpasm.h): one direction's record protection under one traffic
+/// secret, 1056 octets. Its octets are the secret; the tests make it with
+/// <see cref="Native.Tls13RecordKeyInit"/> and read the sequence number and IV, and set
+/// <see cref="Limit"/> or <see cref="Sequence"/> to reach the limits without sealing millions of
+/// records.
+/// </summary>
+internal unsafe struct Tls13RecordKey
+{
+    /// <summary>The cipher suite's code (0x1301, 0x1302, 0x1303).</summary>
+    public uint Suite;
+
+    /// <summary>TLSInnerPlaintext's octets at most (2^14 + 1 after init).</summary>
+    public uint Limit;
+
+    /// <summary>The next record's sequence number.</summary>
+    public ulong Sequence;
+
+    /// <summary>The write IV.</summary>
+    public fixed byte Iv[12];
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+
+    /// <summary>The AES-GCM key, or ChaCha20-Poly1305's 32 octets at its start.</summary>
+    public AesGcmKey Aead;
 }
 
 /// <summary>httpasm.h's ASN.1 constants: the rules, the tag's bits, the universal types the reader checks.</summary>

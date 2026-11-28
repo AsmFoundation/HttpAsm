@@ -104,9 +104,8 @@ public sealed unsafe class CertificateTests
 
     /// <summary>
     /// The .NET copies of httpasm_certificate and httpasm_public_key have the library's sizes,
-    /// 152 and 2248 octets, under struct ids 26 and 27, the registry's last: id 28 answers 0, as
-    /// any id past the registry does (the end check moves to the newest structure's tests each
-    /// time one is added).
+    /// 152 and 2248 octets, under struct ids 26 and 27 (the registry's end is checked by the
+    /// newest structure's tests: TlsRecordTests).
     /// </summary>
     [Fact]
     public void StructuresMatchTheLibrary()
@@ -116,7 +115,6 @@ public sealed unsafe class CertificateTests
         Assert.Equal(2248, sizeof(PublicKey));
         Assert.Equal((uint)sizeof(Certificate), Native.StructSize(26));
         Assert.Equal((uint)sizeof(PublicKey), Native.StructSize(27));
-        Assert.Equal(0u, Native.StructSize(28));
     }
 
     /// <summary>A self-signed certificate .NET makes with a key, its validity given, with or

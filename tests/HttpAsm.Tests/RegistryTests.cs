@@ -17,6 +17,8 @@ public sealed class RegistryTests(ITestOutputHelper output)
     /// encoding rules (ITU-T X.690, whose rows are transcribed by hand in specs/x690.tsv), PEM
     /// (RFC 7468), the private key formats (RFC 5958, 5915, 8410) and the public keys' identifiers
     /// (RFC 5480, 4055), and RFC 5280, whose certificate structure step 3 reads (the rest is M3's).
+    /// RFC 8448, TLS 1.3's example handshake traces (pinned for step 4), has no BCP 14 keyword
+    /// either: its traces are the key schedule's and the record layer's test data.
     /// </summary>
     private static readonly string[] Documents =
         ["RFC9110", "RFC9111", "RFC9112", "RFC9113", "RFC7541", "RFC9846", "RFC10024", "RFC9963", "RFC8449", "RFC7301", "RFC6066",

@@ -1842,6 +1842,42 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
    - every group and signature scheme of RFC 9846, and the post-quantum hybrids;
    - SNI, ALPN, record size limit, delegated credentials, ECH (HPKE), the key log;
    - certificate compression, with zlib, brotli and zstd codecs in assembly.
+
+   Built bottom up, each part proven before the next uses it (2026-11-28):
+   - **4a, the key schedule and record protection** (2026-11-28, `tls/schedule.asm`,
+     `tls/record.asm`): `httpasm_tls13_extract` (TLS's "0" for an absent IKM),
+     `_expand_label`, `_derive_secret` (a NULL transcript hash is Hash("")), `_finished`,
+     `_update_secret` and `_export` (RFC 9846 7.1-7.5, 4.5.3) over SHA-256 and SHA-384, each
+     refusing what HkdfLabel cannot hold; `httpasm_tls_record_length` framing what a
+     connection reads (2^14 octets, 2^14 + 256 for application_data); a record key per
+     traffic secret (`httpasm_tls13_record_key_init`: 7.3's key and IV, sequence 0, a limit of
+     2^14 + 1 octets of TLSInnerPlaintext that record_size_limit lowers) sealing and opening
+     in place with the three suites of 9.1 (TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+     TLS_CHACHA20_POLY1305_SHA256; the CCM suites, which no browser offers, are not built). The
+     sealer pads with zeros, refuses a content type of 0 and anything over the limits, and stops
+     at AES-GCM's 2^24.5 records under one key (5.5: a KeyUpdate first) or before the sequence
+     number wraps; the opener answers minus the alert each failure calls for (bad_record_mac,
+     the fragment then zeros; record_overflow; unexpected_message for a plaintext of zeros or
+     another outer type; decode_error; internal_error before a wrap), ignores the legacy
+     version, enforces no AEAD limit on what it receives (5.5's SHOULD NOT), and finds the
+     content type by one constant-time pass over the plaintext (its result, the content's
+     length, public by design). RFC 8448 (TLS 1.3's example traces) is pinned for this:
+     `Rfc8448.cs` reads its five traces from the RFC's text, and every secret, traffic key and
+     IV, Finished value and PSK binder of them (HelloRetryRequest's message_hash transcript
+     included) is derived, and every one of their 27 protected records sealed octet for octet
+     from the trace's own secrets and opened back (`TlsScheduleTests`, `TlsRecordTests`); .NET's
+     HKDF, HMAC, AesGcm and ChaCha20Poly1305 are the independent model over random secrets,
+     labels, contexts, lengths, contents, paddings and sequence numbers; every limit and
+     refusal has its test; `tests/fuzz/tls_record.c` frames and opens hostile records and
+     round-trips and forges sealed ones (741,440 inputs in its first minute); the
+     constant-time check covers every derivation and the three suites' records.
+   - **4b, the handshake messages**: each message and extension parsed and written, strictly
+     (every length, duplicate, order and value rule), the transcript hash.
+   - **4c, the server** and **4d, the client**: the state machines of a full handshake with
+     certificates, HelloRetryRequest, the alerts, KeyUpdate, post-handshake authentication;
+     then **4e**, PSK resumption, tickets, ticket requests and 0-RTT with anti-replay.
+   - **4f, the extensions** of the other documents (SNI, ALPN, record size limit, delegated
+     credentials, ECH with HPKE, the key log), and **4g, certificate compression**.
 5. *HTTPS:*
    - TLS in the drivers on both backends, with h2 or http/1.1 chosen by ALPN;
    - TLS in the C ABI client;

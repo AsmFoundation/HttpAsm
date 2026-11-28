@@ -33,7 +33,9 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 >   however deep BER nests), PEM (`httpasm_pem_read`), private keys from their files
 >   (`httpasm_private_key_load`: PKCS#8, PKCS#1, SEC1), and certificates' structure and public
 >   keys (`httpasm_certificate_read`, `httpasm_public_key_read`, `httpasm_private_key_matches`;
->   chain validation is M3's).
+>   chain validation is M3's); and TLS 1.3's key schedule and record layer (`httpasm_tls13_*`,
+>   proven against every secret and record of RFC 8448's traces), the first part of the TLS
+>   1.3 engine.
 >
 > [docs/DESIGN.md](docs/DESIGN.md) holds the decisions, the architecture and the milestones;
 > [benchmarks/](benchmarks/README.md) holds the measurements.

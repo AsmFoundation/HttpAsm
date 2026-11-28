@@ -163,6 +163,16 @@ extern httpasm_private_key_load     ; int (httpasm_private_key *key, data, lengt
 extern httpasm_certificate_read     ; int (httpasm_certificate *c, der, length): 0, -1
 extern httpasm_public_key_read      ; int (httpasm_public_key *key, spki, length): the kind, -1
 extern httpasm_private_key_matches  ; int (const httpasm_private_key *key, const httpasm_public_key *pub): 0 a pair, -1
+extern httpasm_tls13_extract        ; int (hash, salt, salt_length, ikm, ikm_length, secret): 0, -1
+extern httpasm_tls13_expand_label   ; int (hash, secret, label, label_length, context, context_length, out, length): 0, -1
+extern httpasm_tls13_derive_secret  ; int (hash, secret, label, label_length, transcript_hash or NULL, out): 0, -1
+extern httpasm_tls13_finished       ; int (hash, base_key, transcript_hash, verify_data): 0, -1
+extern httpasm_tls13_update_secret  ; int (hash, secret, next): 0, -1
+extern httpasm_tls13_export         ; int (hash, exporter_secret, label, label_length, context, context_length, out, length): 0, -1
+extern httpasm_tls_record_length    ; int64_t (in, length): the record's length, 0 for more, -record_overflow
+extern httpasm_tls13_record_key_init ; int (httpasm_tls13_record_key *key, suite, traffic_secret): 0, -1
+extern httpasm_tls13_seal           ; int64_t (key, content_type, content, length, padding, out, capacity): the record's length, -1, -2
+extern httpasm_tls13_open           ; int64_t (key, record, length, uint8_t *content_type): the content's length, or -alert
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)

@@ -881,6 +881,107 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_private_key_matches")]
     internal static partial int PrivateKeyMatches(PrivateKey* key, PublicKey* publicKey);
 
+    /// <summary>int httpasm_tls13_extract(int hash, salt, salt_length, ikm, ikm_length, secret).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="salt">The salt (anything when its length is 0).</param>
+    /// <param name="saltLength">Its length; 0: Hash.length zeros.</param>
+    /// <param name="ikm">The input keying material (anything when its length is 0).</param>
+    /// <param name="ikmLength">Its length; 0: TLS's "0", Hash.length zeros.</param>
+    /// <param name="secret">Receives Hash.length octets.</param>
+    /// <returns>0, or -1 for an unknown hash.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_extract")]
+    internal static partial int Tls13Extract(int hash, byte* salt, nuint saltLength, byte* ikm, nuint ikmLength, byte* secret);
+
+    /// <summary>int httpasm_tls13_expand_label(hash, secret, label, label_length, context, context_length, out, length).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="secret">Hash.length octets.</param>
+    /// <param name="label">The label without "tls13 ".</param>
+    /// <param name="labelLength">1 to 249.</param>
+    /// <param name="context">The context (anything when its length is 0).</param>
+    /// <param name="contextLength">0 to 255.</param>
+    /// <param name="output">Receives length octets.</param>
+    /// <param name="length">Up to 255 * Hash.length.</param>
+    /// <returns>0, or -1 for a refused argument (nothing written).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_expand_label")]
+    internal static partial int Tls13ExpandLabel(int hash, byte* secret, byte* label, nuint labelLength, byte* context, nuint contextLength, byte* output, nuint length);
+
+    /// <summary>int httpasm_tls13_derive_secret(hash, secret, label, label_length, transcript_hash, out).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="secret">Hash.length octets.</param>
+    /// <param name="label">The label without "tls13 ".</param>
+    /// <param name="labelLength">Its length.</param>
+    /// <param name="transcriptHash">Hash.length octets, or null for Hash("").</param>
+    /// <param name="output">Receives Hash.length octets.</param>
+    /// <returns>0, or -1 for a refused argument.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_derive_secret")]
+    internal static partial int Tls13DeriveSecret(int hash, byte* secret, byte* label, nuint labelLength, byte* transcriptHash, byte* output);
+
+    /// <summary>int httpasm_tls13_finished(hash, base_key, transcript_hash, verify_data).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="baseKey">The sender's traffic secret, Hash.length octets.</param>
+    /// <param name="transcriptHash">Hash.length octets.</param>
+    /// <param name="verifyData">Receives Hash.length octets.</param>
+    /// <returns>0, or -1 for an unknown hash.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_finished")]
+    internal static partial int Tls13Finished(int hash, byte* baseKey, byte* transcriptHash, byte* verifyData);
+
+    /// <summary>int httpasm_tls13_update_secret(hash, secret, next).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="secret">The current application traffic secret.</param>
+    /// <param name="next">Receives the next one (Hash.length octets).</param>
+    /// <returns>0, or -1 for an unknown hash.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_update_secret")]
+    internal static partial int Tls13UpdateSecret(int hash, byte* secret, byte* next);
+
+    /// <summary>int httpasm_tls13_export(hash, exporter_secret, label, label_length, context, context_length, out, length).</summary>
+    /// <param name="hash">Abi.HashSha256 or Abi.HashSha384.</param>
+    /// <param name="exporterSecret">The exporter master secret.</param>
+    /// <param name="label">The exporter's label (prefixed "tls13 " inside).</param>
+    /// <param name="labelLength">Its length.</param>
+    /// <param name="context">The context value (anything when its length is 0).</param>
+    /// <param name="contextLength">Its length.</param>
+    /// <param name="output">Receives length octets.</param>
+    /// <param name="length">The key's length.</param>
+    /// <returns>0, or -1 for a refused argument.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_export")]
+    internal static partial int Tls13Export(int hash, byte* exporterSecret, byte* label, nuint labelLength, byte* context, nuint contextLength, byte* output, nuint length);
+
+    /// <summary>int64_t httpasm_tls_record_length(in, length).</summary>
+    /// <param name="input">The octets read.</param>
+    /// <param name="length">Their count.</param>
+    /// <returns>The first record's length, 0 for more octets, or -22 (record_overflow).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls_record_length")]
+    internal static partial long TlsRecordLength(byte* input, nuint length);
+
+    /// <summary>int httpasm_tls13_record_key_init(key, suite, traffic_secret).</summary>
+    /// <param name="key">The key to make.</param>
+    /// <param name="suite">A cipher suite's code (0x1301, 0x1302, 0x1303).</param>
+    /// <param name="trafficSecret">Hash.length octets of the suite's hash.</param>
+    /// <returns>0, or -1 for an unknown suite (the key then zeros).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_record_key_init")]
+    internal static partial int Tls13RecordKeyInit(Tls13RecordKey* key, int suite, byte* trafficSecret);
+
+    /// <summary>int64_t httpasm_tls13_seal(key, content_type, content, length, padding, out, capacity).</summary>
+    /// <param name="key">The writer's key; its sequence number advances.</param>
+    /// <param name="contentType">The record's inner content type (1 to 255).</param>
+    /// <param name="content">The content (out + 5, or not overlapping out).</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="padding">Zero octets to add.</param>
+    /// <param name="output">Receives the record.</param>
+    /// <param name="capacity">Its room.</param>
+    /// <returns>The record's length, -1 for a refused argument, -2 when the key must be updated first.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_seal")]
+    internal static partial long Tls13Seal(Tls13RecordKey* key, int contentType, byte* content, nuint length, nuint padding, byte* output, nuint capacity);
+
+    /// <summary>int64_t httpasm_tls13_open(key, record, length, content_type).</summary>
+    /// <param name="key">The reader's key; its sequence number advances.</param>
+    /// <param name="record">The record, decrypted in place.</param>
+    /// <param name="length">Its whole length.</param>
+    /// <param name="contentType">Receives the inner content type.</param>
+    /// <returns>The content's length, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_open")]
+    internal static partial long Tls13Open(Tls13RecordKey* key, byte* record, nuint length, byte* contentType);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>
