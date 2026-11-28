@@ -44,7 +44,9 @@ public sealed class TlsOpenSslCliTests
 
     /// <summary>A key of a kind and a self-signed certificate for "localhost", made by openssl
     /// (genpkey, then req -x509).</summary>
-    /// <param name="kind">"rsa", "rsa-pss", "p256", "p384", "p521", "ed25519" or "ed448".</param>
+    /// <param name="kind">"rsa", "rsa-pss" (no parameters), "rsa-pss-sha256" (bound to SHA-256, a
+    /// 32-octet minimum salt), "rsa-pss-sha256-salt64" (a 64-octet minimum), "p256", "p384",
+    /// "p521", "ed25519" or "ed448".</param>
     /// <returns>The key's PEM (PKCS#8) and the certificate's DER.</returns>
     /// <exception cref="ArgumentException">Another kind.</exception>
     /// <exception cref="InvalidOperationException">openssl refused (its output says why).</exception>
@@ -57,6 +59,8 @@ public sealed class TlsOpenSslCliTests
             {
                 "rsa" => "-algorithm RSA -pkeyopt rsa_keygen_bits:2048",
                 "rsa-pss" => "-algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048",
+                "rsa-pss-sha256" => "-algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_pss_keygen_md:sha256 -pkeyopt rsa_pss_keygen_mgf1_md:sha256 -pkeyopt rsa_pss_keygen_saltlen:32",
+                "rsa-pss-sha256-salt64" => "-algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -pkeyopt rsa_pss_keygen_md:sha256 -pkeyopt rsa_pss_keygen_mgf1_md:sha256 -pkeyopt rsa_pss_keygen_saltlen:64",
                 "p256" => "-algorithm EC -pkeyopt ec_paramgen_curve:P-256",
                 "p384" => "-algorithm EC -pkeyopt ec_paramgen_curve:P-384",
                 "p521" => "-algorithm EC -pkeyopt ec_paramgen_curve:P-521",
