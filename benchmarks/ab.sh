@@ -7,8 +7,9 @@
 # Usage (on Linux, from anywhere; each tree built with: dotnet build samples/Hello -c Release):
 #   benchmarks/ab.sh <tree A> <tree B> [rounds, default 5] [seconds per run, default 10]
 # Environment: SERVER_CPUS (default 0-3), CLIENT_CPUS (default 8-15), WORKERS (default 4),
-# HELLO_IO_A and HELLO_IO_B (each tree's backend: epoll, the default, or uring). Needs wrk and
-# h2load (nghttp2-client).
+# HELLO_IO_A and HELLO_IO_B (each tree's backend: epoll, the default, or uring), SCENARIOS (the
+# scenarios below to run, default "h1 h1-pipelined"; add h1-close for a change to connection
+# setup or teardown). Needs wrk and h2load (nghttp2-client).
 #
 # A tree is a checkout whose samples/Hello and src/HttpAsm are built in Release: typically the
 # commit before a change (git worktree add --detach ../before <commit>) and the working tree.
@@ -16,6 +17,8 @@
 # so drift hits all three alike:
 #   h1            wrk -t8 -c256: HTTP/1.1 keep-alive, one request at a time per connection
 #   h1-pipelined  h2load --h1 -c256 -m16: 16 requests in flight per connection
+#   h1-close      wrk -t8 -c256 with "Connection: close": a connection per request, so each
+#                 request pays an accept, a registration and a close (not run by default)
 # Per run: requests per second, and the server's CPU time per request (utime + stime from
 # /proc, which stays meaningful when the load generator or the machine is the limit).
 #
@@ -39,6 +42,10 @@ seconds="${4:-10}"
 server_cpus="${SERVER_CPUS:-0-3}"
 client_cpus="${CLIENT_CPUS:-8-15}"
 workers="${WORKERS:-4}"
+scenarios="${SCENARIOS:-h1 h1-pipelined}"
+for scenario in $scenarios; do
+  case "$scenario" in h1|h1-pipelined|h1-close) ;; *) echo "ab.sh: no scenario $scenario (h1, h1-pipelined, h1-close)" >&2; exit 2;; esac
+done
 
 for tree in "$tree_a" "$tree_b"; do
   for f in "$tree/samples/Hello/bin/Release/libc/linux-x64/hello" "$tree/src/HttpAsm/bin/Release/libc/linux-x64/libhttpasm.so"; do
@@ -91,6 +98,11 @@ run() {
     text="$(taskset -c "$client_cpus" wrk -t8 -c256 -d"${seconds}s" "http://127.0.0.1:$2/")"
     rps="$(echo "$text" | awk '/Requests\/sec/ {print $2}')"
     n="$(echo "$text" | awk '/requests in/ {print $1}')"
+  elif [ "$1" = h1-close ]; then
+    # (wrk reconnects each connection the server closes after its answer)
+    text="$(taskset -c "$client_cpus" wrk -t8 -c256 -d"${seconds}s" -H "Connection: close" "http://127.0.0.1:$2/")"
+    rps="$(echo "$text" | awk '/Requests\/sec/ {print $2}')"
+    n="$(echo "$text" | awk '/requests in/ {print $1}')"
   else
     text="$(taskset -c "$client_cpus" h2load --h1 -t8 -c256 -m16 -D "$seconds" "http://127.0.0.1:$2/")"
     rps="$(echo "$text" | awk '/^finished in/ {print $4}')"
@@ -104,7 +116,7 @@ run() {
 declare -A results
 echo
 for r in $(seq "$rounds"); do
-  for scenario in h1 h1-pipelined; do
+  for scenario in $scenarios; do
     for entry in "a:18091:$pid_a" "b:18092:$pid_b" "b2:18093:$pid_b2"; do
       IFS=: read -r name port pid <<<"$entry"
       line="$(run "$scenario" "$port" "$pid")"
@@ -122,7 +134,7 @@ median() {
 echo
 echo "| scenario | server | requests/s | CPU µs/request |"
 echo "|---|---|---:|---:|"
-for scenario in h1 h1-pipelined; do
+for scenario in $scenarios; do
   for name in a b b2; do
     echo "| $scenario | $name | $(median 1 "${results["$scenario|$name"]}") | $(median 2 "${results["$scenario|$name"]}") |"
   done

@@ -282,6 +282,17 @@ ha_conn_expire:
 ;     completions) may still carry this connection's pointer (handle_completions or close_idle
 ;     can close a connection whose own event comes after theirs), and that event must find
 ;     valid memory marked closed, not a freed block.
+;   - Under epoll the descriptor leaves the interest list by hand (EPOLL_CTL_DEL) before its
+;     close. close() takes a registration off only once every descriptor of the socket's open
+;     file description is closed (epoll(7)), and a fork of this process holds copies of all of
+;     ours: any fork, for as long as it runs before its exec drops them (they are CLOEXEC), and
+;     one that never execs for its life. A registration that outlived the close would go on
+;     reporting the socket's events (level-triggered: an ended peer's EOF, forever) with this
+;     connection's pointer after its memory is freed: the worker spun on them, read freed
+;     memory, closed the next connection that got the block by the dead one's events, and freed
+;     the block twice (tests/native/forks.c; the .NET suite's h2spec saw "Error: EOF" and the
+;     process aborted on "double free or corruption" whenever processes were started beside it;
+;     libuv deletes before it closes for the same reason). The cost: one system call per close.
 ;   Closing twice is harmless (the second call sees C_CLOSED or C_ZOMBIE and returns).
 ;   In: rdi = conn. Clobbers every caller-saved register. Keeps rbx, rbp, r12-r15.
 ; -----------------------------------------------------------------------------
@@ -302,8 +313,21 @@ ha_conn_close:
     ; wrote and flushed its GOAWAY already, and then this sends nothing.
     mov     rdi, rbx
     call    ha_h2_goodbye                   ; nothing for HTTP/1.1 (conn.h2 = 0)
+    ; epoll: the registration first, by hand (the header says why); every connection that
+    ; reaches here was registered (accept_all frees one whose registration failed without
+    ; this), so the call cannot fail and its answer is not looked at
+    mov     rax, [rbx + conn.worker]
+    cmp     dword [rax + worker.uring], 0
+    jne     .unregistered
+    mov     edi, [rax + worker.epfd]
+    mov     esi, EPOLL_CTL_DEL
+    mov     edx, [rbx + conn.fd]
+    xor     r10d, r10d                      ; no event (DEL takes NULL since Linux 2.6.9)
+    mov     eax, SYS_epoll_ctl
+    syscall
+.unregistered:
     mov     edi, [rbx + conn.fd]
-    mov     eax, SYS_close                  ; under epoll, the close removes it from the interest list
+    mov     eax, SYS_close
     syscall
     mov     dword [rbx + conn.fd], -1
     ; io_uring: the connection's poll, armed in the kernel, holds the socket and is not ended by

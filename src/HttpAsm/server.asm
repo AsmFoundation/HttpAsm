@@ -1123,7 +1123,7 @@ begin_stop:
     add     rax, HA_STOP_GRACE_MS
     mov     [rbx + worker.stop_deadline], rax
     cmp     dword [rbx + worker.uring], 0
-    je      .close_listener
+    je      .epoll
     ; io_uring: the listener's poll holds its file, so the socket would outlive its descriptor
     ; (and keep taking connections into its queue through SO_REUSEPORT). The poll goes first,
     ; submitted at once; its removal completes inside that call.
@@ -1132,6 +1132,20 @@ begin_stop:
     call    ha_uring_unpoll
     mov     rdi, rbx
     call    ha_uring_submit
+    jmp     .close_listener
+.epoll:
+    ; epoll: the listener leaves the interest list by hand before its close, as each connection
+    ; does (ha_conn_close says why): a fork's copy of the listener would keep it registered and
+    ; listening, and every connection the kernel queued on that copy would make it readable
+    ; again at once - the worker spinning through the stop's grace, accept4 on a closed
+    ; descriptor each time (tests/native/forks.c). (A paused listener is registered too: its
+    ; interest is 0, pause_accept.)
+    mov     edi, [rbx + worker.epfd]
+    mov     esi, EPOLL_CTL_DEL
+    mov     edx, [rbx + worker.listen_fd]
+    xor     r10d, r10d                      ; no event (DEL takes NULL since Linux 2.6.9)
+    mov     eax, SYS_epoll_ctl
+    syscall
 .close_listener:
     mov     edi, [rbx + worker.listen_fd]
     mov     eax, SYS_close

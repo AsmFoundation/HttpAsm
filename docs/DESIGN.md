@@ -269,7 +269,18 @@ stays only if the difference is within noise.
    lists, idle without polling, back-pressure, graceful stop, the server's and the client's
    calls in the C ABI. Two backends drive the same connection code, and the tests run in full
    on each (CI and `tests/run-linux.sh` run the suite twice):
-   - **epoll, the default** (measured below);
+   - **epoll, the default** (measured below). Every descriptor leaves the interest list by
+     hand (EPOLL_CTL_DEL) before its close: a connection's and the listener's at a stop.
+     close() takes a registration off only once every descriptor of its open file description
+     is closed, and any fork of the process holds copies of all of them until its exec (they
+     are CLOEXEC), a fork that never execs for its life. Counting on close() let a closed
+     connection's level-triggered events go on coming with the pointer of its freed memory:
+     a spinning worker, the next connection in that memory closed by the dead one's events,
+     the memory freed twice (found 2026-11-28: the .NET suite's h2spec saw "Error: EOF" and
+     the process aborted on "double free or corruption" once tests that start processes ran
+     beside it; `tests/native/forks.c` reproduces both and holds the fix, on both backends).
+     The cost: 90 to 146 ns per closed connection (a 2.2 µs close path, measured directly);
+     nothing per request on a kept-alive connection;
    - **io_uring on request** (`HTTPASM_SERVER_URING`, `src/HttpAsm/uring.asm`): each worker
      on its own ring, or on epoll where the kernel refuses one (before 5.13, a seccomp
      profile such as Docker's, the memory budget below). Its design:

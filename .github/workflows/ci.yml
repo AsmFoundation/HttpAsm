@@ -31,6 +31,9 @@
 #        guard pages, natively, and under Intel SDE (AVX-512) when the CPU has no AVX-512;
 #      - tests/native/stack: the large frames (ML-KEM's, up to about 27 KiB) on stacks too
 #        small fault in their guard page and write nothing below it (no stack clash);
+#      - tests/native/forks: a child holding copies of the server's descriptors (any fork,
+#        until its exec): a closed connection and a stopping server's listener report nothing
+#        more, on epoll and on io_uring;
 #      - tests/fuzz/replay.sh: every input the fuzzers kept (seeds, minimized corpora),
 #        replayed with every check of theirs against the Release objects.
 #      HTTPASM_REQUIRE_LINUX=1: a native test that would skip fails instead, so nothing passes
