@@ -170,7 +170,11 @@ ha_tls_server_message:
     call    httpasm_tls13_hello_read
     test    eax, eax
     jnz     .answer
-    ; TLS 1.3 offered (4.3.1): the one version spoken until M3
+    ; legacy_version 0x0303 (4.2.2: a server receiving another value MUST abort with
+    ; protocol_version; TLS 1.2 and older clients, M3's, send it too), then TLS 1.3 offered
+    ; (4.3.1): the one version spoken until M3
+    cmp     word [rbp + SV_HELLO + httpasm_tls13_hello.legacy_version], 0x0303
+    jne     .protocol_version
     bt      qword [rbp + SV_PRESENT], HTTPASM_TLS_EXT_SUPPORTED_VERSIONS
     jnc     .protocol_version
     mov     rsi, [rbp + SV_DATA + HTTPASM_TLS_EXT_SUPPORTED_VERSIONS * 8]

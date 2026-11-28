@@ -244,7 +244,7 @@ public sealed unsafe class FfdheTests
     /// <param name="bits">The group's size in bits.</param>
     /// <returns>p.</returns>
     /// <exception cref="InvalidDataException">The section or its digits were not found.</exception>
-    private static BigInteger Prime(int bits)
+    internal static BigInteger Prime(int bits)
     {
         string[] lines = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "specs", "rfc", "rfc7919.txt"));
         int section = Array.FindIndex(lines, l => l.TrimEnd().EndsWith($"ffdhe{bits}", StringComparison.Ordinal) && l.StartsWith("A.", StringComparison.Ordinal));
