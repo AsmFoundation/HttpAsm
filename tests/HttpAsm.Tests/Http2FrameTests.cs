@@ -678,18 +678,25 @@ public sealed class Http2FrameTests
     /// <summary>
     /// An answer that takes several idle timeouts to deliver arrives whole, though the client
     /// sends nothing while it reads. The client grants the windows at once, then reads /big's
-    /// 8 MiB slowly through a small receive buffer (a 10 ms pause every 64 KiB). The timeout is
-    /// for idleness: each window in which the answer moves at least min_data_rate earns another.
-    /// The deadline used to move only when frames arrived, and the connection was closed with
-    /// the answer still on its way (8 MiB: far more than loopback's kernel buffers could still
-    /// deliver after a close).
+    /// 8 MiB slowly through a small receive buffer (a 30 ms pause every 64 KiB: about 3.8 s,
+    /// three idle timeouts and more). The timeout is for idleness: each window in which the
+    /// answer moves at least min_data_rate earns another. The deadline used to move only when
+    /// frames arrived, and the connection was closed with the answer still on its way (8 MiB:
+    /// far more than loopback's kernel buffers could still deliver after a close).
     /// </summary>
+    /// <remarks>
+    /// The window is 1 s, not the 300 ms of the other idle tests: a client that reads nothing
+    /// for a whole window is rightly cut (the slow-read rule), and a test thread starved that
+    /// long by a loaded machine was (2026-11-28, the coverage run at v2 on io_uring, with the TLS
+    /// tests' handshakes and processes beside it). A second of starvation is far rarer, and the
+    /// answer still spans several windows.
+    /// </remarks>
     [Fact]
     [Requirement("RFC9112-9.5-4")]
     public void SendsAnswersLongerThanTheIdleTimeout()
     {
         Platform.RequireLinuxX64();
-        using var server = NewServer(idleMs: 300);
+        using var server = NewServer(idleMs: 1000);
         using var c = new H2Connection(server.Port, 65536, (4, 0x7FFFFFFF));
         c.SendU32(WindowUpdate, 0, 0x7FFFFFFF - 65535);             // the connection's window too
         var clock = Stopwatch.StartNew();
@@ -702,7 +709,7 @@ public sealed class Http2FrameTests
             body.Write(frame.Payload);
             if (body.Length % 65536 < frame.Payload.Length)
             {
-                Pause.AtLeast(10);                                   // about 6 MB/s
+                Pause.AtLeast(30);                                   // about 2 MB/s
             }
 
             if ((frame.Flags & EndStream) != 0)
@@ -712,7 +719,7 @@ public sealed class Http2FrameTests
         }
 
         Assert.True(Big.AsSpan().SequenceEqual(body.ToArray()));
-        Assert.True(clock.ElapsedMilliseconds > 900, $"{clock.ElapsedMilliseconds} ms: the read was not slow");
+        Assert.True(clock.ElapsedMilliseconds > 3000, $"{clock.ElapsedMilliseconds} ms: the read did not span three idle timeouts");
     }
 
     /// <summary>
