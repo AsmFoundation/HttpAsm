@@ -148,6 +148,10 @@ httpasm_tls13_server_config_init:
     cmp     eax, 512
     jb      .refused
 .chain:
+    ; ---- the flags: only the ones the engine knows (a caller asking for a behavior this
+    ; library lacks is told so, not served without it)
+    test    dword [rbx + httpasm_tls13_server_config.flags], ~(HTTPASM_TLS_CLIENT_AUTH_REQUEST | HTTPASM_TLS_CLIENT_AUTH_REQUIRE | HTTPASM_TLS_SERVER_GROUP_ORDER)
+    jnz     .refused
     ; ---- the chain: each certificate read; the leaf's key the configuration's
     xor     r15d, r15d                      ; the certificate
     mov     qword [rsp + CF_LENGTH], 4 + 1 + 3      ; the message's octets: header, context, list
@@ -393,8 +397,15 @@ httpasm_tls13_server_config_init:
     lea     rax, [rax + r8 + 93 + 6 + 95 + TE_ALERT_RESERVE + 27 + 63]
     and     rax, -64
     mov     [rbx + httpasm_tls13_server_config.output_min], rax
+    ; memory: the reassembly span (max_message), with client authentication the peer-chain span
+    ; (max_message again: server_init's split), and output_min, rounded to 16
     mov     ecx, [rbx + httpasm_tls13_server_config.max_message]
-    lea     rax, [rax + rcx + 15]
+    add     rax, rcx
+    test    dword [rbx + httpasm_tls13_server_config.flags], HTTPASM_TLS_CLIENT_AUTH_REQUEST | HTTPASM_TLS_CLIENT_AUTH_REQUIRE
+    jz      .rounded
+    add     rax, rcx
+.rounded:
+    add     rax, 15
     and     rax, -16
     mov     [rbx + httpasm_tls13_server_config.memory], rax
     ret

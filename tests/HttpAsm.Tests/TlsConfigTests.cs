@@ -102,6 +102,7 @@ public sealed unsafe class TlsConfigTests
         Assert.Equal(-1, Init(key.Key, chain, c => c->SuiteCount = 5, room, out _, out _));
         Assert.Equal(-1, Init(key.Key, chain, c => { c->Suites[0] = 0x1304; c->SuiteCount = 1; }, room, out _, out _));
         Assert.Equal(-1, Init(key.Key, chain, c => c->MaxMessage = 511, room, out _, out _));
+        Assert.Equal(-1, Init(key.Key, chain, c => c->Flags = 8, room, out _, out _));          // a flag the engine lacks
         Assert.Equal(0, Init(key.Key, chain, c => c->MaxMessage = 512, room, out TlsServerConfig small, out _));
         Assert.Equal(512u, small.MaxMessage);
         Assert.Equal(-2, Init(key.Key, [[0x30, 0x03, 0x02, 0x01, 0x01]], null, room, out _, out _));
@@ -198,6 +199,15 @@ public sealed unsafe class TlsConfigTests
         long outputMin = (plain + 22 * records + 1665 + 93 + 6 + 95 + 64 + 27 + 63) & ~63L;
         Assert.Equal((nuint)outputMin, config.OutputMin);
         Assert.Equal((nuint)((outputMin + 16384 + 15) & ~15L), config.Memory);
+
+        // with client authentication (either flag), the peer-chain span beside them: max_message
+        // more; output_min the same (its CertificateRequest was counted already)
+        foreach (uint flags in new[] { TlsEngine.ClientAuthRequest, TlsEngine.ClientAuthRequire, TlsEngine.ClientAuthRequest | TlsEngine.ClientAuthRequire })
+        {
+            Assert.Equal(0, Init(key.Key, chain, c => c->Flags = flags, 8000, out TlsServerConfig asking, out _));
+            Assert.Equal((nuint)outputMin, asking.OutputMin);
+            Assert.Equal((nuint)((outputMin + 2 * 16384 + 15) & ~15L), asking.Memory);
+        }
     }
 
     /// <summary>

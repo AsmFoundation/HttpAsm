@@ -23,7 +23,7 @@ public sealed unsafe class TlsServerTests
         Platform.RequireLinuxX64();
         Assert.Equal(152, sizeof(TlsServerConfig));
         Assert.Equal(32, sizeof(TlsEvent));
-        Assert.Equal(2752, sizeof(TlsConnection));
+        Assert.Equal(2784, sizeof(TlsConnection));
         Assert.Equal((uint)sizeof(TlsServerConfig), Native.StructSize(31));
         Assert.Equal((uint)sizeof(TlsEvent), Native.StructSize(32));
         Assert.Equal((uint)sizeof(TlsConnection), Native.StructSize(33));

@@ -1505,11 +1505,11 @@ internal unsafe struct TlsEvent
     public uint Reserved;
 }
 
-/// <summary>httpasm_tls13_connection (httpasm.h): one connection's state, 2,752 octets, opaque.</summary>
+/// <summary>httpasm_tls13_connection (httpasm.h): one connection's state, 2,784 octets, opaque.</summary>
 internal unsafe struct TlsConnection
 {
     /// <summary>The state (its secrets included: httpasm_tls13_wipe it).</summary>
-    public fixed ulong Opaque[344];
+    public fixed ulong Opaque[348];
 }
 
 /// <summary>The engine's constants (httpasm.h): NamedGroups, SignatureSchemes, their bits, the

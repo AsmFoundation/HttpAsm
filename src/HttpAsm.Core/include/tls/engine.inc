@@ -41,6 +41,9 @@ TF_SENT_FINISHED    equ 0x0200  ; our Finished is out: application data may be s
 TF_POST_AUTH        equ 0x0400  ; the client offered post_handshake_auth (4c5)
 TF_PEER_ALERT       equ 0x0800  ; FAILED by the peer's alert, not ours
 TF_UPDATE_OWED      equ 0x1000  ; the peer asked for a KeyUpdate: ours goes before our next data
+TF_PEER_CHAIN       equ 0x2000  ; the client's Certificate came: .peer_length and .peer_count
+                                ; say what it held (httpasm_tls13_peer_certificates)
+TF_ASKED            equ 0x4000  ; a CertificateRequest went in our flight (client authentication)
 
 ; The engine's bounds
 TE_IGNORED_MAX      equ 32      ; records that bring nothing (change_cipher_spec, empty data,
@@ -51,11 +54,14 @@ TE_EARLY_MAX        equ 16384   ; octets of rejected early data dropped at most 
 TE_ALERT_RESERVE    equ 64      ; output octets every write but an alert's leaves free, so a
                                 ; failure's alert always fits
 TE_FRAGMENT         equ 16384   ; the content we put in one record at most (2^14, 5.1)
+TE_REQUEST_LENGTH   equ 35      ; our CertificateRequest's octets, header included (tls/sign.asm's
+                                ; ha_tls_request: an empty context, 11 signature schemes)
 
 ; The internal routines (rbx = the connection, kept):
 ;   tls/engine.asm:
 ;     ha_tls_draw              rdi = out, rsi = octets: the configuration's random source ->
-;                              eax = 0, or -HTTPASM_TLS_ALERT_INTERNAL_ERROR when it failed
+;                              rax = 0, or -HTTPASM_TLS_ALERT_INTERNAL_ERROR when it failed
+;                              (all 64 bits: a caller may hand it on as its own answer)
 ;     ha_tls_transcript_init   starts the transcript's hash (.hash's)
 ;     ha_tls_transcript_add    rsi = octets, rdx = their count: into the transcript
 ;     ha_tls_transcript_hash   rdi = out: the transcript's hash so far (.hash_length octets)
@@ -81,6 +87,13 @@ TE_FRAGMENT         equ 16384   ; the content we put in one record at most (2^14
 ;     ha_tls_sign              rdi = out, rsi = the transcript's hash: the server's
 ;                              CertificateVerify signature under .scheme -> rax = its octets,
 ;                              or minus an alert
+;     ha_tls_peer_leaf         rsi = a certificate_list, rdx = its octets: each entry without
+;                              extensions and its cert_data a certificate, the leaf's key a
+;                              kind the engine verifies -> eax = 0, or minus an alert
+;                              (unsupported_extension, bad_certificate, unsupported_certificate)
+;     ha_tls_verify            rsi = the client's CertificateVerify (header and body), rdx =
+;                              its octets: verified against the leaf kept in .peer over the
+;                              transcript so far -> eax = 0, or minus an alert
 TM_BOUNDARY         equ 1       ; the message must end its record (a key change, 5.1; or a
                                 ; HelloRetryRequest sent: nothing may follow a ClientHello)
 TM_CONNECTED        equ 2       ; the handshake completed with this message

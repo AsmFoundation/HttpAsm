@@ -411,6 +411,160 @@ internal sealed class TlsTestClient : IDisposable
     /// <summary>A handshake message the server cut across records, gathered so far.</summary>
     private readonly List<byte> partial = [];
 
+    /// <summary>The certificates the client answers a CertificateRequest with (DER, the leaf
+    /// first); null or empty: an empty Certificate (RFC 9846 4.5.1: the client declines).</summary>
+    public IReadOnlyList<byte[]>? ClientChain { get; set; }
+
+    /// <summary>The scheme the client's CertificateVerify names, and its signer (what was
+    /// signed in, the signature out): <see cref="ClientSigner"/> makes the pair for a key.</summary>
+    public (ushort Scheme, Func<byte[], byte[]> Sign)? ClientKey { get; set; }
+
+    /// <summary>The certificate_request_context the Certificate carries (null: the request's,
+    /// as it must).</summary>
+    public byte[]? AnswerContext { get; set; }
+
+    /// <summary>The extensions block (its content, no length) of the leaf's CertificateEntry
+    /// (null: none, as an answer to a request that asked for none must).</summary>
+    public byte[]? LeafExtensions { get; set; }
+
+    /// <summary>The scheme the CertificateVerify names instead of the key's (null: the key's).</summary>
+    public ushort? AnswerScheme { get; set; }
+
+    /// <summary>When set, the CertificateVerify's signature's last octet is flipped.</summary>
+    public bool CorruptSignature { get; set; }
+
+    /// <summary>When set, no CertificateVerify follows a Certificate with certificates.</summary>
+    public bool OmitCertificateVerify { get; set; }
+
+    /// <summary>When set, a CertificateVerify follows even an empty Certificate.</summary>
+    public bool VerifyEmpty { get; set; }
+
+    /// <summary>The server's CertificateRequest's context, once one came (null: none came).</summary>
+    public byte[]? RequestContext { get; private set; }
+
+    /// <summary>The schemes the server's CertificateRequest listed (signature_algorithms), in its order.</summary>
+    public ushort[] RequestedSchemes { get; private set; } = [];
+
+    /// <summary>
+    /// A client key's CertificateVerify scheme and signer: ECDSA (P-256/384/521, DER as TLS sends
+    /// it) and RSA-PSS (rsaEncryption keys: rsa_pss_rsae_sha256; an RSASSA-PSS key's
+    /// RSAPrivateKey read out of its PKCS#8: rsa_pss_pss_sha256) by .NET, Ed25519 and Ed448 by the
+    /// library (.NET has no EdDSA).
+    /// </summary>
+    /// <param name="kind">"p256", "p384", "p521", "rsa2048" or "rsa", "rsa-pss" (and its
+    /// "rsa-pss-sha256" variants), "ed25519", "ed448".</param>
+    /// <param name="key">The key's PKCS#8, DER (.NET's credentials) or PEM (openssl's).</param>
+    /// <returns>The scheme and the signer.</returns>
+    /// <exception cref="ArgumentException">Another kind.</exception>
+    public static (ushort Scheme, Func<byte[], byte[]> Sign) ClientSigner(string kind, byte[] key)
+    {
+        byte[] pkcs8 = key;
+        if (key.Length > 0 && key[0] == (byte)'-')
+        {
+            // PEM: its base64 between the BEGIN and END lines is the DER (RFC 7468)
+            string text = System.Text.Encoding.ASCII.GetString(key);
+            PemFields pem = PemEncoding.Find(text);
+            pkcs8 = Convert.FromBase64String(text[pem.Base64Data]);
+        }
+
+        switch (kind)
+        {
+            case "p256":
+            case "p384":
+            case "p521":
+                {
+                    ECDsa ec = ECDsa.Create();
+                    ec.ImportPkcs8PrivateKey(pkcs8, out _);
+                    (ushort scheme, HashAlgorithmName hash) = kind switch
+                    {
+                        "p256" => ((ushort)0x0403, HashAlgorithmName.SHA256),
+                        "p384" => ((ushort)0x0503, HashAlgorithmName.SHA384),
+                        _ => ((ushort)0x0603, HashAlgorithmName.SHA512),
+                    };
+                    return (scheme, content => ec.SignData(content, hash, DSASignatureFormat.Rfc3279DerSequence));
+                }
+
+            case "rsa2048":
+            case "rsa":
+                {
+                    RSA rsa = RSA.Create();
+                    rsa.ImportPkcs8PrivateKey(pkcs8, out _);
+                    return (0x0804, content => rsa.SignData(content, HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
+                }
+
+            case "rsa-pss":
+            case "rsa-pss-sha256":
+            case "rsa-pss-sha256-salt64":
+                {
+                    // PKCS#8's privateKey OCTET STRING holds the RSAPrivateKey whatever the
+                    // algorithm's parameters (RFC 4055 1.2): .NET imports that, not the OID
+                    var reader = new System.Formats.Asn1.AsnReader(pkcs8, System.Formats.Asn1.AsnEncodingRules.DER);
+                    System.Formats.Asn1.AsnReader info = reader.ReadSequence();
+                    _ = info.ReadInteger();
+                    _ = info.ReadSequence();
+                    byte[] inner = info.ReadOctetString();
+                    RSA rsa = RSA.Create();
+                    rsa.ImportRSAPrivateKey(inner, out _);
+                    return (0x0809, content => rsa.SignData(content, HashAlgorithmName.SHA256, RSASignaturePadding.Pss));
+                }
+
+            case "ed25519":
+            case "ed448":
+                {
+                    // the seed: the innermost OCTET STRING (RFC 8410 7: CurvePrivateKey)
+                    var reader = new System.Formats.Asn1.AsnReader(pkcs8, System.Formats.Asn1.AsnEncodingRules.DER);
+                    System.Formats.Asn1.AsnReader info = reader.ReadSequence();
+                    _ = info.ReadInteger();
+                    _ = info.ReadSequence();
+                    byte[] seed = new System.Formats.Asn1.AsnReader(info.ReadOctetString(), System.Formats.Asn1.AsnEncodingRules.DER).ReadOctetString();
+                    return kind == "ed25519" ? (0x0807, content => SignEd25519(seed, content)) : (0x0808, content => SignEd448(seed, content));
+                }
+
+            default:
+                throw new ArgumentException($"no signer for {kind}", nameof(kind));
+        }
+    }
+
+    /// <summary>Ed25519 by the library (a key prepared from the seed for the one signature).</summary>
+    /// <param name="seed">The 32-octet private key.</param>
+    /// <param name="message">The message.</param>
+    /// <returns>The 64-octet signature.</returns>
+    private static unsafe byte[] SignEd25519(byte[] seed, byte[] message)
+    {
+        byte[] signature = new byte[64];
+        Ed25519PrivateKey key;
+        fixed (byte* s = seed, m = message, o = signature)
+        {
+            Native.Ed25519PrivateKeyInit(&key, s);
+            Native.Ed25519Sign(o, &key, m, (nuint)message.Length);
+        }
+
+        new Span<byte>(&key, sizeof(Ed25519PrivateKey)).Clear();
+        return signature;
+    }
+
+    /// <summary>Ed448 by the library, no context (TLS 1.3's).</summary>
+    /// <param name="seed">The 57-octet private key.</param>
+    /// <param name="message">The message.</param>
+    /// <returns>The 114-octet signature.</returns>
+    /// <exception cref="InvalidOperationException">The library refused (it never does without a context).</exception>
+    private static unsafe byte[] SignEd448(byte[] seed, byte[] message)
+    {
+        byte[] signature = new byte[114];
+        Ed448PrivateKey key;
+        fixed (byte* s = seed, m = message, o = signature)
+        {
+            Native.Ed448PrivateKeyInit(&key, s);
+            if (Native.Ed448Sign(o, &key, m, (nuint)message.Length, null, 0) != 0)
+            {
+                throw new InvalidOperationException("Ed448 refused to sign");
+            }
+        }
+
+        new Span<byte>(&key, sizeof(Ed448PrivateKey)).Clear();
+        return signature;
+    }
+
     /// <summary>
     /// The ClientHello as a record: the first, or the second after a HelloRetryRequest (its
     /// share then the retry's group only; the cookie, if one came, echoed). The message joins
@@ -540,6 +694,34 @@ internal sealed class TlsTestClient : IDisposable
                 EncryptedExtensions = body;
                 messages.Add(message);
                 break;
+            case 13:
+                {
+                    // CertificateRequest (4.4.2): its context, and signature_algorithms' list
+                    // from its extensions (the only one this client reads)
+                    int context = body[0];
+                    RequestContext = body[1..(1 + context)];
+                    int at = 1 + context + 2;
+                    var schemes = new List<ushort>();
+                    while (at < body.Length)
+                    {
+                        int type = (body[at] << 8) | body[at + 1];
+                        int n = (body[at + 2] << 8) | body[at + 3];
+                        if (type == 13)
+                        {
+                            for (int i = at + 6; i < at + 4 + n; i += 2)
+                            {
+                                schemes.Add((ushort)((body[i] << 8) | body[i + 1]));
+                            }
+                        }
+
+                        at += 4 + n;
+                    }
+
+                    RequestedSchemes = [.. schemes];
+                    messages.Add(message);
+                    break;
+                }
+
             case 11:
                 {
                     // the leaf: the first entry's cert_data, past the context and the list's length
@@ -654,12 +836,18 @@ internal sealed class TlsTestClient : IDisposable
     }
 
     /// <summary>
-    /// Our Finished, protected under the client's handshake key (a change_cipher_spec before it
-    /// in middlebox compatibility mode), then the application keys: what the client sends
-    /// after the server's flight.
+    /// Our second flight, protected under the client's handshake key (a change_cipher_spec before
+    /// it in middlebox compatibility mode), each message in a record of its own: when the server
+    /// asked (<see cref="RequestContext"/>), our Certificate (<see cref="ClientChain"/>, empty when
+    /// there is none) and, for one with certificates, our CertificateVerify over the transcript so
+    /// far (<see cref="ClientKey"/>); then our Finished; then the application keys. The refusal
+    /// tests' knobs shape the answer (<see cref="AnswerContext"/>, <see cref="LeafExtensions"/>,
+    /// <see cref="AnswerScheme"/>, <see cref="CorruptSignature"/>, <see cref="OmitCertificateVerify"/>,
+    /// <see cref="VerifyEmpty"/>).
     /// </summary>
     /// <returns>The records.</returns>
-    /// <exception cref="InvalidOperationException">The server's Finished has not come.</exception>
+    /// <exception cref="InvalidOperationException">The server's Finished has not come, or a
+    /// CertificateVerify is due and <see cref="ClientKey"/> is not set.</exception>
     public byte[] Finished()
     {
         if (!ServerFinished)
@@ -667,13 +855,48 @@ internal sealed class TlsTestClient : IDisposable
             throw new InvalidOperationException("no server Finished yet");
         }
 
+        var records = new List<byte>();
+        if (SessionId.Length > 0)
+        {
+            records.AddRange(Plain(20, [1]));
+        }
+
+        if (RequestContext is { } asked)
+        {
+            byte[] context = AnswerContext ?? asked;
+            IReadOnlyList<byte[]> chain = ClientChain ?? [];
+            byte[] entries = [.. chain.SelectMany((c, i) => (byte[])[.. U24(c.Length), .. c, .. V16(i == 0 && LeafExtensions is { } e ? e : [])])];
+            byte[] certificate = Message(11, [.. V8(context), .. U24(entries.Length), .. entries]);
+            messages.Add(certificate);
+            records.AddRange(Seal(22, certificate));
+            if ((chain.Count > 0 && !OmitCertificateVerify) || VerifyEmpty)
+            {
+                (ushort scheme, Func<byte[], byte[]> sign) = ClientKey ?? throw new InvalidOperationException("no ClientKey for the CertificateVerify");
+                byte[] content = [.. Enumerable.Repeat((byte)0x20, 64), .. "TLS 1.3, client CertificateVerify"u8, 0, .. TranscriptHash()];
+                byte[] signature = sign(content);
+                if (CorruptSignature)
+                {
+                    signature[^1] ^= 1;
+                }
+
+                byte[] verify = Message(15, [.. U16(AnswerScheme ?? scheme), .. V16(signature)]);
+                messages.Add(verify);
+                records.AddRange(Seal(22, verify));
+            }
+        }
+
         byte[] mac = FinishedMac(clientHandshake, TranscriptHash());
         byte[] message = Message(20, mac);
         messages.Add(message);
-        byte[] records = [.. SessionId.Length > 0 ? Plain(20, [1]) : [], .. Seal(22, message)];
+        records.AddRange(Seal(22, message));
         write = Keys(ClientApplication);
-        return records;
+        return [.. records];
     }
+
+    /// <summary>A uint24, big-endian.</summary>
+    /// <param name="v">The value (under 2^24).</param>
+    /// <returns>Its three octets.</returns>
+    public static byte[] U24(int v) => [(byte)(v >> 16), (byte)(v >> 8), (byte)v];
 
     /// <summary>A protected record under our current write key (the handshake key before our
     /// Finished, the application key after).</summary>

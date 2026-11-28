@@ -58,6 +58,10 @@ extern ha_tls_set_write
 extern ha_tls_kex_server
 extern ha_tls_kex_share_length
 extern ha_tls_sign
+extern ha_tls_peer_leaf
+extern ha_tls_verify
+extern ha_tls_request
+extern httpasm_tls13_certificate_read
 
 ; The frame (rbp-based: the local subroutines below are leaves but .put, which realigns)
 SV_HELLO        equ 0                               ; the ClientHello read (httpasm_tls13_hello)
@@ -76,6 +80,10 @@ SV_SHARE_LENGTH equ SV_SHARE + 8
 SV_RANK         equ SV_SHARE_LENGTH + 8             ; its group's place in our order (16: none)
 SV_SH           equ SV_RANK + 8                     ; the ServerHello's first octet, in the output
 SV_EXTENSIONS   equ SV_SH + 8                       ; its extensions' length field
+SV_CONTEXT      equ SV_SHARE                        ; the client's Certificate (4c4): its context,
+SV_CONTEXT_LENGTH equ SV_SHARE_LENGTH               ; its length, its certificate_list and its
+SV_LIST         equ SV_RANK                         ; length, in the hello's slots (a call reads a
+SV_LIST_LENGTH  equ SV_SH                           ; hello or a Certificate, never both)
 SV_SECRET       equ SV_EXTENSIONS + 8               ; the exchange's secret (1024: ffdhe8192's)
 SV_SIGNATURE    equ SV_SECRET + 1024                ; the CertificateVerify's signature (1024)
 SV_FRAME        equ (SV_SIGNATURE + 1024 + 15) / 16 * 16   ; (five pushes + this: aligned)
@@ -105,18 +113,22 @@ section .text
 ; int httpasm_tls13_server_init(httpasm_tls13_connection *c, const httpasm_tls13_server_config *config,
 ;                               uint8_t *memory, size_t length)
 ;   Starts a server connection: zeroed, the configuration kept, memory[0..length) split into the
-;   reassembly span (config->max_message octets) and the output span (the rest, config->output_min
-;   at least). Returns 0, or -1 when length is under config->memory, or when the configuration no
-;   longer holds the bounds init gave it (nothing written). A leaf: clobbers rax, rcx, rdx, rdi,
-;   r8-r11.
+;   reassembly span (config->max_message octets), with client authentication configured the
+;   peer-chain span (max_message again: the client's Certificate message, which is gathered
+;   whole, kept for the CertificateVerify and the caller), and the output span (the rest,
+;   config->output_min at least). Returns 0, or -1 when length is under config->memory, or when
+;   the configuration no longer holds the bounds init gave it (nothing written). A leaf:
+;   clobbers rax, rcx, rdx, rdi, r8-r11.
 ;   The configuration is the caller's memory, read live by every connection, and init checked it
-;   once: one edited since (a caller that changed max_message, the lists' counts or output_min
-;   without calling init again) is checked again here where it bounds memory, so the split never
-;   passes memory's end (max_message + output_min, carried out of 64 bits too, within length)
+;   once: one edited since (a caller that changed max_message, the flags, the lists' counts or
+;   output_min without calling init again) is checked again here where it bounds memory, so the
+;   split never passes memory's end (the spans' sum, carried out of 64 bits too, within length)
 ;   and the lists stay within the arrays the frames copy them into (1 to 16 groups, 1 to 4
 ;   suites: the EncryptedExtensions built in the server's frame holds 16 groups). A smaller
 ;   output_min than the flight needs is not caught (nothing here can measure a flight): the
-;   engine's own room checks then fail the handshake with internal_error, inside the spans.
+;   engine's own room checks then fail the handshake with internal_error, inside the spans. A
+;   connection started without the peer-chain span never asks for a certificate, whatever the
+;   flags say later (tls/server.asm's flight).
 ; -----------------------------------------------------------------------------
 global httpasm_tls13_server_init:function (httpasm_tls13_server_init.end - httpasm_tls13_server_init)
 align 16
@@ -133,24 +145,36 @@ httpasm_tls13_server_init:
     cmp     r8d, 4 - 1
     ja      .done
     mov     r8d, [rsi + httpasm_tls13_server_config.max_message]
-    add     r8, [rsi + httpasm_tls13_server_config.output_min]
+    xor     r9d, r9d                        ; the peer-chain span: none without client authentication
+    test    dword [rsi + httpasm_tls13_server_config.flags], HTTPASM_TLS_CLIENT_AUTH_REQUEST | HTTPASM_TLS_CLIENT_AUTH_REQUIRE
+    jz      .spans
+    mov     r9, r8                          ; a Certificate message's most: max_message
+.spans:
+    lea     r10, [r8 + r9]                  ; (two uint32s: no carry)
+    add     r10, [rsi + httpasm_tls13_server_config.output_min]
     jc      .done                           ; (an output_min near 2^64: no length holds it)
-    cmp     rcx, r8
+    cmp     rcx, r10
     jb      .done
-    mov     r8, rdi
-    mov     r10, rdx
-    mov     r11, rcx
+    mov     r10, rdx                        ; memory
+    mov     r11, rcx                        ; its length
+    mov     rdx, rdi                        ; the connection (rdi goes to the zeroing)
     xor     eax, eax
     mov     ecx, httpasm_tls13_connection_size / 8
-    rep     stosq                           ; TS_START, no flags, no keys
-    mov     [r8 + httpasm_tls13_connection.config], rsi
-    mov     [r8 + httpasm_tls13_connection.message], r10
-    mov     eax, [rsi + httpasm_tls13_server_config.max_message]
-    mov     [r8 + httpasm_tls13_connection.message_capacity], rax
-    lea     rdx, [r10 + rax]
-    mov     [r8 + httpasm_tls13_connection.output], rdx
-    sub     r11, rax
-    mov     [r8 + httpasm_tls13_connection.output_capacity], r11
+    rep     stosq                           ; TS_START, no flags, no keys, no peer span
+    mov     [rdx + httpasm_tls13_connection.config], rsi
+    mov     [rdx + httpasm_tls13_connection.message], r10
+    mov     [rdx + httpasm_tls13_connection.message_capacity], r8
+    add     r10, r8                         ; past the reassembly span
+    test    r9, r9
+    jz      .output
+    mov     [rdx + httpasm_tls13_connection.peer], r10
+    mov     [rdx + httpasm_tls13_connection.peer_capacity], r9
+    add     r10, r9
+.output:
+    mov     [rdx + httpasm_tls13_connection.output], r10
+    sub     r11, r8
+    sub     r11, r9
+    mov     [rdx + httpasm_tls13_connection.output_capacity], r11
     xor     eax, eax
 .done:
     ret
@@ -159,9 +183,9 @@ httpasm_tls13_server_init:
 ; -----------------------------------------------------------------------------
 ; ha_tls_server_message: rbx = the connection (before TS_CONNECTED), rsi = a whole handshake
 ;   message (header and body), rdx = its octets -> eax = TM_* flags, or minus an alert (the
-;   connection is failed by the caller). START and WAIT_CH2 take a ClientHello, WAIT_FINISHED the
-;   client's Finished; anything else is unexpected_message (4c4 adds WAIT_CERT and WAIT_CV).
-;   Clobbers the caller-saved registers; rbx kept.
+;   connection is failed by the caller). START and WAIT_CH2 take a ClientHello, WAIT_CERT the
+;   client's Certificate, WAIT_CV its CertificateVerify, WAIT_FINISHED its Finished; anything
+;   else is unexpected_message. Clobbers the caller-saved registers; rbx kept.
 ; -----------------------------------------------------------------------------
 global ha_tls_server_message:function hidden (ha_tls_server_message.end - ha_tls_server_message)
 align 16
@@ -179,8 +203,12 @@ ha_tls_server_message:
     mov     ecx, [rbx + httpasm_tls13_connection.state]
     cmp     ecx, TS_WAIT_FINISHED
     je      .wait_finished
+    cmp     ecx, TS_WAIT_CERT
+    je      .wait_cert
+    cmp     ecx, TS_WAIT_CV
+    je      .wait_cv
     cmp     ecx, TS_WAIT_CH2
-    ja      .unexpected                     ; (WAIT_CERT, WAIT_CV: 4c4)
+    ja      .unexpected                     ; (never: CONNECTED and FAILED do not call in)
     cmp     eax, HTTPASM_TLS_CLIENT_HELLO
     jne     .unexpected
 
@@ -624,6 +652,22 @@ ha_tls_server_message:
     call    .put
     test    eax, eax
     jnz     .answer
+    ; CertificateRequest (4.4.2), right after EncryptedExtensions (4.4.2-1#2), when the
+    ; configuration asks for the client's certificate (tls/sign.asm's ha_tls_request: an empty
+    ; context, the schemes the engine verifies). A connection without the peer-chain span
+    ; (a configuration edited after server_init to ask) asks nothing: it could keep no chain.
+    mov     rax, [rbx + httpasm_tls13_connection.config]
+    test    dword [rax + httpasm_tls13_server_config.flags], HTTPASM_TLS_CLIENT_AUTH_REQUEST | HTTPASM_TLS_CLIENT_AUTH_REQUIRE
+    jz      .server_certificate
+    cmp     qword [rbx + httpasm_tls13_connection.peer], 0
+    je      .server_certificate
+    lea     rsi, [rel ha_tls_request]
+    mov     edx, TE_REQUEST_LENGTH
+    call    .put
+    test    eax, eax
+    jnz     .answer
+    or      dword [rbx + httpasm_tls13_connection.flags], TF_ASKED
+.server_certificate:
     mov     rax, [rbx + httpasm_tls13_connection.config]
     mov     rsi, [rax + httpasm_tls13_server_config.certificate]
     mov     rdx, [rax + httpasm_tls13_server_config.certificate_length]
@@ -713,8 +757,84 @@ ha_tls_server_message:
     call    ha_tls_set_write                ; our application data may go now (0.5-RTT)
     or      dword [rbx + httpasm_tls13_connection.flags], TF_SENT_FINISHED
     mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_FINISHED
+    test    dword [rbx + httpasm_tls13_connection.flags], TF_ASKED
+    jz      .flight_done
+    mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_CERT   ; its Certificate first
+.flight_done:
     mov     eax, TM_BOUNDARY                ; the read key changed: the hello ends its record
     jmp     .answer
+
+.wait_cert:
+    ; ---- the client's Certificate (4.5.1) answering our CertificateRequest: our request's
+    ; context (empty: illegal_parameter otherwise), every entry a certificate answering only what
+    ; we asked (tls/sign.asm's ha_tls_peer_leaf), the leaf's key one the engine verifies. An
+    ; empty list is the client declining: taken, or certificate_required when the configuration
+    ; requires a certificate (4.5.1.3-3#1). The list is kept in the peer-chain span (the message
+    ; lies in the caller's record or the reassembly span, neither of which lasts) for the
+    ; CertificateVerify and for the caller (httpasm_tls13_peer_certificates).
+    cmp     eax, HTTPASM_TLS_CERTIFICATE
+    jne     .unexpected
+    lea     rdi, [r12 + 4]                  ; read(body, length, &context, &n, &list, &n)
+    lea     rsi, [r13 - 4]
+    lea     rdx, [rbp + SV_CONTEXT]
+    lea     rcx, [rbp + SV_CONTEXT_LENGTH]
+    lea     r8, [rbp + SV_LIST]
+    lea     r9, [rbp + SV_LIST_LENGTH]
+    call    httpasm_tls13_certificate_read
+    test    rax, rax
+    js      .answer                         ; (eax: minus its alert)
+    mov     r14, rax                        ; the entries
+    cmp     qword [rbp + SV_CONTEXT_LENGTH], 0
+    jne     .illegal                        ; not our request's (empty) context
+    test    r14, r14
+    jnz     .chain
+    mov     rax, [rbx + httpasm_tls13_connection.config]
+    test    dword [rax + httpasm_tls13_server_config.flags], HTTPASM_TLS_CLIENT_AUTH_REQUIRE
+    jnz     .certificate_required
+    mov     qword [rbx + httpasm_tls13_connection.peer_length], 0
+    mov     dword [rbx + httpasm_tls13_connection.peer_count], 0
+    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+    mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_FINISHED   ; no CertificateVerify
+    jmp     .client_message
+.chain:
+    mov     rsi, [rbp + SV_LIST]
+    mov     rdx, [rbp + SV_LIST_LENGTH]
+    call    ha_tls_peer_leaf
+    test    eax, eax
+    jnz     .answer
+    mov     rcx, [rbp + SV_LIST_LENGTH]
+    cmp     rcx, [rbx + httpasm_tls13_connection.peer_capacity]
+    ja      .internal                       ; (never: the message was within max_message, the
+                                            ; span's size, both server_init's)
+    mov     [rbx + httpasm_tls13_connection.peer_length], rcx
+    mov     [rbx + httpasm_tls13_connection.peer_count], r14d
+    mov     rdi, [rbx + httpasm_tls13_connection.peer]
+    mov     rsi, [rbp + SV_LIST]
+    rep     movsb
+    or      dword [rbx + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+    mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_CV
+.client_message:
+    ; the client's Certificate or CertificateVerify into the transcript, after it was judged
+    ; (the CertificateVerify's content is over the transcript before itself)
+    mov     rsi, r12
+    mov     rdx, r13
+    call    ha_tls_transcript_add
+    xor     eax, eax
+    jmp     .answer
+
+.wait_cv:
+    ; ---- its CertificateVerify (4.5.2), which must come right after a Certificate with
+    ; certificates (4.5.2-1#2, -1#3): over ClientHello .. the client's Certificate, by the leaf's
+    ; key (tls/sign.asm's ha_tls_verify)
+    cmp     eax, HTTPASM_TLS_CERTIFICATE_VERIFY
+    jne     .unexpected
+    mov     rsi, r12
+    mov     rdx, r13
+    call    ha_tls_verify
+    test    eax, eax
+    jnz     .answer
+    mov     dword [rbx + httpasm_tls13_connection.state], TS_WAIT_FINISHED
+    jmp     .client_message
 
 .wait_finished:
     ; ---- the client's Finished (4.5.3) over ClientHello .. server Finished
@@ -790,6 +910,9 @@ ha_tls_server_message:
     jmp     .answer
 .decrypt_error:
     mov     eax, -HTTPASM_TLS_ALERT_DECRYPT_ERROR
+    jmp     .answer
+.certificate_required:
+    mov     eax, -HTTPASM_TLS_ALERT_CERTIFICATE_REQUIRED
     jmp     .answer
 .internal:
     mov     eax, -HTTPASM_TLS_ALERT_INTERNAL_ERROR

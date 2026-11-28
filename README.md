@@ -42,7 +42,9 @@ family, next to [KvAsm](https://github.com/AsmFoundation/KvAsm) and
 >   random source): every group (the post-quantum hybrids X25519MLKEM768, SecP256r1MLKEM768 and
 >   SecP384r1MLKEM1024 among them) and every signature scheme a server key makes, RFC 8448's
 >   flights octet for octet, against OpenSSL (SslStream, `openssl s_client`) and a client of the
->   tests' own; client authentication comes next.
+>   tests' own; and client authentication (`HTTPASM_TLS_CLIENT_AUTH_*`: every kind of client key
+>   verified, the chain handed to the caller by `httpasm_tls13_peer_certificates`, whose trust
+>   is the caller's until M3's validation).
 >
 > [docs/DESIGN.md](docs/DESIGN.md) holds the decisions, the architecture and the milestones;
 > [benchmarks/](benchmarks/README.md) holds the measurements.

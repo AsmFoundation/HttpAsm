@@ -193,6 +193,7 @@ extern httpasm_tls13_send            ; int64_t (connection, data, length): octet
 extern httpasm_tls13_close           ; int (connection): 0, -1
 extern httpasm_tls13_key_update      ; int (connection, request): 0, -1
 extern httpasm_tls13_negotiated      ; int (connection, *suite, *group, *scheme): 0, 1, 2, -1
+extern httpasm_tls13_peer_certificates ; int (connection, *list, *length): entries, -1 before the client's Certificate
 extern httpasm_tls13_wipe            ; void (connection)
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)

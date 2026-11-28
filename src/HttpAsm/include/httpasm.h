@@ -1683,8 +1683,17 @@ int httpasm_tls13_key_update_read(const uint8_t *body, size_t length);
 #define HTTPASM_TLS_SCHEME_BIT_ED25519                9
 #define HTTPASM_TLS_SCHEME_BIT_ED448                  10
 
-#define HTTPASM_TLS_CLIENT_AUTH_REQUEST 1   /* config flags: ask for a client certificate */
-#define HTTPASM_TLS_CLIENT_AUTH_REQUIRE 2   /* and end the handshake without one */
+/* Client authentication (RFC 9846 4.4.2, 4.5): the server's flight carries a CertificateRequest
+ * (signature_algorithms: ecdsa_secp256r1_sha256, ed25519, ecdsa_secp384r1_sha384, ed448,
+ * ecdsa_secp521r1_sha512, rsa_pss_rsae_*, rsa_pss_pss_*), and the client's CertificateVerify is
+ * verified against its leaf's key; httpasm_tls13_peer_certificates hands the chain over. Proving
+ * the client holds the leaf's key is all the engine does: whether the chain is to be trusted
+ * (issuers, names, dates, revocation) is the caller's to judge until M3's validation. Either
+ * flag makes config->memory larger by max_message (the chain's span). */
+#define HTTPASM_TLS_CLIENT_AUTH_REQUEST 1   /* config flags: ask for a client certificate (an
+                                             * empty answer is taken: no client authentication) */
+#define HTTPASM_TLS_CLIENT_AUTH_REQUIRE 2   /* and end the handshake without one
+                                             * (certificate_required); implies REQUEST */
 #define HTTPASM_TLS_SERVER_GROUP_ORDER  4   /* the server's first group the client supports, even
                                              * at the cost of a HelloRetryRequest (default: its
                                              * first group the client sent a share for) */
@@ -1715,13 +1724,14 @@ typedef struct httpasm_tls13_server_config {
     uint32_t group_count;               /* in: 0 = the library's order */
     uint16_t suites[4];                 /* in: cipher suites in the server's order */
     uint32_t suite_count;               /* in: 0 = the library's order */
-    uint32_t flags;                     /* in: HTTPASM_TLS_CLIENT_AUTH_* */
+    uint32_t flags;                     /* in: HTTPASM_TLS_CLIENT_AUTH_*, _SERVER_GROUP_ORDER */
     uint32_t max_message;               /* in: the largest handshake message gathered; 0 = the default */
     const uint8_t *certificate;         /* out: the Certificate message, in the caller's buffer */
     size_t certificate_length;          /* out */
     uint64_t schemes;                   /* out: HTTPASM_TLS_SCHEME_BIT_* the key makes */
     size_t output_min;                  /* out: the output span a connection needs at least */
-    size_t memory;                      /* out: a connection's memory (max_message + output_min) */
+    size_t memory;                      /* out: a connection's memory (max_message + output_min,
+                                           + max_message with client authentication) */
     uint64_t reserved[4];
 } httpasm_tls13_server_config;
 
@@ -1735,10 +1745,10 @@ typedef struct httpasm_tls13_event {
     uint32_t reserved;
 } httpasm_tls13_event;
 
-/* One connection's state (2752 octets), opaque; its secrets are secret: httpasm_tls13_wipe it.
+/* One connection's state (2784 octets), opaque; its secrets are secret: httpasm_tls13_wipe it.
  * Best 16-aligned (its record keys are then 16-aligned inside it). */
 typedef struct httpasm_tls13_connection {
-    uint64_t opaque[344];
+    uint64_t opaque[348];
 } httpasm_tls13_connection;
 
 /* Checks a server's configuration and fills its "out" fields: the Certificate message built from
@@ -1747,7 +1757,8 @@ typedef struct httpasm_tls13_connection {
  * (X25519MLKEM768, x25519, secp256r1, x448, secp384r1, secp521r1, SecP256r1MLKEM768,
  * SecP384r1MLKEM1024, ffdhe2048-8192) and suites (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305)
  * where none are given; the sizes a connection needs. Returns 0; -1 for no key or no random
- * source, a list over its bound or naming a group or suite the engine lacks, or no chain; -2
+ * source, a list over its bound or naming a group or suite the engine lacks, a flag the engine
+ * does not know, or no chain; -2
  * for a certificate that does not parse or a leaf whose key is not config->key's; -3 when
  * buffer is too small (config->certificate_length then holds the octets needed). */
 int httpasm_tls13_server_config_init(httpasm_tls13_server_config *config,
@@ -1755,11 +1766,12 @@ int httpasm_tls13_server_config_init(httpasm_tls13_server_config *config,
                                      size_t count, uint8_t *buffer, size_t capacity);
 
 /* Starts a server connection in memory[0..length), at least config->memory octets (the
- * reassembly span, then the output span), which the connection uses until it is wiped. The
- * configuration must outlive the connection and stay as init left it while any connection uses
- * it (every connection reads it live). Returns 0, or -1 when length is too small, or when the
- * configuration was edited since init past the bounds that keep a connection inside its memory
- * (max_message + output_min over length, 0 or more than 16 groups, 0 or more than 4 suites).
+ * reassembly span, the peer chain's with client authentication, then the output span), which
+ * the connection uses until it is wiped. The configuration must outlive the connection and stay
+ * as init left it while any connection uses it (every connection reads it live). Returns 0, or
+ * -1 when length is too small, or when the configuration was edited since init past the bounds
+ * that keep a connection inside its memory (the spans' sum over length, 0 or more than 16
+ * groups, 0 or more than 4 suites).
  * Footgun: an output_min lowered by hand is not caught; such a connection fails its handshake
  * with internal_error when its flight does not fit, without writing past its spans. */
 int httpasm_tls13_server_init(httpasm_tls13_connection *c, const httpasm_tls13_server_config *config,
@@ -1808,6 +1820,16 @@ int httpasm_tls13_key_update(httpasm_tls13_connection *c, int request);
  * handshake goes on, 2 once connected, -1 after a failure. */
 int httpasm_tls13_negotiated(const httpasm_tls13_connection *c, uint32_t *suite, uint32_t *group,
                              uint32_t *scheme);
+
+/* The client's certificate_list as it sent it (each CertificateEntry: cert_data, extensions;
+ * the leaf first; walk it with httpasm_tls13_certificate_entry): *list and *length (either may
+ * be NULL), valid until the connection is wiped. Returns its entries' count (0: the client sent
+ * an empty Certificate, which HTTPASM_TLS_CLIENT_AUTH_REQUEST takes), or -1 before the client's
+ * Certificate came (no client authentication configured, or the handshake not that far). Once
+ * the handshake completed with entries, the client proved it holds the leaf's key; trusting
+ * the chain is the caller's decision (see HTTPASM_TLS_CLIENT_AUTH_REQUEST). */
+int httpasm_tls13_peer_certificates(const httpasm_tls13_connection *c, const uint8_t **list,
+                                    size_t *length);
 
 /* Zeroes the connection (its secrets and keys) and its spans' octets. */
 void httpasm_tls13_wipe(httpasm_tls13_connection *c);

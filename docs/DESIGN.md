@@ -2026,8 +2026,27 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      reordered; a fuzzer driving a server from hostile ClientHellos and flights (every tier the
      same transcript, only the allowed answers); the constant-time check over the engine's
      secret handling.
-     State (2026-11-28): 4c1-4c3 done, and 4c5's application data, KeyUpdate, close_notify and
-     AES-GCM limit; 4c4 and post-handshake authentication next, then the constant-time check.
+     State (2026-11-28): 4c1-4c4 done, and 4c5's application data, KeyUpdate, close_notify and
+     AES-GCM limit; post-handshake authentication next, then the constant-time check.
+     Client authentication (4c4): HTTPASM_TLS_CLIENT_AUTH_REQUEST puts a CertificateRequest after
+     EncryptedExtensions (an empty context; signature_algorithms naming the 11 schemes the engine
+     verifies: ecdsa_secp256r1_sha256, ed25519, ecdsa_secp384r1_sha384, ed448, ecdsa_secp521r1_
+     sha512, rsa_pss_rsae_*, rsa_pss_pss_*; no PKCS#1 v1.5, no SHA-1), _REQUIRE refuses an empty
+     answer (certificate_required). The client's Certificate is held to the request (its
+     context; no extension in any entry, none having been asked for: unsupported_extension;
+     every cert_data a certificate: bad_certificate; the leaf's key one the engine verifies:
+     unsupported_certificate) and kept whole in a third span of the connection's memory
+     (max_message more with either flag), so the CertificateVerify can be checked against the
+     leaf and the caller can read the chain (`httpasm_tls13_peer_certificates`) for as long as
+     the connection lives. The CertificateVerify's scheme must be one the request listed and
+     one the leaf's key makes (the curve's for ECDSA, rsae for rsaEncryption, pss for RSASSA-PSS
+     within its parameters' hash and salt), its ECDSA DER strict, its signature valid
+     (decrypt_error otherwise). Proving possession of the leaf's key is all the engine does: the
+     chain's trust (issuers, names, dates, revocation) is the caller's until M3's validation.
+     Proven by the tests' client with every key kind (ECDSA on the three curves, RSA-PSS both
+     ways, Ed25519, Ed448) and 48 refusals, by SslStream's client certificates (RSA, P-256,
+     P-384, P-521; none under REQUEST and REQUIRE) and by `openssl s_client -cert` with all seven
+     kinds; the connection grew to 2784 octets (the peer span's pointers, after the record keys).
      RFC 8448's sections 3 and 7 reproduced octet for octet (section 5's retry carries a cookie,
      which this server, keeping its state, never sends); 17 SslStream handshakes (every suite
      and key kind, the retry forced) and 22 with `openssl s_client` (every group and scheme it

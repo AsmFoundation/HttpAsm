@@ -107,15 +107,19 @@ public sealed class TlsOpenSslCliTests
     /// <param name="lines">What s_client's standard input gets.</param>
     /// <param name="waitBetween">Whether each line after the first waits until the server took a
     /// record since the one before (a KeyUpdate brings no event, only a record).</param>
+    /// <param name="flags">The server's configuration flags (client authentication's).</param>
+    /// <param name="inspect">Called with the server's connection once the run ended, before it
+    /// is wiped (what it kept: the client's certificates), or null.</param>
     /// <returns>What happened.</returns>
     /// <exception cref="InvalidOperationException">The server pump failed.</exception>
     /// <exception cref="TimeoutException">s_client did not end.</exception>
-    private static SClientRun SClient(TlsInteropTests.Credential credential, string arguments, string[] lines, bool waitBetween = false)
+    internal static SClientRun SClient(TlsInteropTests.Credential credential, string arguments, string[] lines, bool waitBetween = false,
+        uint flags = 0, Action<TlsServerHarness>? inspect = null)
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        using var server = new TlsServerHarness(credential.Key, [credential.Certificate]);
+        using var server = new TlsServerHarness(credential.Key, [credential.Certificate], flags: flags);
         Assert.Equal(0, server.ConfigAnswer);
         var served = new TlsInteropTests.Served();
         using var records = new SemaphoreSlim(0);
@@ -175,6 +179,7 @@ public sealed class TlsOpenSslCliTests
             throw new InvalidOperationException($"{served.Failure}\n{error.Result}");
         }
 
+        inspect?.Invoke(server);
         return new SClientRun(output.Result, error.Result, server.Negotiated(), served);
     }
 

@@ -1134,9 +1134,43 @@ httpasm_tls13_negotiated:
 .end:
 
 ; -----------------------------------------------------------------------------
+; int httpasm_tls13_peer_certificates(const httpasm_tls13_connection *c, const uint8_t **list,
+;                                     size_t *length)
+;   The client's certificate_list as it sent it (CertificateEntry { cert_data, extensions }, the
+;   leaf first: httpasm_tls13_certificate_entry walks it), kept in the connection's peer-chain
+;   span: *list and *length (any pointer may be NULL). Returns its entries' count (0: the client
+;   declined, an empty Certificate), or -1 before the client's Certificate came (no client
+;   authentication configured, or not that far yet). The engine proved the client holds the
+;   leaf's key (its CertificateVerify); whether the chain is to be trusted (issuers, names, dates)
+;   is the caller's to judge (M3 brings validation). Valid until the connection is wiped. A leaf:
+;   clobbers rax, rcx.
+; -----------------------------------------------------------------------------
+global httpasm_tls13_peer_certificates:function (httpasm_tls13_peer_certificates.end - httpasm_tls13_peer_certificates)
+align 16
+httpasm_tls13_peer_certificates:
+    mov     eax, -1
+    test    dword [rdi + httpasm_tls13_connection.flags], TF_PEER_CHAIN
+    jz      .done
+    test    rsi, rsi
+    jz      .length
+    mov     rcx, [rdi + httpasm_tls13_connection.peer]
+    mov     [rsi], rcx
+.length:
+    test    rdx, rdx
+    jz      .count
+    mov     rcx, [rdi + httpasm_tls13_connection.peer_length]
+    mov     [rdx], rcx
+.count:
+    mov     eax, [rdi + httpasm_tls13_connection.peer_count]
+.done:
+    ret
+.end:
+
+; -----------------------------------------------------------------------------
 ; void httpasm_tls13_wipe(httpasm_tls13_connection *c)
-;   Zeroes the connection's spans and then the connection itself: its secrets, keys and state.
-;   A leaf: clobbers rax, rcx, rdi, rsi.
+;   Zeroes the connection's spans and then the connection itself: its secrets, keys and state
+;   (the peer chain too: what a client sent is the connection's to forget with it). A leaf:
+;   clobbers rax, rcx, rdi, rsi.
 ; -----------------------------------------------------------------------------
 global httpasm_tls13_wipe:function (httpasm_tls13_wipe.end - httpasm_tls13_wipe)
 align 16
@@ -1145,8 +1179,14 @@ httpasm_tls13_wipe:
     xor     eax, eax
     mov     rdi, [rsi + httpasm_tls13_connection.message]
     test    rdi, rdi
-    jz      .output
+    jz      .peer
     mov     rcx, [rsi + httpasm_tls13_connection.message_capacity]
+    rep     stosb
+.peer:
+    mov     rdi, [rsi + httpasm_tls13_connection.peer]
+    test    rdi, rdi
+    jz      .output
+    mov     rcx, [rsi + httpasm_tls13_connection.peer_capacity]
     rep     stosb
 .output:
     mov     rdi, [rsi + httpasm_tls13_connection.output]

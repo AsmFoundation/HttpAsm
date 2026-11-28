@@ -378,6 +378,63 @@ internal sealed unsafe class TlsServerHarness : IDisposable
     /// <returns>The progress.</returns>
     public int Progress() => Native.Tls13Negotiated(connection, null, null, null);
 
+    /// <summary>httpasm_tls13_peer_certificates: the client's certificate_list as the connection
+    /// keeps it.</summary>
+    /// <returns>The answer (the entries, or -1) and the list's octets (empty before the
+    /// client's Certificate).</returns>
+    public (int Count, byte[] List) PeerCertificates()
+    {
+        byte* list;
+        nuint length;
+        int count = Native.Tls13PeerCertificates(connection, &list, &length);
+        return (count, count < 0 ? [] : new ReadOnlySpan<byte>(list, (int)length).ToArray());
+    }
+
+    /// <summary>httpasm_tls13_peer_certificates with both out pointers NULL (the C header allows
+    /// either): the count alone.</summary>
+    /// <returns>The entries, or -1.</returns>
+    public int PeerCount() => Native.Tls13PeerCertificates(connection, null, null);
+
+    /// <summary>The client's certificates, each entry's cert_data, walked out of the list the
+    /// connection keeps by the library's own entry reader (httpasm_tls13_certificate_entry).</summary>
+    /// <returns>The DER certificates, the leaf first (empty when none).</returns>
+    /// <exception cref="InvalidDataException">The kept list does not walk (the engine kept what
+    /// it should not have).</exception>
+    public List<byte[]> PeerChain()
+    {
+        byte* list;
+        nuint length;
+        var chain = new List<byte[]>();
+        if (Native.Tls13PeerCertificates(connection, &list, &length) <= 0)
+        {
+            return chain;
+        }
+
+        TlsExtensions extensions;
+        nuint at = 0;
+        while (at < length)
+        {
+            byte* certificate;
+            nuint n;
+            long next = Native.Tls13CertificateEntry(list, length, at, &certificate, &n, &extensions);
+            if (next <= (long)at)
+            {
+                throw new InvalidDataException($"the kept list does not walk at {at}: {next}");
+            }
+
+            chain.Add(new ReadOnlySpan<byte>(certificate, (int)n).ToArray());
+            at = (nuint)next;
+        }
+
+        return chain;
+    }
+
+    /// <summary>Changes the live configuration of a started connection: what a caller that edits
+    /// a configuration its connections read does (the C header forbids it; the engine must stay
+    /// inside its memory all the same).</summary>
+    /// <param name="edit">The change.</param>
+    public void EditConfig(ConfigSetter edit) => edit(config);
+
     /// <summary>httpasm_tls13_send.</summary>
     /// <param name="data">Application data.</param>
     /// <returns>The octets taken, or -1.</returns>

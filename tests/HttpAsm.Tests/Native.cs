@@ -1150,6 +1150,15 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_tls13_negotiated")]
     internal static partial int Tls13Negotiated(TlsConnection* connection, uint* suite, uint* group, uint* scheme);
 
+    /// <summary>int httpasm_tls13_peer_certificates(connection, &amp;list, &amp;length): the client's
+    /// certificate_list kept by the connection.</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="list">Receives the list (or null).</param>
+    /// <param name="length">Receives its octets (or null).</param>
+    /// <returns>Its entries (0: an empty Certificate), or -1 before the client's Certificate.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_peer_certificates")]
+    internal static partial int Tls13PeerCertificates(TlsConnection* connection, byte** list, nuint* length);
+
     /// <summary>void httpasm_tls13_wipe(connection).</summary>
     /// <param name="connection">The connection (its spans zeroed too).</param>
     [LibraryImport(Library, EntryPoint = "httpasm_tls13_wipe")]

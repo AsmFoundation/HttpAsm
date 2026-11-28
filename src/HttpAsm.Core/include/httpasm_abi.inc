@@ -897,7 +897,7 @@ struc httpasm_tls13_event
     .reserved:          resd 1
 endstruc
 
-; httpasm_tls13_connection: one connection's state (2752 octets, struct size id 33), in the
+; httpasm_tls13_connection: one connection's state (2784 octets, struct size id 33), in the
 ; caller's memory; opaque to callers (the C header gives its size only). Its secrets and keys
 ; are secret: wipe it when done (httpasm_tls13_wipe).
 struc httpasm_tls13_connection
@@ -936,6 +936,12 @@ struc httpasm_tls13_connection
                                     ; .output_end + 5 (also keeps the record keys 16-aligned)
     .read:              resb httpasm_tls13_record_key_size  ; the peer's records
     .write:             resb httpasm_tls13_record_key_size  ; ours
+    ; client authentication (4c4), after the keys so their offsets and alignment stay
+    .peer:              resq 1      ; the peer-chain span (client authentication configured), or 0
+    .peer_capacity:     resq 1      ; its size (the configuration's max_message)
+    .peer_length:       resq 1      ; the client's certificate_list's octets kept there
+    .peer_count:        resd 1      ; its entries (TF_PEER_CHAIN: the client's Certificate came)
+    .reserved2:         resd 1      ; (the size stays a multiple of 16)
 endstruc
 
 ; -----------------------------------------------------------------------------
