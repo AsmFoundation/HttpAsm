@@ -1,0 +1,355 @@
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+
+namespace HttpAsm.Tests;
+
+/// <summary>
+/// The engine's random source as a script: the octets of each draw given in the order the engine
+/// draws them (httpasm_tls13_receive's documented order: the server random, the key share's
+/// private parts, the CertificateVerify's salt or hedge), so a test replays a trace's randomness
+/// and checks the engine asked for exactly what it should. Past the script, draws are random
+/// (<see cref="Fallback"/>) or refused.
+/// </summary>
+internal sealed class RandomScript
+{
+    /// <summary>The draws still to give, in order.</summary>
+    private readonly Queue<byte[]> draws = new();
+
+    /// <summary>Whether a draw past the script gets random octets (true) or is refused.</summary>
+    public bool Fallback { get; init; } = true;
+
+    /// <summary>When set, every draw is refused (the source failed): the engine must answer
+    /// internal_error.</summary>
+    public bool Broken { get; set; }
+
+    /// <summary>The lengths of the draws the engine made, in order.</summary>
+    public List<int> Lengths { get; } = [];
+
+    /// <summary>What went wrong: a draw of another length than the script's next.</summary>
+    public List<string> Failures { get; } = [];
+
+    /// <summary>Appends draws to the script.</summary>
+    /// <param name="octets">Each draw's octets.</param>
+    /// <returns>This script.</returns>
+    public RandomScript Then(params byte[][] octets)
+    {
+        foreach (byte[] o in octets)
+        {
+            draws.Enqueue(o);
+        }
+
+        return this;
+    }
+
+    /// <summary>The draws left unused.</summary>
+    public int Left => draws.Count;
+
+    /// <summary>Fills one draw.</summary>
+    /// <param name="output">Where the engine wants the octets.</param>
+    /// <returns>Whether the draw succeeded.</returns>
+    public bool Next(Span<byte> output)
+    {
+        Lengths.Add(output.Length);
+        if (Broken)
+        {
+            return false;
+        }
+
+        if (draws.TryDequeue(out byte[]? next))
+        {
+            if (next.Length != output.Length)
+            {
+                Failures.Add($"draw {Lengths.Count}: {output.Length} octets asked, the script's {next.Length}");
+                return false;
+            }
+
+            next.CopyTo(output);
+            return true;
+        }
+
+        if (!Fallback)
+        {
+            Failures.Add($"draw {Lengths.Count}: past the script");
+            return false;
+        }
+
+        RandomNumberGenerator.Fill(output);
+        return true;
+    }
+}
+
+/// <summary>
+/// One TLS 1.3 server connection of the library's engine, in native memory this harness owns: the
+/// private key (httpasm_private_key_load), the configuration, the Certificate message's buffer,
+/// the connection and its spans, and an input buffer records are copied into (a protected record
+/// is opened in place there). Records go in (<see cref="Receive"/>), the output comes out
+/// (<see cref="TakeOutput"/>).
+/// </summary>
+internal sealed unsafe class TlsServerHarness : IDisposable
+{
+    /// <summary>The input buffer's size: several whole records.</summary>
+    private const int InputSize = 1 << 18;
+
+    /// <summary>The loaded private key.</summary>
+    private readonly PrivateKey* key;
+
+    /// <summary>The configuration (kept by pointer by the connection).</summary>
+    private readonly TlsServerConfig* config;
+
+    /// <summary>The Certificate message's buffer.</summary>
+    private readonly byte* certificate;
+
+    /// <summary>The connection.</summary>
+    private readonly TlsConnection* connection;
+
+    /// <summary>The connection's spans.</summary>
+    private readonly byte* memory;
+
+    /// <summary>Where records are copied for the engine.</summary>
+    private readonly byte* input;
+
+    /// <summary>The script's handle, the random callback's context.</summary>
+    private GCHandle source;
+
+    /// <summary>The random source the engine draws from.</summary>
+    public RandomScript Random { get; }
+
+    /// <summary>httpasm_tls13_server_config_init's answer (0: the connection was started).</summary>
+    public int ConfigAnswer { get; }
+
+    /// <summary>The configuration as initialized (a copy).</summary>
+    public TlsServerConfig Config => *config;
+
+    /// <summary>
+    /// Loads the key, initializes the configuration and starts the connection.
+    /// </summary>
+    /// <param name="keyFile">The private key's file (DER or PEM).</param>
+    /// <param name="chain">The DER certificates, the leaf first.</param>
+    /// <param name="random">The random source (a fresh random one when null).</param>
+    /// <param name="groups">The server's groups in order (null: the library's).</param>
+    /// <param name="suites">Its suites in order (null: the library's).</param>
+    /// <param name="flags">HTTPASM_TLS_CLIENT_AUTH_* and HTTPASM_TLS_SERVER_GROUP_ORDER.</param>
+    /// <param name="maxMessage">The largest handshake message gathered (0: the default).</param>
+    /// <exception cref="InvalidOperationException">The key does not load, or the configuration
+    /// is accepted but the connection does not start.</exception>
+    public TlsServerHarness(byte[] keyFile, IReadOnlyList<byte[]> chain, RandomScript? random = null, ushort[]? groups = null,
+        ushort[]? suites = null, uint flags = 0, uint maxMessage = 0)
+    {
+        Random = random ?? new RandomScript();
+        source = GCHandle.Alloc(Random);
+        key = (PrivateKey*)NativeMemory.AllocZeroed((nuint)sizeof(PrivateKey));
+        config = (TlsServerConfig*)NativeMemory.AllocZeroed((nuint)sizeof(TlsServerConfig));
+        int total = 8 + chain.Sum(c => c.Length + 5);
+        certificate = (byte*)NativeMemory.AllocZeroed((nuint)total);
+        connection = (TlsConnection*)NativeMemory.AlignedAlloc((nuint)sizeof(TlsConnection), 16);
+        input = (byte*)NativeMemory.AllocZeroed(InputSize);
+        fixed (byte* k = keyFile)
+        {
+            if (Native.PrivateKeyLoad(key, k, (nuint)keyFile.Length) <= 0)
+            {
+                Dispose();
+                throw new InvalidOperationException("the key does not load");
+            }
+        }
+
+        config->Key = key;
+        config->Random = &Draw;
+        config->RandomContext = (void*)GCHandle.ToIntPtr(source);
+        if (groups is not null)
+        {
+            for (int i = 0; i < groups.Length; i++)
+            {
+                config->Groups[i] = groups[i];
+            }
+
+            config->GroupCount = (uint)groups.Length;
+        }
+
+        if (suites is not null)
+        {
+            for (int i = 0; i < suites.Length; i++)
+            {
+                config->Suites[i] = suites[i];
+            }
+
+            config->SuiteCount = (uint)suites.Length;
+        }
+
+        config->Flags = flags;
+        config->MaxMessage = maxMessage;
+
+        // the "out" fields start cleared, so what they hold after init is init's own
+        config->Certificate = null;
+        config->CertificateLength = 0;
+        config->Schemes = 0;
+        config->OutputMin = 0;
+        config->Memory = 0;
+        ConfigAnswer = InitConfig(config, chain, certificate, (nuint)total);
+        if (ConfigAnswer != 0)
+        {
+            return;
+        }
+
+        memory = (byte*)NativeMemory.AllocZeroed(config->Memory);
+        if (Native.Tls13ServerInit(connection, config, memory, config->Memory) != 0)
+        {
+            Dispose();
+            throw new InvalidOperationException("the connection does not start");
+        }
+    }
+
+    /// <summary>httpasm_tls13_server_config_init over a managed chain.</summary>
+    /// <param name="config">The configuration.</param>
+    /// <param name="chain">The certificates.</param>
+    /// <param name="buffer">The Certificate message's buffer.</param>
+    /// <param name="capacity">Its octets.</param>
+    /// <returns>The library's answer.</returns>
+    internal static int InitConfig(TlsServerConfig* config, IReadOnlyList<byte[]> chain, byte* buffer, nuint capacity)
+    {
+        // the chain's arrays pinned for the call only: the library copies them into the buffer
+        var handles = chain.Select(c => GCHandle.Alloc(c, GCHandleType.Pinned)).ToArray();
+        try
+        {
+            byte** pointers = stackalloc byte*[Math.Max(1, chain.Count)];
+            nuint* lengths = stackalloc nuint[Math.Max(1, chain.Count)];
+            for (int i = 0; i < chain.Count; i++)
+            {
+                pointers[i] = (byte*)handles[i].AddrOfPinnedObject();
+                lengths[i] = (nuint)chain[i].Length;
+            }
+
+            return Native.Tls13ServerConfigInit(config, pointers, lengths, (nuint)chain.Count, buffer, capacity);
+        }
+        finally
+        {
+            foreach (GCHandle h in handles)
+            {
+                h.Free();
+            }
+        }
+    }
+
+    /// <summary>The engine's random callback: the script in the context fills the draw.</summary>
+    /// <param name="context">The script's GCHandle.</param>
+    /// <param name="output">The octets to fill.</param>
+    /// <param name="length">How many.</param>
+    /// <returns>0, or -1 when the script refuses.</returns>
+    [UnmanagedCallersOnly]
+    private static int Draw(void* context, byte* output, nuint length)
+    {
+        var script = (RandomScript)GCHandle.FromIntPtr((nint)context).Target!;
+        return script.Next(new Span<byte>(output, (int)length)) ? 0 : -1;
+    }
+
+    /// <summary>What one call of httpasm_tls13_receive answered.</summary>
+    /// <param name="Answer">The octets consumed, 0, or -1.</param>
+    /// <param name="Event">The event.</param>
+    /// <param name="Data">DATA's plaintext, copied out (empty otherwise).</param>
+    internal readonly record struct Received(long Answer, TlsEvent Event, byte[] Data);
+
+    /// <summary>Gives the engine octets (copied into the native input buffer) and calls
+    /// httpasm_tls13_receive once.</summary>
+    /// <param name="octets">What arrived: one record or more, or part of one.</param>
+    /// <returns>Its answer.</returns>
+    /// <exception cref="ArgumentException">More octets than the input buffer holds.</exception>
+    public Received Receive(ReadOnlySpan<byte> octets)
+    {
+        if (octets.Length > InputSize)
+        {
+            throw new ArgumentException("too long for the input buffer", nameof(octets));
+        }
+
+        octets.CopyTo(new Span<byte>(input, octets.Length));
+        TlsEvent e;
+        long answer = Native.Tls13Receive(connection, input, (nuint)octets.Length, &e);
+        byte[] data = e.Kind == TlsEngine.EventData ? new ReadOnlySpan<byte>(e.Data, (int)e.Length).ToArray() : [];
+        return new Received(answer, e, data);
+    }
+
+    /// <summary>Gives the engine a stream of records, one call a record until it is all taken or
+    /// a call answers 0 or -1.</summary>
+    /// <param name="octets">The records.</param>
+    /// <returns>Each call's answer.</returns>
+    public List<Received> ReceiveAll(ReadOnlySpan<byte> octets)
+    {
+        var answers = new List<Received>();
+        while (octets.Length > 0)
+        {
+            Received r = Receive(octets);
+            answers.Add(r);
+            if (r.Answer <= 0)
+            {
+                break;
+            }
+
+            octets = octets[(int)r.Answer..];
+        }
+
+        return answers;
+    }
+
+    /// <summary>Takes everything queued in the output.</summary>
+    /// <returns>The octets.</returns>
+    public byte[] TakeOutput()
+    {
+        byte* o;
+        nuint n = Native.Tls13Output(connection, &o);
+        byte[] taken = new ReadOnlySpan<byte>(o, (int)n).ToArray();
+        Native.Tls13OutputDone(connection, n);
+        return taken;
+    }
+
+    /// <summary>httpasm_tls13_send.</summary>
+    /// <param name="data">Application data.</param>
+    /// <returns>The octets taken, or -1.</returns>
+    public long Send(ReadOnlySpan<byte> data)
+    {
+        fixed (byte* d = data)
+        {
+            return Native.Tls13Send(connection, d, (nuint)data.Length);
+        }
+    }
+
+    /// <summary>httpasm_tls13_close.</summary>
+    /// <returns>0, or -1.</returns>
+    public int Close() => Native.Tls13Close(connection);
+
+    /// <summary>httpasm_tls13_key_update.</summary>
+    /// <param name="request">Whether the peer is asked to update too.</param>
+    /// <returns>0, or -1.</returns>
+    public int KeyUpdate(bool request) => Native.Tls13KeyUpdate(connection, request ? 1 : 0);
+
+    /// <summary>httpasm_tls13_negotiated.</summary>
+    /// <returns>The progress and what was chosen.</returns>
+    public (int Progress, uint Suite, uint Group, uint Scheme) Negotiated()
+    {
+        uint suite, group, scheme;
+        int progress = Native.Tls13Negotiated(connection, &suite, &group, &scheme);
+        return (progress, suite, group, scheme);
+    }
+
+    /// <summary>Wipes the connection and frees everything the harness holds.</summary>
+    public void Dispose()
+    {
+        if (memory != null)
+        {
+            Native.Tls13Wipe(connection);
+        }
+
+        NativeMemory.Free(memory);
+        NativeMemory.AlignedFree(connection);
+        NativeMemory.Free(input);
+        NativeMemory.Free(certificate);
+        NativeMemory.Free(config);
+        if (key != null)
+        {
+            new Span<byte>(key, sizeof(PrivateKey)).Clear();   // the key's octets are the secret
+        }
+
+        NativeMemory.Free(key);
+        if (source.IsAllocated)
+        {
+            source.Free();
+        }
+    }
+}

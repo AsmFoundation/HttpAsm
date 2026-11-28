@@ -1428,6 +1428,161 @@ internal static class TlsExtension
     public static int IndexOf(int type) => Array.IndexOf(Types, type);
 }
 
+/// <summary>
+/// httpasm_tls13_server_config (httpasm.h): a TLS 1.3 server's settings, 152 octets, shared by its
+/// connections. The test fills the "in" fields (the key, the random source, the lists, the flags,
+/// max_message) and httpasm_tls13_server_config_init fills the rest; the structure must stay
+/// where it was initialized while connections use it (they keep a pointer to it).
+/// </summary>
+internal unsafe struct TlsServerConfig
+{
+    /// <summary>In: the server's private key (a loaded httpasm_private_key), which must outlive
+    /// the configuration.</summary>
+    public PrivateKey* Key;
+
+    /// <summary>In: the random source, int (*)(void *context, uint8_t *out, size_t length).</summary>
+    public delegate* unmanaged<void*, byte*, nuint, int> Random;
+
+    /// <summary>In: its first argument.</summary>
+    public void* RandomContext;
+
+    /// <summary>In: NamedGroups in the server's order.</summary>
+    public fixed ushort Groups[16];
+
+    /// <summary>In: how many; 0 asks for the library's order.</summary>
+    public uint GroupCount;
+
+    /// <summary>In: cipher suites in the server's order.</summary>
+    public fixed ushort Suites[4];
+
+    /// <summary>In: how many; 0 asks for the library's order.</summary>
+    public uint SuiteCount;
+
+    /// <summary>In: HTTPASM_TLS_CLIENT_AUTH_* and HTTPASM_TLS_SERVER_GROUP_ORDER.</summary>
+    public uint Flags;
+
+    /// <summary>In: the largest handshake message a connection gathers (0: 16,384).</summary>
+    public uint MaxMessage;
+
+    /// <summary>Out: the Certificate message, header and body, in the buffer given.</summary>
+    public byte* Certificate;
+
+    /// <summary>Out: its octets (or, after -3, the octets the buffer must hold).</summary>
+    public nuint CertificateLength;
+
+    /// <summary>Out: the HTTPASM_TLS_SCHEME_BIT_* of the schemes the key makes.</summary>
+    public ulong Schemes;
+
+    /// <summary>Out: the output span a connection needs at least.</summary>
+    public nuint OutputMin;
+
+    /// <summary>Out: a connection's memory: max_message plus output_min.</summary>
+    public nuint Memory;
+
+    /// <summary>Unused.</summary>
+    public fixed ulong Reserved[4];
+}
+
+/// <summary>httpasm_tls13_event (httpasm.h): what httpasm_tls13_receive reports, 32 octets.</summary>
+internal unsafe struct TlsEvent
+{
+    /// <summary>HTTPASM_TLS_EVENT_* (<see cref="TlsEngine"/>).</summary>
+    public uint Kind;
+
+    /// <summary>FAILED: the alert's description.</summary>
+    public uint Alert;
+
+    /// <summary>DATA: the plaintext, inside the input given.</summary>
+    public byte* Data;
+
+    /// <summary>DATA: its octets.</summary>
+    public nuint Length;
+
+    /// <summary>FAILED: HTTPASM_TLS_EVENT_PEER when the peer sent the alert.</summary>
+    public uint Flags;
+
+    /// <summary>Unused.</summary>
+    public uint Reserved;
+}
+
+/// <summary>httpasm_tls13_connection (httpasm.h): one connection's state, 2,752 octets, opaque.</summary>
+internal unsafe struct TlsConnection
+{
+    /// <summary>The state (its secrets included: httpasm_tls13_wipe it).</summary>
+    public fixed ulong Opaque[344];
+}
+
+/// <summary>The engine's constants (httpasm.h): NamedGroups, SignatureSchemes, their bits, the
+/// configuration's flags and the events.</summary>
+internal static class TlsEngine
+{
+    /// <summary>secp256r1.</summary>
+    public const ushort Secp256r1 = 0x0017;
+
+    /// <summary>secp384r1.</summary>
+    public const ushort Secp384r1 = 0x0018;
+
+    /// <summary>secp521r1.</summary>
+    public const ushort Secp521r1 = 0x0019;
+
+    /// <summary>x25519.</summary>
+    public const ushort X25519 = 0x001D;
+
+    /// <summary>x448.</summary>
+    public const ushort X448 = 0x001E;
+
+    /// <summary>ffdhe2048 (ffdhe3072 to ffdhe8192 follow it, one apart).</summary>
+    public const ushort Ffdhe2048 = 0x0100;
+
+    /// <summary>SecP256r1MLKEM768 (RFC 10024).</summary>
+    public const ushort Secp256r1MlKem768 = 0x11EB;
+
+    /// <summary>X25519MLKEM768.</summary>
+    public const ushort X25519MlKem768 = 0x11EC;
+
+    /// <summary>SecP384r1MLKEM1024.</summary>
+    public const ushort Secp384r1MlKem1024 = 0x11ED;
+
+    /// <summary>The library's group order, as httpasm_tls13_server_config_init fills it.</summary>
+    public static readonly ushort[] DefaultGroups =
+        [X25519MlKem768, X25519, Secp256r1, X448, Secp384r1, Secp521r1, Secp256r1MlKem768, Secp384r1MlKem1024, 0x0100, 0x0101, 0x0102, 0x0103, 0x0104];
+
+    /// <summary>The library's suite order.</summary>
+    public static readonly ushort[] DefaultSuites = [0x1301, 0x1302, 0x1303];
+
+    /// <summary>HTTPASM_TLS_CLIENT_AUTH_REQUEST.</summary>
+    public const uint ClientAuthRequest = 1;
+
+    /// <summary>HTTPASM_TLS_CLIENT_AUTH_REQUIRE.</summary>
+    public const uint ClientAuthRequire = 2;
+
+    /// <summary>HTTPASM_TLS_SERVER_GROUP_ORDER: the server's first group the client supports,
+    /// even at the cost of a HelloRetryRequest.</summary>
+    public const uint ServerGroupOrder = 4;
+
+    /// <summary>HTTPASM_TLS_EVENT_NONE.</summary>
+    public const uint EventNone = 0;
+
+    /// <summary>HTTPASM_TLS_EVENT_CONNECTED.</summary>
+    public const uint EventConnected = 1;
+
+    /// <summary>HTTPASM_TLS_EVENT_DATA.</summary>
+    public const uint EventData = 2;
+
+    /// <summary>HTTPASM_TLS_EVENT_CLOSED.</summary>
+    public const uint EventClosed = 3;
+
+    /// <summary>HTTPASM_TLS_EVENT_FAILED.</summary>
+    public const uint EventFailed = 4;
+
+    /// <summary>HTTPASM_TLS_EVENT_PEER: a failure's alert was the peer's.</summary>
+    public const uint EventPeer = 1;
+
+    /// <summary>The SignatureSchemes by their bit in httpasm_tls13_server_config.schemes, in bit
+    /// order (rsa_pss_rsae_sha256 .. ed448).</summary>
+    public static readonly ushort[] SchemeBits = [0x0804, 0x0805, 0x0806, 0x0809, 0x080A, 0x080B, 0x0403, 0x0503, 0x0603, 0x0807, 0x0808];
+}
+
 /// <summary>httpasm.h's ASN.1 constants: the rules, the tag's bits, the universal types the reader checks.</summary>
 internal static class Asn1
 {

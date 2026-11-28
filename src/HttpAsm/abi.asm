@@ -32,7 +32,8 @@ httpasm_abi_version:
 ;   19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
 ;   22 httpasm_hmac_sha512_ctx, 23 httpasm_asn1, 24 httpasm_pem, 25 httpasm_private_key,
 ;   26 httpasm_certificate, 27 httpasm_public_key, 28 httpasm_tls13_record_key,
-;   29 httpasm_tls_extensions, 30 httpasm_tls13_hello; 0 for anything else.
+;   29 httpasm_tls_extensions, 30 httpasm_tls13_hello, 31 httpasm_tls13_server_config,
+;   32 httpasm_tls13_event, 33 httpasm_tls13_connection; 0 for anything else.
 ;   In: edi. Out: eax. Clobbers rcx and the flags.
 ; -----------------------------------------------------------------------------
 section .rodata
@@ -69,6 +70,9 @@ struct_sizes:
     dd httpasm_tls13_record_key_size
     dd httpasm_tls_extensions_size
     dd httpasm_tls13_hello_size
+    dd httpasm_tls13_server_config_size
+    dd httpasm_tls13_event_size
+    dd httpasm_tls13_connection_size
 STRUCT_SIZES equ ($ - struct_sizes) / 4
 
 section .text

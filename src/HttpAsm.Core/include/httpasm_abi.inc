@@ -805,6 +805,140 @@ struc httpasm_tls13_hello
 endstruc
 
 ; -----------------------------------------------------------------------------
+; The TLS 1.3 engine (tls/engine.asm, tls/server.asm; M2 step 4c): the groups and signature
+; schemes it negotiates, a server's configuration, a connection, and what a call reports.
+; -----------------------------------------------------------------------------
+; NamedGroup (RFC 9846 4.3.7, RFC 7919, RFC 10024)
+HTTPASM_TLS_GROUP_SECP256R1     equ 0x0017
+HTTPASM_TLS_GROUP_SECP384R1     equ 0x0018
+HTTPASM_TLS_GROUP_SECP521R1     equ 0x0019
+HTTPASM_TLS_GROUP_X25519        equ 0x001D
+HTTPASM_TLS_GROUP_X448          equ 0x001E
+HTTPASM_TLS_GROUP_FFDHE2048     equ 0x0100
+HTTPASM_TLS_GROUP_FFDHE3072     equ 0x0101
+HTTPASM_TLS_GROUP_FFDHE4096     equ 0x0102
+HTTPASM_TLS_GROUP_FFDHE6144     equ 0x0103
+HTTPASM_TLS_GROUP_FFDHE8192     equ 0x0104
+HTTPASM_TLS_GROUP_SECP256R1MLKEM768 equ 0x11EB
+HTTPASM_TLS_GROUP_X25519MLKEM768 equ 0x11EC
+HTTPASM_TLS_GROUP_SECP384R1MLKEM1024 equ 0x11ED
+HTTPASM_TLS_GROUPS_MAX          equ 16      ; a configuration's list at most
+
+; SignatureScheme (RFC 9846 4.3.3, RFC 9963) and the bit each takes in a configuration's .schemes
+HTTPASM_TLS_SCHEME_ECDSA_SECP256R1_SHA256 equ 0x0403
+HTTPASM_TLS_SCHEME_ECDSA_SECP384R1_SHA384 equ 0x0503
+HTTPASM_TLS_SCHEME_ECDSA_SECP521R1_SHA512 equ 0x0603
+HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA256 equ 0x0804
+HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA384 equ 0x0805
+HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA512 equ 0x0806
+HTTPASM_TLS_SCHEME_ED25519      equ 0x0807
+HTTPASM_TLS_SCHEME_ED448        equ 0x0808
+HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA256 equ 0x0809
+HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA384 equ 0x080A
+HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA512 equ 0x080B
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA256 equ 0
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA384 equ 1
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA512 equ 2
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA256 equ 3
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA384 equ 4
+HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA512 equ 5
+HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP256R1_SHA256 equ 6
+HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP384R1_SHA384 equ 7
+HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP521R1_SHA512 equ 8
+HTTPASM_TLS_SCHEME_BIT_ED25519  equ 9
+HTTPASM_TLS_SCHEME_BIT_ED448    equ 10
+HTTPASM_TLS_SCHEMES             equ 11      ; the schemes a server's key can make
+
+; httpasm_tls13_server_config.flags
+HTTPASM_TLS_CLIENT_AUTH_REQUEST equ 1       ; ask for a client certificate (4c4)
+HTTPASM_TLS_CLIENT_AUTH_REQUIRE equ 2       ; and end the handshake without one (certificate_required)
+HTTPASM_TLS_SERVER_GROUP_ORDER  equ 4       ; our first group the client supports, even at the cost
+                                            ; of a HelloRetryRequest (default: the first one the
+                                            ; client sent a share for, no round trip)
+
+; httpasm_tls13_event.kind
+HTTPASM_TLS_EVENT_NONE          equ 0       ; the record was taken; nothing for the caller (output may wait)
+HTTPASM_TLS_EVENT_CONNECTED     equ 1       ; the handshake completed
+HTTPASM_TLS_EVENT_DATA          equ 2       ; application data: .data, .length, inside the input given
+HTTPASM_TLS_EVENT_CLOSED        equ 3       ; the peer's close_notify: it sends nothing more
+HTTPASM_TLS_EVENT_FAILED        equ 4       ; the connection failed: .alert (ours, sent; or the peer's)
+HTTPASM_TLS_EVENT_PEER          equ 1       ; httpasm_tls13_event.flags: the alert was the peer's
+
+HTTPASM_TLS_MESSAGE_DEFAULT     equ 16384   ; the largest handshake message gathered by default
+
+; httpasm_tls13_server_config: a server's settings, shared by its connections and read-only while
+; they run (152 octets, struct size id 31). The caller fills the "in" fields and calls
+; httpasm_tls13_server_config_init, which fills the rest.
+struc httpasm_tls13_server_config
+    .key:               resq 1      ; in: the private key (httpasm_private_key_load), kept by pointer
+    .random:            resq 1      ; in: int (*)(void *context, uint8_t *out, size_t length): 0 = filled
+    .random_context:    resq 1      ; in: the callback's first argument
+    .groups:            resw HTTPASM_TLS_GROUPS_MAX     ; in: NamedGroups, the server's order
+    .group_count:       resd 1      ; in: 0 = the library's order
+    .suites:            resw 4      ; in: cipher suites, the server's order
+    .suite_count:       resd 1      ; in: 0 = the library's order
+    .flags:             resd 1      ; in: HTTPASM_TLS_CLIENT_AUTH_*
+    .max_message:       resd 1      ; in: the largest handshake message gathered (0: the default)
+    .certificate:       resq 1      ; out: the Certificate message, header and body, in the caller's buffer
+    .certificate_length: resq 1     ; out
+    .schemes:           resq 1      ; out: HTTPASM_TLS_SCHEME_BIT_* of the schemes the key makes
+    .output_min:        resq 1      ; out: the output span a connection needs at least
+    .memory:            resq 1      ; out: a connection's memory: .max_message + .output_min
+    .reserved:          resq 4
+endstruc
+
+; httpasm_tls13_event: what httpasm_tls13_receive reports (32 octets, struct size id 32).
+struc httpasm_tls13_event
+    .kind:              resd 1      ; HTTPASM_TLS_EVENT_*
+    .alert:             resd 1      ; FAILED: the alert's description
+    .data:              resq 1      ; DATA: the plaintext, inside the caller's input
+    .length:            resq 1
+    .flags:             resd 1      ; FAILED: HTTPASM_TLS_EVENT_PEER when the peer sent it
+    .reserved:          resd 1
+endstruc
+
+; httpasm_tls13_connection: one connection's state (2752 octets, struct size id 33), in the
+; caller's memory; opaque to callers (the C header gives its size only). Its secrets and keys
+; are secret: wipe it when done (httpasm_tls13_wipe).
+struc httpasm_tls13_connection
+    .config:            resq 1      ; the configuration
+    .state:             resd 1      ; TS_* (tls/engine.asm)
+    .flags:             resd 1      ; TF_*
+    .alert:             resd 1      ; FAILED: the alert the connection ended with
+    .ignored:           resd 1      ; change_cipher_spec records dropped in a row
+    .suite:             resw 1      ; the negotiated cipher suite (0 before)
+    .group:             resw 1      ; the key exchange's group (a HelloRetryRequest's, then the share's)
+    .scheme:            resw 1      ; the CertificateVerify's signature scheme
+    .hash:              resb 1      ; HTTPASM_HASH_SHA256 or _SHA384: the suite's
+    .hash_length:       resb 1      ; 32 or 48
+    .session_id_length: resb 1
+    .reserved0:         resb 1
+    .peer_limit:        resw 1      ; the peer's record_size_limit (RFC 8449), 2^14 + 1 at most; 0: none
+    .reserved1:         resb 4
+    .session_id:        resb 32     ; the client's legacy_session_id (echoed; the second hello repeats it)
+    .skipped:           resq 1      ; octets of rejected early data dropped (4.3.10)
+    .message:           resq 1      ; the reassembly span: its start
+    .message_capacity:  resq 1      ; its size (the configuration's max_message)
+    .message_length:    resq 1      ; octets of a message gathered so far (0: none in progress)
+    .output:            resq 1      ; the output span: its start
+    .output_capacity:   resq 1
+    .output_start:      resq 1      ; the first octet the caller has not taken
+    .output_end:        resq 1      ; the end of what is queued
+    .transcript:        resb httpasm_sha512_ctx_size    ; the running transcript hash (a SHA-256
+                                    ; context in its first octets under a SHA-256 suite)
+    .secret:            resb 48     ; the handshake secret, then the master secret
+    .client_handshake:  resb 48     ; client_handshake_traffic_secret (its Finished's key)
+    .client_secret:     resb 48     ; the client's application traffic secret (the current one)
+    .server_secret:     resb 48     ; the server's
+    .exporter:          resb 48     ; exporter_master_secret
+    .resumption:        resb 48     ; resumption_master_secret
+    .flight:            resq 1      ; a flight's open record: its content's octets so far, past
+                                    ; .output_end + 5 (also keeps the record keys 16-aligned)
+    .read:              resb httpasm_tls13_record_key_size  ; the peer's records
+    .write:             resb httpasm_tls13_record_key_size  ; ours
+endstruc
+
+; -----------------------------------------------------------------------------
 ; CPU features: the bits of httpasm_cpu_found, httpasm_cpu_features and httpasm_cpu_limit, and
 ; of the core's ha_cpu. Levels are the x86-64 psABI's; groups are instructions that CPUs of one
 ; level may or may not have. cpu.inc has the rules (what each level adds, which group needs

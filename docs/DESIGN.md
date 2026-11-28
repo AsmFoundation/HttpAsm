@@ -1932,9 +1932,92 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      The entry reader's first version loaded each uint24 length as a dword from the octet
      before it, for the first entry the octet before the caller's list; found while the
      fuzzer's invariants were written, it now reads within the length's three octets.
-   - **4c, the server** and **4d, the client**: the state machines of a full handshake with
-     certificates, HelloRetryRequest, the alerts, KeyUpdate, post-handshake authentication;
-     then **4e**, PSK resumption, tickets, ticket requests and 0-RTT with anti-replay.
+   - **4c, the server** (planned 2026-11-28; `tls/engine.asm` for what both sides share,
+     `tls/server.asm`, `tls/kex.asm`, `tls/sign.asm`, `tls/config.asm`): the server's state
+     machine of RFC 9846 Appendix A.2, sans-I/O like every codec of the core. Decisions, each
+     forced by the architecture (section 3) or by a document:
+     - **Memory and randomness are the caller's.** A configuration (`httpasm_tls13_server_
+       config`: the certificate chain, built once into the Certificate message's body in a
+       buffer the caller gives; the private key, matched to the leaf's public key and mapped
+       to the signature schemes it can make; groups and suites in preference order; client
+       authentication's mode; the largest handshake message accepted) is shared, read-only, by
+       every connection. A connection (`httpasm_tls13_connection`, its size by struct id) lives
+       in the caller's memory with a span for reassembling handshake messages and a span for
+       output. The core makes no system calls, so the configuration carries the random source
+       as a callback (`int (*)(void *context, uint8_t *out, size_t n)`; the library's
+       `httpasm_tls_random` draws from getrandom), drawn in a documented order (the server
+       random, the ephemeral keys, then the signature's salt or nonce) so that tests can replay
+       a trace's randomness.
+     - **Bytes in, bytes out, one record a call.** `httpasm_tls13_receive` takes what arrived
+       and consumes one record (0: a record is not whole yet), opened in place in the caller's
+       buffer: application data is returned as a span of that buffer (no copy), a handshake
+       message whole in its record is read in place, and only a message spanning records is
+       copied, into the reassembly span. Every answer the engine owes (the server's flight, a
+       KeyUpdate's answer, an alert) is sealed at once into the output span, which the caller
+       drains (`httpasm_tls13_output`, `_output_done`), so the flight's handshake keys are never
+       needed after the step that made it; the output span's size is checked at init against
+       the flight's largest size for the configuration (the chain's length, the largest key
+       share, signature and record overhead). Application data goes out through
+       `httpasm_tls13_send`, sealed into the same span; `_close` queues close_notify and
+       `_key_update` a KeyUpdate. Events (connected, data, the peer's close_notify, the peer's
+       certificate) come back in a caller's `httpasm_tls13_event`. A fatal alert is sealed
+       into the output and leaves the connection failed: every later call answers it again.
+     - **Negotiation:** TLS 1.3 only until M3 (no 0x0304 in supported_versions: protocol_
+       version); the suite by the server's order among the client's (none in common:
+       handshake_failure); the group by the server's order among those the client sent a
+       share for, else a HelloRetryRequest for the server's first group among the client's
+       supported_groups (none: handshake_failure); a share for a group outside the client's
+       own supported_groups refused (illegal_parameter, 4.3.8's MAY, as OpenSSL does); the
+       signature scheme by the client's order among those the key can make (none:
+       handshake_failure); signature_algorithms and supported_groups required without PSK
+       (missing_extension, 9.2). The second ClientHello is held to 4.2.2: the same suite
+       offered, the one share of the retry's group, no early_data, the same legacy_session_id.
+       PSKs offered before 4e are passed over (a full handshake), and early data offered is
+       skipped as 4.3.10 says: records that fail to open under the handshake key are dropped,
+       16 KiB of them at most.
+     - **Every group of RFC 9846 and RFC 10024:** x25519, x448, secp256r1/384r1/521r1 (points
+       checked by the curves' own ECDH), ffdhe2048-8192 (the peer's value checked, the secret
+       padded to the prime's length, 7.4.1), and X25519MLKEM768, SecP256r1MLKEM768,
+       SecP384r1MLKEM1024 (the encapsulation key checked, FIPS 203 7.2: illegal_parameter; the
+       shares and secrets in RFC 10024's orders, ML-KEM first in X25519MLKEM768 only).
+       **Every signature scheme** a server key makes: rsa_pss_rsae_sha256/384/512, rsa_pss_
+       pss_* (an RSASSA-PSS key), ecdsa_secp256r1_sha256/secp384r1_sha384/secp521r1_sha512
+       (DER signatures), ed25519, ed448; RFC 9963's legacy PKCS#1 v1.5 points only where it
+       allows them (a client's CertificateVerify, verified, when configured).
+     - **Middlebox compatibility** (Appendix E.4): a client's legacy_session_id echoed, and
+       then one change_cipher_spec record after the server's first handshake message; the
+       peer's 0x01 change_cipher_spec records dropped until its Finished (32 ignored records in
+       a row at most, then unexpected_message); handshake messages may not span a key change
+       (5.1: unexpected_message); records of other types may not interleave a message.
+     Sub-steps, each proven before the next:
+     - 4c1: the configuration, the connection, the records in and out (plaintext and protected,
+       alerts, change_cipher_spec), reassembly, the transcript, the alert discipline;
+     - 4c2: ClientHello to ServerHello and HelloRetryRequest, with every group's key exchange;
+     - 4c3: EncryptedExtensions, Certificate, CertificateVerify for every key type, Finished;
+       the client's Finished verified in constant time; the application, exporter and
+       resumption secrets;
+     - 4c4: client authentication (CertificateRequest; the client's Certificate, empty allowed
+       or certificate_required by mode, and its CertificateVerify against its leaf's key; the
+       chain handed to the caller: validation is M3's);
+     - 4c5: after the handshake: application data both ways, KeyUpdate (an update_requested
+       answered once), post-handshake authentication (only after the client's
+       post_handshake_auth), close_notify, AES-GCM's record limit met by a KeyUpdate first.
+     Proof plan: RFC 8448's server flights of sections 3 (1-RTT), 5 (HelloRetryRequest) and 6
+     (client authentication) reproduced octet for octet from the trace's ClientHellos with the
+     trace's randomness replayed (the server random and ephemeral X25519 key are in the trace;
+     the RSA-PSS salt is recovered by the test from the trace's CertificateVerify with the
+     trace's RSA key: s^e mod n, then the salt is the end of the unmasked DB), then the
+     client's flight and its application data accepted; .NET's SslStream (OpenSSL 3 on Linux)
+     as the client over an in-memory pipe, each suite forced; `openssl s_client` in WSL over a
+     socket for every group and signature scheme it has (and every key type), HelloRetryRequest
+     forced by its group order; a model of the state machine in the tests, every message type
+     sent in every state (unexpected_message), every alert path, flights cut, doubled and
+     reordered; a fuzzer driving a server from hostile ClientHellos and flights (every tier the
+     same transcript, only the allowed answers); the constant-time check over the engine's
+     secret handling.
+   - **4d, the client**: the client's state machine (Appendix A.1) on the same engine, against
+     the 4c server and against OpenSSL, BoringSSL-style servers and .NET; then **4e**, PSK
+     resumption, tickets, ticket requests and 0-RTT with anti-replay.
    - **4f, the extensions** of the other documents (SNI, ALPN, record size limit, delegated
      credentials, ECH with HPKE, the key log), and **4g, certificate compression**.
 5. *HTTPS:*

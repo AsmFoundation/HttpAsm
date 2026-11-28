@@ -149,4 +149,78 @@ internal static partial class Rfc8448
         Finish();
         return steps;
     }
+
+    /// <summary>A number of section 2's key: three spaces, its name, a colon, octets, and more
+    /// octets on lines of six spaces.</summary>
+    /// <returns>The pattern.</returns>
+    [GeneratedRegex(@"^   (modulus \(public\)|public exponent|private exponent|prime1|prime2|exponent1|exponent2|coefficient):\s+(.*)$")]
+    private static partial Regex KeyLine();
+
+    /// <summary>A continuation line of section 2's numbers: six spaces, then octets only.</summary>
+    /// <returns>The pattern.</returns>
+    [GeneratedRegex(@"^      [0-9a-f]{2}( [0-9a-f]{2})*\s*$")]
+    private static partial Regex KeyContinuation();
+
+    /// <summary>
+    /// The server's RSA key of section 2 ("The server in most examples uses an RSA certificate
+    /// with a private key of"), read from the pinned text as an RSAPrivateKey (PKCS#1, RFC 8017
+    /// A.1.2) in DER: version 0, n, e, d, p, q, dp, dq, qinv.
+    /// </summary>
+    public static byte[] ServerRsaKey { get; } = ParseServerKey();
+
+    /// <summary>Reads section 2's numbers and encodes them.</summary>
+    /// <returns>The DER.</returns>
+    /// <exception cref="InvalidDataException">A number is missing (the file is not what the tests expect).</exception>
+    private static byte[] ParseServerKey()
+    {
+        string[] lines = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "specs", "rfc", "rfc8448.txt"));
+        var numbers = new Dictionary<string, byte[]>();
+        for (int i = 0; i < lines.Length && numbers.Count < 8; i++)
+        {
+            Match m = KeyLine().Match(lines[i]);
+            if (!m.Success)
+            {
+                continue;
+            }
+
+            var octets = new List<byte>();
+            string rest = m.Groups[2].Value;
+            int j = i;
+            while (true)
+            {
+                foreach (Match o in HexOctet().Matches(rest))
+                {
+                    octets.Add(Convert.ToByte(o.Value, 16));
+                }
+
+                if (j + 1 >= lines.Length || !KeyContinuation().IsMatch(lines[j + 1]))
+                {
+                    break;
+                }
+
+                rest = lines[++j];
+            }
+
+            numbers[m.Groups[1].Value] = [.. octets];
+            i = j;
+        }
+
+        string[] order = ["modulus (public)", "public exponent", "private exponent", "prime1", "prime2", "exponent1", "exponent2", "coefficient"];
+        if (order.Any(name => !numbers.ContainsKey(name)))
+        {
+            throw new InvalidDataException("RFC 8448: section 2's key is not whole");
+        }
+
+        var w = new System.Formats.Asn1.AsnWriter(System.Formats.Asn1.AsnEncodingRules.DER);
+        using (w.PushSequence())
+        {
+            w.WriteInteger(0);
+            foreach (string name in order)
+            {
+                w.WriteIntegerUnsigned(numbers[name]);
+            }
+        }
+
+        return w.Encode();
+    }
 }

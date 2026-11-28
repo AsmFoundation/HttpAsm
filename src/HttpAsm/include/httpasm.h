@@ -256,7 +256,8 @@ uint32_t httpasm_abi_version(void);
  * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
  * 22 httpasm_hmac_sha512_ctx, 23 httpasm_asn1, 24 httpasm_pem, 25 httpasm_private_key,
  * 26 httpasm_certificate, 27 httpasm_public_key, 28 httpasm_tls13_record_key,
- * 29 httpasm_tls_extensions, 30 httpasm_tls13_hello; 0 for any other value. */
+ * 29 httpasm_tls_extensions, 30 httpasm_tls13_hello, 31 httpasm_tls13_server_config,
+ * 32 httpasm_tls13_event, 33 httpasm_tls13_connection; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -1633,6 +1634,178 @@ int httpasm_tls13_new_session_ticket_read(httpasm_tls_extensions *ext, const uin
 /* A KeyUpdate: its request_update, 0 or 1; or DECODE_ERROR (another length), ILLEGAL_PARAMETER
  * (another value). */
 int httpasm_tls13_key_update_read(const uint8_t *body, size_t length);
+
+/* ------------------------------------------------------------------------------------------
+ * The TLS 1.3 engine (RFC 9846; docs/DESIGN.md M2 4c): a server's handshake and records,
+ * sans-I/O. Bytes in (httpasm_tls13_receive, one record a call, opened in place), bytes out (the
+ * connection's output span, drained by the caller: httpasm_tls13_output and _output_done).
+ * Memory, randomness and time are the caller's: a configuration shared by connections, each
+ * connection's state and spans in memory the caller gives, randomness through a callback.
+ * ------------------------------------------------------------------------------------------ */
+
+#define HTTPASM_TLS_GROUP_SECP256R1          0x0017  /* NamedGroup (RFC 9846 4.3.7) */
+#define HTTPASM_TLS_GROUP_SECP384R1          0x0018
+#define HTTPASM_TLS_GROUP_SECP521R1          0x0019
+#define HTTPASM_TLS_GROUP_X25519             0x001D
+#define HTTPASM_TLS_GROUP_X448               0x001E
+#define HTTPASM_TLS_GROUP_FFDHE2048          0x0100  /* RFC 7919 */
+#define HTTPASM_TLS_GROUP_FFDHE3072          0x0101
+#define HTTPASM_TLS_GROUP_FFDHE4096          0x0102
+#define HTTPASM_TLS_GROUP_FFDHE6144          0x0103
+#define HTTPASM_TLS_GROUP_FFDHE8192          0x0104
+#define HTTPASM_TLS_GROUP_SECP256R1MLKEM768  0x11EB  /* RFC 10024 */
+#define HTTPASM_TLS_GROUP_X25519MLKEM768     0x11EC
+#define HTTPASM_TLS_GROUP_SECP384R1MLKEM1024 0x11ED
+#define HTTPASM_TLS_GROUPS_MAX               16      /* a configuration's list at most */
+
+#define HTTPASM_TLS_SCHEME_ECDSA_SECP256R1_SHA256 0x0403  /* SignatureScheme (RFC 9846 4.3.3) */
+#define HTTPASM_TLS_SCHEME_ECDSA_SECP384R1_SHA384 0x0503
+#define HTTPASM_TLS_SCHEME_ECDSA_SECP521R1_SHA512 0x0603
+#define HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA256    0x0804
+#define HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA384    0x0805
+#define HTTPASM_TLS_SCHEME_RSA_PSS_RSAE_SHA512    0x0806
+#define HTTPASM_TLS_SCHEME_ED25519                0x0807
+#define HTTPASM_TLS_SCHEME_ED448                  0x0808
+#define HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA256     0x0809
+#define HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA384     0x080A
+#define HTTPASM_TLS_SCHEME_RSA_PSS_PSS_SHA512     0x080B
+
+/* The bits of httpasm_tls13_server_config.schemes: the schemes the server's key can make. */
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA256    0
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA384    1
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_RSAE_SHA512    2
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA256     3
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA384     4
+#define HTTPASM_TLS_SCHEME_BIT_RSA_PSS_PSS_SHA512     5
+#define HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP256R1_SHA256 6
+#define HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP384R1_SHA384 7
+#define HTTPASM_TLS_SCHEME_BIT_ECDSA_SECP521R1_SHA512 8
+#define HTTPASM_TLS_SCHEME_BIT_ED25519                9
+#define HTTPASM_TLS_SCHEME_BIT_ED448                  10
+
+#define HTTPASM_TLS_CLIENT_AUTH_REQUEST 1   /* config flags: ask for a client certificate */
+#define HTTPASM_TLS_CLIENT_AUTH_REQUIRE 2   /* and end the handshake without one */
+#define HTTPASM_TLS_SERVER_GROUP_ORDER  4   /* the server's first group the client supports, even
+                                             * at the cost of a HelloRetryRequest (default: its
+                                             * first group the client sent a share for) */
+
+#define HTTPASM_TLS_EVENT_NONE      0   /* the record was taken; nothing to report (output may wait) */
+#define HTTPASM_TLS_EVENT_CONNECTED 1   /* the handshake completed */
+#define HTTPASM_TLS_EVENT_DATA      2   /* application data: event->data, ->length, in the input */
+#define HTTPASM_TLS_EVENT_CLOSED    3   /* the peer's close_notify: it sends nothing more */
+#define HTTPASM_TLS_EVENT_FAILED    4   /* the connection failed: event->alert */
+#define HTTPASM_TLS_EVENT_PEER      1   /* event->flags: the alert was the peer's */
+
+#define HTTPASM_TLS_MESSAGE_DEFAULT 16384   /* the largest handshake message gathered by default */
+
+/* The random source the engine draws from: fills out[0..length) and returns 0, or nonzero when
+ * it cannot (the handshake then ends with internal_error). httpasm_tls_random is getrandom's. */
+typedef int (*httpasm_tls_random_fn)(void *context, uint8_t *out, size_t length);
+
+/* getrandom through httpasm_random, as an httpasm_tls_random_fn (context unused). */
+int httpasm_tls_random(void *context, uint8_t *out, size_t length);
+
+/* A server's settings (152 octets), shared by its connections and read-only while they run. The
+ * caller sets the "in" fields, then httpasm_tls13_server_config_init sets the rest. */
+typedef struct httpasm_tls13_server_config {
+    const httpasm_private_key *key;     /* in: the server's key; must outlive the configuration */
+    httpasm_tls_random_fn random;       /* in: the random source */
+    void *random_context;               /* in: its first argument */
+    uint16_t groups[HTTPASM_TLS_GROUPS_MAX];    /* in: NamedGroups in the server's order */
+    uint32_t group_count;               /* in: 0 = the library's order */
+    uint16_t suites[4];                 /* in: cipher suites in the server's order */
+    uint32_t suite_count;               /* in: 0 = the library's order */
+    uint32_t flags;                     /* in: HTTPASM_TLS_CLIENT_AUTH_* */
+    uint32_t max_message;               /* in: the largest handshake message gathered; 0 = the default */
+    const uint8_t *certificate;         /* out: the Certificate message, in the caller's buffer */
+    size_t certificate_length;          /* out */
+    uint64_t schemes;                   /* out: HTTPASM_TLS_SCHEME_BIT_* the key makes */
+    size_t output_min;                  /* out: the output span a connection needs at least */
+    size_t memory;                      /* out: a connection's memory (max_message + output_min) */
+    uint64_t reserved[4];
+} httpasm_tls13_server_config;
+
+/* What httpasm_tls13_receive reports (32 octets). */
+typedef struct httpasm_tls13_event {
+    uint32_t kind;                      /* HTTPASM_TLS_EVENT_* */
+    uint32_t alert;                     /* FAILED: the alert's description */
+    const uint8_t *data;                /* DATA: the plaintext, inside the input (valid while it is) */
+    size_t length;
+    uint32_t flags;                     /* FAILED: HTTPASM_TLS_EVENT_PEER when the peer sent the alert */
+    uint32_t reserved;
+} httpasm_tls13_event;
+
+/* One connection's state (2752 octets), opaque; its secrets are secret: httpasm_tls13_wipe it.
+ * Best 16-aligned (its record keys are then 16-aligned inside it). */
+typedef struct httpasm_tls13_connection {
+    uint64_t opaque[344];
+} httpasm_tls13_connection;
+
+/* Checks a server's configuration and fills its "out" fields: the Certificate message built from
+ * chain[0..count) (DER certificates, the leaf first; lengths[i] each) into buffer[0..capacity);
+ * the leaf's public key matched to config->key; the schemes the key makes; the library's groups
+ * (X25519MLKEM768, x25519, secp256r1, x448, secp384r1, secp521r1, SecP256r1MLKEM768,
+ * SecP384r1MLKEM1024, ffdhe2048-8192) and suites (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305)
+ * where none are given; the sizes a connection needs. Returns 0; -1 for no key or no random
+ * source, a list over its bound or naming a group or suite the engine lacks, or no chain; -2
+ * for a certificate that does not parse or a leaf whose key is not config->key's; -3 when
+ * buffer is too small (config->certificate_length then holds the octets needed). */
+int httpasm_tls13_server_config_init(httpasm_tls13_server_config *config,
+                                     const uint8_t *const *chain, const size_t *lengths,
+                                     size_t count, uint8_t *buffer, size_t capacity);
+
+/* Starts a server connection in memory[0..length), at least config->memory octets (the
+ * reassembly span, then the output span), which the connection uses until it is wiped. The
+ * configuration must outlive the connection. Returns 0, or -1 when length is too small. */
+int httpasm_tls13_server_init(httpasm_tls13_connection *c, const httpasm_tls13_server_config *config,
+                              uint8_t *memory, size_t length);
+
+/* Takes the record at the start of in[0..length), opened in place (in is the caller's and is
+ * written: decrypted records become their plaintext). Returns the record's octets, consumed,
+ * with *event saying what it brought; 0 when no whole record is there yet (nothing consumed);
+ * or -1 when the connection failed (event->kind FAILED, event->alert the alert, event->flags
+ * HTTPASM_TLS_EVENT_PEER when the peer sent it; ours is queued in the output). After a failure
+ * every call answers the same. Whatever the call answers, output may wait: check
+ * httpasm_tls13_output. The engine's randomness is drawn in a fixed order (for replaying a
+ * trace): the server random (32 octets); then the key share's private parts in the order its
+ * share carries them (X25519MLKEM768: ML-KEM's m, then X25519's scalar; an ECDH scalar drawn
+ * again while out of range; P-521's 66 octets with the first masked to its one bit); then the
+ * CertificateVerify's (an RSA-PSS salt of the hash's length, or ECDSA hedging of the curve's
+ * scalar size; none for EdDSA). The stack it needs: about 64 KiB (RSA's signing and FFDHE's
+ * frames), touched a page at a time. */
+int64_t httpasm_tls13_receive(httpasm_tls13_connection *c, uint8_t *in, size_t length,
+                              httpasm_tls13_event *event);
+
+/* The octets queued to send: *out and the count (0: none). They stay until _output_done. */
+size_t httpasm_tls13_output(const httpasm_tls13_connection *c, const uint8_t **out);
+
+/* Takes n octets (at most what httpasm_tls13_output gave) off the front of the output. */
+void httpasm_tls13_output_done(httpasm_tls13_connection *c, size_t n);
+
+/* Seals application data into the output, records of up to 2^14 octets each (fewer under the
+ * peer's record_size_limit): returns how many octets of data it took (as many as fit: fewer,
+ * even 0, when the output is full: drain it and call again); or -1 before our Finished is out,
+ * after our close_notify, or after a failure. A KeyUpdate the peer asked for goes first, and
+ * under AES-GCM one of ours goes before the key's 2^24.5 records run out (RFC 9846 5.5). */
+int64_t httpasm_tls13_send(httpasm_tls13_connection *c, const uint8_t *data, size_t length);
+
+/* Queues close_notify: nothing more will be sent (the peer may go on sending). Returns 0, or -1
+ * when the connection cannot (failed, already closed, or the output is full). */
+int httpasm_tls13_close(httpasm_tls13_connection *c);
+
+/* Queues a KeyUpdate (request: 1 asks the peer to update its keys too) and moves to the next
+ * write key (RFC 9846 4.7.3). Returns 0, or -1 before the handshake completed, after a failure
+ * or close_notify, or when the output is full. */
+int httpasm_tls13_key_update(httpasm_tls13_connection *c, int request);
+
+/* What the handshake chose: the suite, the group and the signature scheme (0 for those not
+ * chosen yet). Returns the connection's state's progress: 0 before a ServerHello, 1 while the
+ * handshake goes on, 2 once connected, -1 after a failure. */
+int httpasm_tls13_negotiated(const httpasm_tls13_connection *c, uint32_t *suite, uint32_t *group,
+                             uint32_t *scheme);
+
+/* Zeroes the connection (its secrets and keys) and its spans' octets. */
+void httpasm_tls13_wipe(httpasm_tls13_connection *c);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)

@@ -183,6 +183,17 @@ extern httpasm_tls13_certificate_entry ; int64_t (list, list_length, offset, **c
 extern httpasm_tls13_certificate_verify_read ; int (body, length, uint32_t *scheme, **signature, *signature_length): 0, -alert
 extern httpasm_tls13_new_session_ticket_read ; int (ext, body, length, uint64_t *lifetime_age_add, **nonce, **ticket): 0, -alert
 extern httpasm_tls13_key_update_read ; int (body, length): 0, 1, -alert
+extern httpasm_tls_random            ; int (context, out, length): getrandom as the engine's random source
+extern httpasm_tls13_server_config_init ; int (config, chain, lengths, count, buffer, capacity): 0, -1, -2, -3
+extern httpasm_tls13_server_init     ; int (connection, config, memory, length): 0, -1
+extern httpasm_tls13_receive         ; int64_t (connection, in, length, event): consumed, 0 (more), -1 (failed)
+extern httpasm_tls13_output          ; size_t (connection, const uint8_t **out): octets queued
+extern httpasm_tls13_output_done     ; void (connection, n)
+extern httpasm_tls13_send            ; int64_t (connection, data, length): octets taken, -1
+extern httpasm_tls13_close           ; int (connection): 0, -1
+extern httpasm_tls13_key_update      ; int (connection, request): 0, -1
+extern httpasm_tls13_negotiated      ; int (connection, *suite, *group, *scheme): 0, 1, 2, -1
+extern httpasm_tls13_wipe            ; void (connection)
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)

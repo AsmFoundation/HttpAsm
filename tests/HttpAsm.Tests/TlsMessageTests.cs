@@ -141,7 +141,7 @@ public sealed unsafe class TlsMessageTests
 
     /// <summary>
     /// The .NET copies of httpasm_tls_extensions and httpasm_tls13_hello have the library's sizes,
-    /// 400 and 464 octets, under struct ids 29 and 30, the registry's last: id 31 answers 0.
+    /// 400 and 464 octets, under struct ids 29 and 30 (the registry's end: TlsServerTests).
     /// </summary>
     [Fact]
     public void StructuresMatchTheLibrary()
@@ -151,7 +151,6 @@ public sealed unsafe class TlsMessageTests
         Assert.Equal(464, sizeof(TlsHello));
         Assert.Equal((uint)sizeof(TlsExtensions), Native.StructSize(29));
         Assert.Equal((uint)sizeof(TlsHello), Native.StructSize(30));
-        Assert.Equal(0u, Native.StructSize(31));
     }
 
     /// <summary>

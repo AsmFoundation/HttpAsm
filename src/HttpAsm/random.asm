@@ -56,3 +56,17 @@ httpasm_random:
     xor     eax, eax
     ret
 .end:
+
+; -----------------------------------------------------------------------------
+; int httpasm_tls_random(void *context, uint8_t *out, size_t length)
+;   httpasm_random as the TLS engine's random source (httpasm_tls_random_fn: the core makes no
+;   system call, so a configuration carries its source; this is the library's). context is not
+;   used. Returns 0, or httpasm_random's -errno (the handshake then ends with internal_error).
+; -----------------------------------------------------------------------------
+global httpasm_tls_random:function (httpasm_tls_random.end - httpasm_tls_random)
+align 16
+httpasm_tls_random:
+    mov     rdi, rsi
+    mov     rsi, rdx
+    jmp     httpasm_random
+.end:

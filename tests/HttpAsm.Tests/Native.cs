@@ -1078,6 +1078,83 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_tls13_key_update_read")]
     internal static partial int Tls13KeyUpdateRead(byte* body, nuint length);
 
+    /// <summary>int httpasm_tls13_server_config_init(config, chain, lengths, count, buffer, capacity).</summary>
+    /// <param name="config">The configuration, its "in" fields set.</param>
+    /// <param name="chain">The DER certificates, the leaf first.</param>
+    /// <param name="lengths">Their octets.</param>
+    /// <param name="count">How many.</param>
+    /// <param name="buffer">Where the Certificate message is built (it must outlive the configuration).</param>
+    /// <param name="capacity">Its octets.</param>
+    /// <returns>0; -1 (a setting refused), -2 (the chain or the key's match), -3 (buffer too small).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_server_config_init")]
+    internal static partial int Tls13ServerConfigInit(TlsServerConfig* config, byte** chain, nuint* lengths, nuint count, byte* buffer, nuint capacity);
+
+    /// <summary>int httpasm_tls13_server_init(connection, config, memory, length).</summary>
+    /// <param name="connection">The connection to start.</param>
+    /// <param name="config">An initialized configuration (kept by pointer).</param>
+    /// <param name="memory">The connection's spans (kept until it is wiped).</param>
+    /// <param name="length">Their octets: config->memory at least.</param>
+    /// <returns>0, or -1 when length is too small.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_server_init")]
+    internal static partial int Tls13ServerInit(TlsConnection* connection, TlsServerConfig* config, byte* memory, nuint length);
+
+    /// <summary>int64_t httpasm_tls13_receive(connection, in, length, event).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="input">What arrived (a protected record is opened in place).</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="tlsEvent">Receives what the record brought.</param>
+    /// <returns>The record's octets, 0 (more needed), or -1 (failed: see the event).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_receive")]
+    internal static partial long Tls13Receive(TlsConnection* connection, byte* input, nuint length, TlsEvent* tlsEvent);
+
+    /// <summary>size_t httpasm_tls13_output(connection, out).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="output">Receives the first queued octet's address.</param>
+    /// <returns>The octets queued.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_output")]
+    internal static partial nuint Tls13Output(TlsConnection* connection, byte** output);
+
+    /// <summary>void httpasm_tls13_output_done(connection, n).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="n">The octets taken.</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_output_done")]
+    internal static partial void Tls13OutputDone(TlsConnection* connection, nuint n);
+
+    /// <summary>int64_t httpasm_tls13_send(connection, data, length).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="data">Application data.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>The octets taken, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_send")]
+    internal static partial long Tls13Send(TlsConnection* connection, byte* data, nuint length);
+
+    /// <summary>int httpasm_tls13_close(connection).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <returns>0, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_close")]
+    internal static partial int Tls13Close(TlsConnection* connection);
+
+    /// <summary>int httpasm_tls13_key_update(connection, request).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="request">Nonzero: update_requested.</param>
+    /// <returns>0, or -1.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_key_update")]
+    internal static partial int Tls13KeyUpdate(TlsConnection* connection, int request);
+
+    /// <summary>int httpasm_tls13_negotiated(connection, suite, group, scheme).</summary>
+    /// <param name="connection">The connection.</param>
+    /// <param name="suite">Receives the suite (or null).</param>
+    /// <param name="group">Receives the group (or null).</param>
+    /// <param name="scheme">Receives the signature scheme (or null).</param>
+    /// <returns>0 (no answer yet), 1 (handshaking), 2 (connected), -1 (failed).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_negotiated")]
+    internal static partial int Tls13Negotiated(TlsConnection* connection, uint* suite, uint* group, uint* scheme);
+
+    /// <summary>void httpasm_tls13_wipe(connection).</summary>
+    /// <param name="connection">The connection (its spans zeroed too).</param>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_wipe")]
+    internal static partial void Tls13Wipe(TlsConnection* connection);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>
