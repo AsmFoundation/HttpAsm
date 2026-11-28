@@ -173,6 +173,16 @@ extern httpasm_tls_record_length    ; int64_t (in, length): the record's length,
 extern httpasm_tls13_record_key_init ; int (httpasm_tls13_record_key *key, suite, traffic_secret): 0, -1
 extern httpasm_tls13_seal           ; int64_t (key, content_type, content, length, padding, out, capacity): the record's length, -1, -2
 extern httpasm_tls13_open           ; int64_t (key, record, length, uint8_t *content_type): the content's length, or -alert
+extern httpasm_tls_message          ; int64_t (in, length, uint32_t *type, size_t *body_length): the message's length, 0 for more
+extern httpasm_tls_extensions_read  ; int (httpasm_tls_extensions *ext, message bit, block, length): 0, -alert
+extern httpasm_tls13_hello_read     ; int (httpasm_tls13_hello *hello, type 1 or 2, body, length): 0, -alert, -1
+extern httpasm_tls13_extensions_message_read ; int (ext, message bit, body, length): 0, -alert
+extern httpasm_tls13_certificate_request_read ; int (ext, const uint8_t **context, size_t *context_length, body, length): 0, -alert
+extern httpasm_tls13_certificate_read ; int64_t (body, length, **context, *context_length, **list, *list_length): entries, -alert
+extern httpasm_tls13_certificate_entry ; int64_t (list, list_length, offset, **cert, *cert_length, ext): the next offset, -alert
+extern httpasm_tls13_certificate_verify_read ; int (body, length, uint32_t *scheme, **signature, *signature_length): 0, -alert
+extern httpasm_tls13_new_session_ticket_read ; int (ext, body, length, uint64_t *lifetime_age_add, **nonce, **ticket): 0, -alert
+extern httpasm_tls13_key_update_read ; int (body, length): 0, 1, -alert
 extern httpasm_token_length         ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_value_scan     ; size_t (const uint8_t *p, size_t n)
 extern httpasm_field_id             ; uint32_t (const uint8_t *name, size_t n)

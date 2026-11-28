@@ -1303,6 +1303,131 @@ internal unsafe struct Tls13RecordKey
     public AesGcmKey Aead;
 }
 
+/// <summary>
+/// httpasm_tls_extensions (httpasm.h): an extension block as httpasm_tls_extensions_read found
+/// it, 400 octets: each known extension's data and length by index (<see cref="TlsExtension"/>).
+/// The data pointers point into the block given, valid while it is.
+/// </summary>
+internal unsafe struct TlsExtensions
+{
+    /// <summary>Bit i: the extension of index i was in the block.</summary>
+    public ulong Present;
+
+    /// <summary>The block's extensions, known or not.</summary>
+    public uint Count;
+
+    /// <summary>The type of its last one.</summary>
+    public uint Last;
+
+    /// <summary>Each present extension's data (a pointer, by index).</summary>
+    public fixed ulong Data[38];
+
+    /// <summary>And its octets.</summary>
+    public fixed ushort Length[38];
+
+    /// <summary>Unused.</summary>
+    public fixed ushort Reserved[2];
+}
+
+/// <summary>
+/// httpasm_tls13_hello (httpasm.h): a ClientHello or a ServerHello as httpasm_tls13_hello_read
+/// found it, 464 octets; the pointers point into the body read.
+/// </summary>
+internal unsafe struct TlsHello
+{
+    /// <summary>The 32-octet random.</summary>
+    public byte* Random;
+
+    /// <summary>legacy_session_id, or a ServerHello's echo of it.</summary>
+    public byte* SessionId;
+
+    /// <summary>A ClientHello's cipher suites (pairs of octets).</summary>
+    public byte* CipherSuites;
+
+    /// <summary>A ClientHello's legacy_compression_methods.</summary>
+    public byte* Compression;
+
+    /// <summary>The extension block's first octet after its length, or null.</summary>
+    public byte* ExtensionsBlock;
+
+    /// <summary>The block's octets.</summary>
+    public nuint ExtensionsLength;
+
+    /// <summary>Octets of the cipher suites' list.</summary>
+    public uint CipherSuitesLength;
+
+    /// <summary>legacy_version, as read.</summary>
+    public ushort LegacyVersion;
+
+    /// <summary>A ServerHello's cipher suite.</summary>
+    public ushort CipherSuite;
+
+    /// <summary>legacy_session_id's length.</summary>
+    public byte SessionIdLength;
+
+    /// <summary>legacy_compression_methods' length.</summary>
+    public byte CompressionLength;
+
+    /// <summary>A ServerHello's legacy_compression_method.</summary>
+    public byte CompressionMethod;
+
+    /// <summary>1 for a HelloRetryRequest.</summary>
+    public byte Retry;
+
+    /// <summary>Unused.</summary>
+    public fixed byte Reserved[4];
+
+    /// <summary>Its extensions.</summary>
+    public TlsExtensions Extensions;
+}
+
+/// <summary>The indexes of httpasm_tls_extensions (HTTPASM_TLS_EXT_*) and the types they stand
+/// for, in index order: the tests' copy of the library's table.</summary>
+internal static class TlsExtension
+{
+    /// <summary>Each index's extension type.</summary>
+    public static readonly int[] Types =
+        [0, 1, 5, 10, 11, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 27, 28, 34, 35, 39, 41, 42, 43, 44, 45, 47, 48, 49, 50, 51, 52, 55, 56, 57, 58, 0xFD00, 0xFE0D, 0xFF01];
+
+    /// <summary>HTTPASM_TLS_EXT_SERVER_NAME.</summary>
+    public const int ServerName = 0;
+
+    /// <summary>HTTPASM_TLS_EXT_SUPPORTED_GROUPS.</summary>
+    public const int SupportedGroups = 3;
+
+    /// <summary>HTTPASM_TLS_EXT_SIGNATURE_ALGORITHMS.</summary>
+    public const int SignatureAlgorithms = 5;
+
+    /// <summary>HTTPASM_TLS_EXT_ALPN.</summary>
+    public const int Alpn = 8;
+
+    /// <summary>HTTPASM_TLS_EXT_PRE_SHARED_KEY.</summary>
+    public const int PreSharedKey = 20;
+
+    /// <summary>HTTPASM_TLS_EXT_EARLY_DATA.</summary>
+    public const int EarlyData = 21;
+
+    /// <summary>HTTPASM_TLS_EXT_SUPPORTED_VERSIONS.</summary>
+    public const int SupportedVersions = 22;
+
+    /// <summary>HTTPASM_TLS_EXT_KEY_SHARE.</summary>
+    public const int KeyShare = 29;
+
+    /// <summary>The messages each index may appear in (HTTPASM_TLS_IN_* bits): RFC 9846 4.3's
+    /// table and the IANA registry's TLS 1.3 column, TLS 1.2's extensions in a ClientHello only.</summary>
+    public static readonly int[] Allowed =
+    [
+        1 | 4 | 16, 1 | 4, 1 | 16 | 8, 1 | 4, 1, 1 | 16, 1 | 4, 1 | 4, 1 | 4, 1 | 16 | 8, 1 | 4, 1 | 4, 1, 1, 1, 1 | 16, 1 | 4,
+        1 | 16 | 8, 1, 1 | 4, 1 | 2, 1 | 4 | 32, 1 | 2 | 64, 1 | 64, 1, 1 | 16, 16, 1, 1 | 16, 1 | 2 | 64, 1 | 16 | 8, 1 | 4,
+        1 | 4, 1 | 4, 1 | 4, 1, 1 | 64 | 4, 1,
+    ];
+
+    /// <summary>The index of a type, or -1 for one the library does not know.</summary>
+    /// <param name="type">The extension type.</param>
+    /// <returns>Its index.</returns>
+    public static int IndexOf(int type) => Array.IndexOf(Types, type);
+}
+
 /// <summary>httpasm.h's ASN.1 constants: the rules, the tag's bits, the universal types the reader checks.</summary>
 internal static class Asn1
 {

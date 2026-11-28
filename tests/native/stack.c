@@ -1,14 +1,16 @@
 /*
  * stack.c - proves that HttpAsm's functions whose frames pass a page touch their stack at most
  * 4032 octets apart on the way down (crypto/mlkem.asm's MK_ENTER, httpasm_core.inc's
- * HA_STACK_DOWN in crypto/p384.asm, crypto/p521.asm, crypto/rsa.asm and asn1/keys.asm), so that a thread whose stack is nearly
+ * HA_STACK_DOWN in crypto/p384.asm, crypto/p521.asm, crypto/rsa.asm, asn1/keys.asm and
+ * tls/extensions.asm), so that a thread whose stack is nearly
  * spent faults on its guard page instead of the frame stepping over the guard into whatever is
  * mapped below it (a stack clash: the class of CVE-2017-1000364). Every function with a frame
  * near or above a page - ML-KEM's (up to about 27 KiB at v3), RSA's (signing: about 45 KiB, and
  * its verification), FFDHE's (signing's frame, at ffdhe2048 and ffdhe8192), P-521's, P-384's and P-256's,
- * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it), Ed448's and the
- * key loader's (33 KiB, an RSA key's preparation under it: from DER and from PEM) - at
- * v1 and at the best tier:
+ * Ed25519's, X25519's, X448's (its ladder's frame, then its inverse's below it), Ed448's, the
+ * key loader's (33 KiB, an RSA key's preparation under it: from DER and from PEM) and TLS 1.3's
+ * handshake readers' (the extension walk's and key_share's 8 KiB bitmaps, a Certificate's entry
+ * frame above the walk's) - at v1 and at the best tier:
  *   - its depth is measured: run on a painted 128 KiB stack, the lowest octet it changed;
  *   - it runs again, in a forked child, on stacks too small for that depth (from 64 octets short
  *     down to 1 KiB, every 1000 octets: the guard page sits at every kind of place in the frame),
@@ -284,6 +286,101 @@ static void run_ffdhe2048_shared(void) { result = httpasm_ffdhe_shared(HTTPASM_F
 static void run_ffdhe8192_public_key(void) { result = httpasm_ffdhe_public_key(HTTPASM_FFDHE8192, out, ff_x, sizeof ff_x); out_n = 1024; }
 static void run_ffdhe8192_shared(void) { result = httpasm_ffdhe_shared(HTTPASM_FFDHE8192, out, ff_x, sizeof ff_x, ff_peer8192); out_n = 1024; }
 
+/* TLS 1.3's handshake readers (tls/extensions.asm: the walk's 8 KiB bitmap of the types seen, and
+ * key_share's of the groups seen, each taken a page at a time): a ClientHello offering TLS 1.3
+ * with three key shares, read whole (the walk, then the key_share check's bitmap) and its block
+ * walked alone; and a Certificate of one entry with an extension (the reader's own frame of an
+ * httpasm_tls_extensions above the walk's). Built in prepare_tls; every pointer the readers keep
+ * points into these static inputs, so the outputs compare equal across stacks. */
+static uint8_t tls_hello[128], tls_cert[32];
+static size_t tls_hello_n, tls_block_at, tls_block_n, tls_cert_n;
+static httpasm_tls_extensions tls_ext;
+static httpasm_tls13_hello tls_h;
+static void run_tls_extensions_read(void)
+{
+    result = httpasm_tls_extensions_read(&tls_ext, HTTPASM_TLS_IN_CH, tls_hello + tls_block_at, tls_block_n);
+    memcpy(out, &tls_ext, sizeof tls_ext);
+    out_n = sizeof tls_ext;
+}
+static void run_tls13_hello_read(void)
+{
+    result = httpasm_tls13_hello_read(&tls_h, HTTPASM_TLS_CLIENT_HELLO, tls_hello, tls_hello_n);
+    memcpy(out, &tls_h, sizeof tls_h);
+    out_n = sizeof tls_h;
+}
+static void run_tls13_certificate_read(void)
+{
+    const uint8_t *context, *list;
+    size_t context_n, list_n;
+    result = httpasm_tls13_certificate_read(tls_cert, tls_cert_n, &context, &context_n, &list, &list_n);
+    memcpy(out, &list, sizeof list);
+    memcpy(out + sizeof list, &list_n, sizeof list_n);
+    out_n = sizeof list + sizeof list_n;
+}
+
+/* put_u16: a big-endian uint16 at o. */
+static void put_u16(uint8_t *o, size_t v)
+{
+    o[0] = (uint8_t)(v >> 8);
+    o[1] = (uint8_t)v;
+}
+
+/* prepare_tls: builds the ClientHello and the Certificate above and checks that the readers accept
+ * them (a refusal would leave the bitmaps' frames untaken: nothing proven). Returns 0, or 1 with
+ * the reason printed. */
+static int prepare_tls(void)
+{
+    uint8_t *p = tls_hello;
+    *p++ = 3, *p++ = 3;                         /* legacy_version */
+    memset(p, 0x42, 32), p += 32;               /* random */
+    *p++ = 0;                                   /* legacy_session_id */
+    put_u16(p, 2), p[2] = 0x13, p[3] = 0x01, p += 4;    /* cipher_suites: TLS_AES_128_GCM_SHA256 */
+    *p++ = 1, *p++ = 0;                         /* legacy_compression_methods: null */
+    uint8_t *block_length = p;
+    p += 2;
+    uint8_t *block = p;
+    static const uint8_t versions[] = { 0, 43, 0, 3, 2, 3, 4 };    /* supported_versions: 0x0304 */
+    memcpy(p, versions, sizeof versions), p += sizeof versions;
+    put_u16(p, 51), p += 2;                     /* key_share */
+    uint8_t *data_length = p;
+    p += 2;
+    uint8_t *shares_length = p;
+    p += 2;
+    uint8_t *shares = p;
+    for (int g = 0; g < 3; g++) {               /* x25519, x448 and secp256r1's codes, 4 octets each */
+        static const uint16_t groups[3] = { 29, 30, 23 };
+        put_u16(p, groups[g]), put_u16(p + 2, 4), memset(p + 4, 0x30 + g, 4), p += 8;
+    }
+    put_u16(shares_length, (size_t)(p - shares));
+    put_u16(data_length, (size_t)(p - shares) + 2);
+    tls_block_at = (size_t)(block - tls_hello);
+    tls_block_n = (size_t)(p - block);
+    put_u16(block_length, tls_block_n);
+    tls_hello_n = (size_t)(p - tls_hello);
+
+    uint8_t *c = tls_cert;
+    *c++ = 0;                                   /* certificate_request_context */
+    uint8_t *list_length = c;
+    c += 3;
+    uint8_t *list = c;
+    static const uint8_t entry[] = { 0, 0, 3, 0x30, 0x01, 0x00,   /* cert_data, 3 octets */
+                                     0, 4, 0, 18, 0, 0 };        /* signed_certificate_timestamp */
+    memcpy(c, entry, sizeof entry), c += sizeof entry;
+    list_length[0] = 0, put_u16(list_length + 1, (size_t)(c - list));
+    tls_cert_n = (size_t)(c - tls_cert);
+
+    const uint8_t *context, *at;
+    size_t context_n, list_n;
+    if (httpasm_tls_extensions_read(&tls_ext, HTTPASM_TLS_IN_CH, tls_hello + tls_block_at, tls_block_n) != 0
+        || httpasm_tls13_hello_read(&tls_h, HTTPASM_TLS_CLIENT_HELLO, tls_hello, tls_hello_n) != 0
+        || !(tls_h.extensions.present >> HTTPASM_TLS_EXT_KEY_SHARE & 1)
+        || httpasm_tls13_certificate_read(tls_cert, tls_cert_n, &context, &context_n, &at, &list_n) != 1) {
+        fprintf(stderr, "stack: the TLS readers refused their inputs\n");
+        return 1;
+    }
+    return 0;
+}
+
 static const stack_call calls[] = {
     { "mlkem512 keypair", run_mk512_keypair }, { "mlkem512 encaps", run_mk512_encaps },
     { "mlkem512 decaps", run_mk512_decaps }, { "mlkem768 keypair", run_mk768_keypair },
@@ -309,6 +406,8 @@ static const stack_call calls[] = {
     { "ffdhe8192 public_key", run_ffdhe8192_public_key }, { "ffdhe8192 shared", run_ffdhe8192_shared },
     { "private_key_load rsa (DER)", run_key_load_rsa_der }, { "private_key_load rsa (PEM)", run_key_load_rsa_pem },
     { "private_key_load p256", run_key_load_p256 },
+    { "tls_extensions_read", run_tls_extensions_read }, { "tls13_hello_read (key_share)", run_tls13_hello_read },
+    { "tls13_certificate_read", run_tls13_certificate_read },
 };
 
 /* ---- running a call on a stack of our own ---- */
@@ -706,7 +805,7 @@ static int prepare(void)
         fprintf(stderr, "stack: FFDHE refused its own exponent\n");
         return 1;
     }
-    return 0;
+    return prepare_tls();
 }
 
 int main(void)

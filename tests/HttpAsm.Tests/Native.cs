@@ -982,6 +982,102 @@ internal static unsafe partial class Native
     [LibraryImport(Library, EntryPoint = "httpasm_tls13_open")]
     internal static partial long Tls13Open(Tls13RecordKey* key, byte* record, nuint length, byte* contentType);
 
+    /// <summary>int64_t httpasm_tls_message(in, length, type, body_length).</summary>
+    /// <param name="input">Handshake octets.</param>
+    /// <param name="length">Their count.</param>
+    /// <param name="type">Receives the first message's type.</param>
+    /// <param name="bodyLength">Receives its body's length.</param>
+    /// <returns>The message's whole length, or 0 for more octets.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls_message")]
+    internal static partial long TlsMessage(byte* input, nuint length, uint* type, nuint* bodyLength);
+
+    /// <summary>int httpasm_tls_extensions_read(ext, message, block, length).</summary>
+    /// <param name="extensions">Receives the block's extensions.</param>
+    /// <param name="message">The message's HTTPASM_TLS_IN_* bit.</param>
+    /// <param name="block">The block's octets after its length.</param>
+    /// <param name="length">Their count.</param>
+    /// <returns>0, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls_extensions_read")]
+    internal static partial int TlsExtensionsRead(TlsExtensions* extensions, int message, byte* block, nuint length);
+
+    /// <summary>int httpasm_tls13_hello_read(hello, type, body, length).</summary>
+    /// <param name="hello">Receives the message's fields.</param>
+    /// <param name="type">1 (ClientHello) or 2 (ServerHello).</param>
+    /// <param name="body">The body after the handshake header.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>0, minus an alert, or -1 for another type.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_hello_read")]
+    internal static partial int Tls13HelloRead(TlsHello* hello, int type, byte* body, nuint length);
+
+    /// <summary>int httpasm_tls13_extensions_message_read(ext, message, body, length).</summary>
+    /// <param name="extensions">Receives the block's extensions.</param>
+    /// <param name="message">The message's HTTPASM_TLS_IN_* bit.</param>
+    /// <param name="body">The block with its uint16 length.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>0, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_extensions_message_read")]
+    internal static partial int Tls13ExtensionsMessageRead(TlsExtensions* extensions, int message, byte* body, nuint length);
+
+    /// <summary>int httpasm_tls13_certificate_request_read(ext, context, context_length, body, length).</summary>
+    /// <param name="extensions">Receives the request's extensions.</param>
+    /// <param name="context">Receives the context's address.</param>
+    /// <param name="contextLength">Receives its length.</param>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>0, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_certificate_request_read")]
+    internal static partial int Tls13CertificateRequestRead(TlsExtensions* extensions, byte** context, nuint* contextLength, byte* body, nuint length);
+
+    /// <summary>int64_t httpasm_tls13_certificate_read(body, length, context, context_length, list, list_length).</summary>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="context">Receives the context's address.</param>
+    /// <param name="contextLength">Receives its length.</param>
+    /// <param name="list">Receives the certificate list's address.</param>
+    /// <param name="listLength">Receives its length.</param>
+    /// <returns>The entries' count, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_certificate_read")]
+    internal static partial long Tls13CertificateRead(byte* body, nuint length, byte** context, nuint* contextLength, byte** list, nuint* listLength);
+
+    /// <summary>int64_t httpasm_tls13_certificate_entry(list, list_length, offset, cert, cert_length, ext).</summary>
+    /// <param name="list">A certificate list, one httpasm_tls13_certificate_read accepted (any other is judged entry by entry, not trusted).</param>
+    /// <param name="listLength">Its length.</param>
+    /// <param name="offset">The entry's offset.</param>
+    /// <param name="cert">Receives the cert_data's address.</param>
+    /// <param name="certLength">Receives its length.</param>
+    /// <param name="extensions">Receives the entry's extensions.</param>
+    /// <returns>The next entry's offset, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_certificate_entry")]
+    internal static partial long Tls13CertificateEntry(byte* list, nuint listLength, nuint offset, byte** cert, nuint* certLength, TlsExtensions* extensions);
+
+    /// <summary>int httpasm_tls13_certificate_verify_read(body, length, scheme, signature, signature_length).</summary>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="scheme">Receives the SignatureScheme.</param>
+    /// <param name="signature">Receives the signature's address.</param>
+    /// <param name="signatureLength">Receives its length.</param>
+    /// <returns>0, or -50 (decode_error).</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_certificate_verify_read")]
+    internal static partial int Tls13CertificateVerifyRead(byte* body, nuint length, uint* scheme, byte** signature, nuint* signatureLength);
+
+    /// <summary>int httpasm_tls13_new_session_ticket_read(ext, body, length, lifetime_age_add, nonce, ticket).</summary>
+    /// <param name="extensions">Receives the ticket's extensions.</param>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its octets.</param>
+    /// <param name="lifetimeAgeAdd">Receives the lifetime (low half) and the age_add (high).</param>
+    /// <param name="nonce">Receives the nonce's length octet's address.</param>
+    /// <param name="ticket">Receives the ticket's uint16 length's address.</param>
+    /// <returns>0, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_new_session_ticket_read")]
+    internal static partial int Tls13NewSessionTicketRead(TlsExtensions* extensions, byte* body, nuint length, ulong* lifetimeAgeAdd, byte** nonce, byte** ticket);
+
+    /// <summary>int httpasm_tls13_key_update_read(body, length).</summary>
+    /// <param name="body">The body.</param>
+    /// <param name="length">Its octets.</param>
+    /// <returns>0 or 1, or minus an alert.</returns>
+    [LibraryImport(Library, EntryPoint = "httpasm_tls13_key_update_read")]
+    internal static partial int Tls13KeyUpdateRead(byte* body, nuint length);
+
     /// <summary>size_t httpasm_token_length(const uint8_t *p, size_t n).</summary>
     /// <param name="p">The octets.</param>
     /// <param name="n">How many there are.</param>

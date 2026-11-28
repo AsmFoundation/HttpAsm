@@ -68,8 +68,7 @@ public sealed unsafe class TlsRecordTests
 
     /// <summary>
     /// The .NET copy of httpasm_tls13_record_key has the library's size, 1056 octets, under struct
-    /// id 28, the registry's last: id 29 answers 0, as any id past the registry does (the end
-    /// check moves to the newest structure's tests each time one is added).
+    /// id 28 (the registry's end is checked by the newest structures' tests: TlsMessageTests).
     /// </summary>
     [Fact]
     public void StructureMatchesTheLibrary()
@@ -77,7 +76,6 @@ public sealed unsafe class TlsRecordTests
         Platform.RequireLinuxX64();
         Assert.Equal(1056, sizeof(Tls13RecordKey));
         Assert.Equal((uint)sizeof(Tls13RecordKey), Native.StructSize(28));
-        Assert.Equal(0u, Native.StructSize(29));
     }
 
     /// <summary>

@@ -710,6 +710,100 @@ struc httpasm_tls13_record_key
     .aead:              resb httpasm_aes_gcm_key_size   ; the AES-GCM key, or ChaCha20-Poly1305's 32 octets
 endstruc
 
+; The handshake messages (RFC 9846 4): their types, the messages an extension may appear in (the
+; columns of 4.3's table, as bits), and the extensions the library knows, by index into
+; httpasm_tls_extensions (tls/extensions.asm's table maps each type to its index).
+HTTPASM_TLS_CLIENT_HELLO        equ 1
+HTTPASM_TLS_SERVER_HELLO        equ 2
+HTTPASM_TLS_NEW_SESSION_TICKET  equ 4
+HTTPASM_TLS_END_OF_EARLY_DATA   equ 5
+HTTPASM_TLS_ENCRYPTED_EXTENSIONS equ 8
+HTTPASM_TLS_CERTIFICATE         equ 11
+HTTPASM_TLS_CERTIFICATE_REQUEST equ 13
+HTTPASM_TLS_CERTIFICATE_VERIFY  equ 15
+HTTPASM_TLS_FINISHED            equ 20
+HTTPASM_TLS_KEY_UPDATE          equ 24
+HTTPASM_TLS_MESSAGE_HASH        equ 254
+
+HTTPASM_TLS_IN_CH       equ 1       ; ClientHello
+HTTPASM_TLS_IN_SH       equ 2       ; ServerHello
+HTTPASM_TLS_IN_EE       equ 4       ; EncryptedExtensions
+HTTPASM_TLS_IN_CT       equ 8       ; Certificate (an entry's extensions)
+HTTPASM_TLS_IN_CR       equ 16      ; CertificateRequest
+HTTPASM_TLS_IN_NST      equ 32      ; NewSessionTicket
+HTTPASM_TLS_IN_HRR      equ 64      ; HelloRetryRequest
+
+HTTPASM_TLS_EXT_SERVER_NAME             equ 0       ; type 0 (RFC 6066)
+HTTPASM_TLS_EXT_MAX_FRAGMENT_LENGTH     equ 1       ; 1 (RFC 6066)
+HTTPASM_TLS_EXT_STATUS_REQUEST          equ 2       ; 5
+HTTPASM_TLS_EXT_SUPPORTED_GROUPS        equ 3       ; 10
+HTTPASM_TLS_EXT_EC_POINT_FORMATS        equ 4       ; 11 (TLS 1.2's: a ClientHello only)
+HTTPASM_TLS_EXT_SIGNATURE_ALGORITHMS    equ 5       ; 13
+HTTPASM_TLS_EXT_USE_SRTP                equ 6       ; 14
+HTTPASM_TLS_EXT_HEARTBEAT               equ 7       ; 15
+HTTPASM_TLS_EXT_ALPN                    equ 8       ; 16 (RFC 7301)
+HTTPASM_TLS_EXT_SCT                     equ 9       ; 18 (RFC 6962)
+HTTPASM_TLS_EXT_CLIENT_CERTIFICATE_TYPE equ 10      ; 19
+HTTPASM_TLS_EXT_SERVER_CERTIFICATE_TYPE equ 11      ; 20
+HTTPASM_TLS_EXT_PADDING                 equ 12      ; 21 (RFC 7685)
+HTTPASM_TLS_EXT_ENCRYPT_THEN_MAC        equ 13      ; 22 (TLS 1.2's)
+HTTPASM_TLS_EXT_EXTENDED_MASTER_SECRET  equ 14      ; 23 (TLS 1.2's)
+HTTPASM_TLS_EXT_COMPRESS_CERTIFICATE    equ 15      ; 27 (RFC 8879)
+HTTPASM_TLS_EXT_RECORD_SIZE_LIMIT       equ 16      ; 28 (RFC 8449)
+HTTPASM_TLS_EXT_DELEGATED_CREDENTIAL    equ 17      ; 34 (RFC 9345)
+HTTPASM_TLS_EXT_SESSION_TICKET          equ 18      ; 35 (TLS 1.2's)
+HTTPASM_TLS_EXT_SUPPORTED_EKT_CIPHERS   equ 19      ; 39
+HTTPASM_TLS_EXT_PRE_SHARED_KEY          equ 20      ; 41
+HTTPASM_TLS_EXT_EARLY_DATA              equ 21      ; 42
+HTTPASM_TLS_EXT_SUPPORTED_VERSIONS      equ 22      ; 43
+HTTPASM_TLS_EXT_COOKIE                  equ 23      ; 44
+HTTPASM_TLS_EXT_PSK_KEY_EXCHANGE_MODES  equ 24      ; 45
+HTTPASM_TLS_EXT_CERTIFICATE_AUTHORITIES equ 25      ; 47
+HTTPASM_TLS_EXT_OID_FILTERS             equ 26      ; 48
+HTTPASM_TLS_EXT_POST_HANDSHAKE_AUTH     equ 27      ; 49
+HTTPASM_TLS_EXT_SIGNATURE_ALGORITHMS_CERT equ 28    ; 50
+HTTPASM_TLS_EXT_KEY_SHARE               equ 29      ; 51
+HTTPASM_TLS_EXT_TRANSPARENCY_INFO       equ 30      ; 52 (RFC 9162)
+HTTPASM_TLS_EXT_EXTERNAL_ID_HASH        equ 31      ; 55
+HTTPASM_TLS_EXT_EXTERNAL_SESSION_ID     equ 32      ; 56
+HTTPASM_TLS_EXT_QUIC_TRANSPORT_PARAMETERS equ 33    ; 57 (RFC 9001)
+HTTPASM_TLS_EXT_TICKET_REQUEST          equ 34      ; 58 (RFC 9149)
+HTTPASM_TLS_EXT_ECH_OUTER_EXTENSIONS    equ 35      ; 0xFD00 (RFC 9849)
+HTTPASM_TLS_EXT_ENCRYPTED_CLIENT_HELLO  equ 36      ; 0xFE0D (RFC 9849)
+HTTPASM_TLS_EXT_RENEGOTIATION_INFO      equ 37      ; 0xFF01 (TLS 1.2's)
+HTTPASM_TLS_EXTENSIONS                  equ 38      ; how many the library knows
+
+; httpasm_tls_extensions: an extension block as httpasm_tls_extensions_read found it (400 octets,
+; struct size id 29): each known extension's data, by index.
+struc httpasm_tls_extensions
+    .present:           resq 1      ; bit i: the extension of index i was in the block
+    .count:             resd 1      ; the block's extensions, known or not
+    .last:              resd 1      ; the type of its last one (pre_shared_key's rule)
+    .data:              resq HTTPASM_TLS_EXTENSIONS     ; each present one's extension_data
+    .length:            resw HTTPASM_TLS_EXTENSIONS     ; and its octets
+    .reserved:          resw 2
+endstruc
+
+; httpasm_tls13_hello: a ClientHello or a ServerHello (a HelloRetryRequest among them) as its
+; reader found it, pointers into the message's body (464 octets, struct size id 30).
+struc httpasm_tls13_hello
+    .random:            resq 1      ; 32 octets
+    .session_id:        resq 1      ; legacy_session_id (a ServerHello's echo)
+    .cipher_suites:     resq 1      ; a ClientHello's list (pairs of octets)
+    .compression:       resq 1      ; a ClientHello's legacy_compression_methods
+    .extensions_block:  resq 1      ; the block's first octet, after its length (NULL: no block)
+    .extensions_length: resq 1      ; its octets
+    .cipher_suites_length: resd 1   ; octets of the list
+    .legacy_version:    resw 1
+    .cipher_suite:      resw 1      ; a ServerHello's
+    .session_id_length: resb 1
+    .compression_length: resb 1
+    .compression_method: resb 1     ; a ServerHello's
+    .retry:             resb 1      ; 1: a ServerHello that is a HelloRetryRequest
+    .reserved:          resb 4
+    .extensions:        resb httpasm_tls_extensions_size
+endstruc
+
 ; -----------------------------------------------------------------------------
 ; CPU features: the bits of httpasm_cpu_found, httpasm_cpu_features and httpasm_cpu_limit, and
 ; of the core's ha_cpu. Levels are the x86-64 psABI's; groups are instructions that CPUs of one

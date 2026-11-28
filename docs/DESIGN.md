@@ -1871,8 +1871,67 @@ CI's 30-second campaigns found the other (the HPACK encoder's names, above) the 
      refusal has its test; `tests/fuzz/tls_record.c` frames and opens hostile records and
      round-trips and forges sealed ones (741,440 inputs in its first minute); the
      constant-time check covers every derivation and the three suites' records.
-   - **4b, the handshake messages**: each message and extension parsed and written, strictly
-     (every length, duplicate, order and value rule), the transcript hash.
+   - **4b, the handshake messages** (2026-11-28, `tls/messages.asm`, `tls/extensions.asm`):
+     each message read strictly (every length, duplicate, order and value rule) and in place
+     (pointers into the octets read, nothing copied), each refusal answered as minus its alert
+     (decode_error, illegal_parameter, missing_extension):
+     - `httpasm_tls_message` frames a handshake message (its type and 24-bit length; 0 while
+       octets are missing: a message may span records and a record hold several, and the
+       reassembly, with its bound on a message's length, is the engine's);
+     - `httpasm_tls_extensions_read` walks an extension block (4.3) into
+       `httpasm_tls_extensions` (400 octets: each of the 38 known extensions' data by index,
+       the block's count and its last type): every extension inside the block; no type twice,
+       for all 65,536 types, by an 8 KiB bitmap on the stack (taken a page at a time), so a
+       block of 16,000 extensions costs linear time and not its square; each known type only
+       in the messages RFC 9846's table and the IANA registry's TLS 1.3 column name
+       (illegal_parameter elsewhere), TLS 1.2's own known too and allowed in a ClientHello
+       only, so a TLS 1.3 answer carrying one is refused; pre_shared_key last in a ClientHello;
+       unknown types, GREASE among them, counted and passed over;
+     - the readers: `httpasm_tls13_hello_read` (ClientHello and ServerHello into
+       `httpasm_tls13_hello`, 464 octets; a HelloRetryRequest told apart by its random and
+       judged by its own column; a ClientHello offering TLS 1.3 carries compression method 0
+       alone and a ServerHello's is 0; the blocks' least lengths RFC 9846's, 7 and 6),
+       `_extensions_message_read` (EncryptedExtensions), `_certificate_request_read`
+       (signature_algorithms required: missing_extension), `_certificate_read` and
+       `_certificate_entry` (each cert_data at least one octet, each entry's extensions judged
+       as a Certificate's; the entry reader reads a list wherever its caller keeps it),
+       `_certificate_verify_read`, `_new_session_ticket_read` (a ticket of one octet at least,
+       extensions of 2^16-2 at most) and `_key_update_read` (0 or 1, else illegal_parameter);
+       Finished (the hash's length, which the engine compares) and EndOfEarlyData (empty) need
+       none;
+     - the syntax of the 17 extensions the engine reads, by the message each is in, whole and
+       nothing after it (decode_error): server_name, supported_groups,
+       signature_algorithms(_cert), ALPN (one name in EncryptedExtensions),
+       compress_certificate, record_size_limit (64 at least), pre_shared_key (as many binders
+       as identities), early_data (empty, or a NewSessionTicket's uint32), supported_versions
+       (a list, or the one selected), cookie, psk_key_exchange_modes, certificate_authorities,
+       oid_filters, post_handshake_auth, key_share (a ClientHello's shares with no group twice,
+       by a bitmap again; a ServerHello's one share; a HelloRetryRequest's group) and
+       ticket_request; the others are passed over (4.3 binds a receiver to the trailing-data
+       rule only for what it implements; padding's zeros are its sender's MUST, RFC 7685);
+     - the writers the engine builds its messages with come with the engine (4c, 4d).
+     Proven by every handshake message of RFC 8448's five traces, read as `TlsModel` (the
+     tests' reader, written apart from the assembly) reads it; by every one-octet change (+1,
+     -1, xor 0x80), truncation and inserted zero of each of them, hellos and the others, over
+     10,000 cases each, and every extension of each hello removed, doubled, moved last and
+     retyped as each known type, the library answering and reading what the model does; by
+     every known extension in every message that may carry it, alone in a block, from samples
+     at and past each bound of its syntax, each cut at every length, extended by an octet and
+     changed octet by octet (4,346 cases, the same agreement); by 4,000 random hellos; by each
+     rule by name (a hello reader asked for another type answering -1, the caller's error);
+     by the duplicate checks' linear time (16,000
+     extensions and 13,000 key shares, each read well within a second); by each Certificate's
+     list read at a page's first octet with the page before it inaccessible, and entries read
+     where none is (each answered, none trusted); by `tests/native/stack` (the bitmaps' frames,
+     8,288 to 8,832 octets deep, taken a page at a time: every smaller stack faults in its
+     guard); and by
+     `tests/fuzz/tls_messages.c` (every reader at every tier, every pointer inside its input and
+     in its place, every block as a model of the walk in C finds it; 13,741,594 inputs in its
+     first minute, then 139,553,787 in ten minutes, without a finding); every block and branch
+     edge of both files runs under the tests (106 blocks, 396 edges, none listed unreachable).
+     The entry reader's first version loaded each uint24 length as a dword from the octet
+     before it, for the first entry the octet before the caller's list; found while the
+     fuzzer's invariants were written, it now reads within the length's three octets.
    - **4c, the server** and **4d, the client**: the state machines of a full handshake with
      certificates, HelloRetryRequest, the alerts, KeyUpdate, post-handshake authentication;
      then **4e**, PSK resumption, tickets, ticket requests and 0-RTT with anti-replay.

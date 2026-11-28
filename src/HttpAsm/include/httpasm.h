@@ -255,8 +255,8 @@ uint32_t httpasm_abi_version(void);
  * 16 httpasm_rsa_public_key, 17 httpasm_rsa_private_key, 18 httpasm_rsa_private_numbers,
  * 19 httpasm_ed25519_private_key, 20 httpasm_sha3_ctx, 21 httpasm_ed448_private_key,
  * 22 httpasm_hmac_sha512_ctx, 23 httpasm_asn1, 24 httpasm_pem, 25 httpasm_private_key,
- * 26 httpasm_certificate, 27 httpasm_public_key, 28 httpasm_tls13_record_key; 0 for any other
- * value. */
+ * 26 httpasm_certificate, 27 httpasm_public_key, 28 httpasm_tls13_record_key,
+ * 29 httpasm_tls_extensions, 30 httpasm_tls13_hello; 0 for any other value. */
 uint32_t httpasm_struct_size(uint32_t which);
 
 /* ------------------------------------------------------------------------------------------
@@ -1473,6 +1473,166 @@ int64_t httpasm_tls13_seal(httpasm_tls13_record_key *key, int content_type,
  * fragment is then zeros), INTERNAL_ERROR (the sequence number would wrap). */
 int64_t httpasm_tls13_open(httpasm_tls13_record_key *key, uint8_t *record, size_t length,
                            uint8_t *content_type);
+
+/* The handshake messages (RFC 9846 4): read strictly and in place (pointers into the octets
+ * given, valid while they are). Each reader answers 0 or minus the alert the handshake must end
+ * with; what needs the other side's messages (a suite that was not offered, an extension that
+ * was not asked for) is the engine's to judge. */
+#define HTTPASM_TLS_CLIENT_HELLO         1      /* HandshakeType */
+#define HTTPASM_TLS_SERVER_HELLO         2
+#define HTTPASM_TLS_NEW_SESSION_TICKET   4
+#define HTTPASM_TLS_END_OF_EARLY_DATA    5
+#define HTTPASM_TLS_ENCRYPTED_EXTENSIONS 8
+#define HTTPASM_TLS_CERTIFICATE          11
+#define HTTPASM_TLS_CERTIFICATE_REQUEST  13
+#define HTTPASM_TLS_CERTIFICATE_VERIFY   15
+#define HTTPASM_TLS_FINISHED             20
+#define HTTPASM_TLS_KEY_UPDATE           24
+#define HTTPASM_TLS_MESSAGE_HASH         254
+
+/* The messages an extension may appear in: the columns of RFC 9846 4.3's table, as bits. */
+#define HTTPASM_TLS_IN_CH  1                    /* ClientHello */
+#define HTTPASM_TLS_IN_SH  2                    /* ServerHello */
+#define HTTPASM_TLS_IN_EE  4                    /* EncryptedExtensions */
+#define HTTPASM_TLS_IN_CT  8                    /* a Certificate entry */
+#define HTTPASM_TLS_IN_CR  16                   /* CertificateRequest */
+#define HTTPASM_TLS_IN_NST 32                   /* NewSessionTicket */
+#define HTTPASM_TLS_IN_HRR 64                   /* HelloRetryRequest */
+
+/* The extensions the library knows, by index into httpasm_tls_extensions (the type in each
+ * comment). TLS 1.2's own are known so that a TLS 1.3 answer carrying one is refused (they
+ * stand in a ClientHello only). */
+#define HTTPASM_TLS_EXT_SERVER_NAME               0   /* 0, RFC 6066 */
+#define HTTPASM_TLS_EXT_MAX_FRAGMENT_LENGTH       1   /* 1 */
+#define HTTPASM_TLS_EXT_STATUS_REQUEST            2   /* 5 */
+#define HTTPASM_TLS_EXT_SUPPORTED_GROUPS          3   /* 10 */
+#define HTTPASM_TLS_EXT_EC_POINT_FORMATS          4   /* 11, TLS 1.2 */
+#define HTTPASM_TLS_EXT_SIGNATURE_ALGORITHMS      5   /* 13 */
+#define HTTPASM_TLS_EXT_USE_SRTP                  6   /* 14 */
+#define HTTPASM_TLS_EXT_HEARTBEAT                 7   /* 15 */
+#define HTTPASM_TLS_EXT_ALPN                      8   /* 16, RFC 7301 */
+#define HTTPASM_TLS_EXT_SCT                       9   /* 18, RFC 6962 */
+#define HTTPASM_TLS_EXT_CLIENT_CERTIFICATE_TYPE   10  /* 19 */
+#define HTTPASM_TLS_EXT_SERVER_CERTIFICATE_TYPE   11  /* 20 */
+#define HTTPASM_TLS_EXT_PADDING                   12  /* 21, RFC 7685 */
+#define HTTPASM_TLS_EXT_ENCRYPT_THEN_MAC          13  /* 22, TLS 1.2 */
+#define HTTPASM_TLS_EXT_EXTENDED_MASTER_SECRET    14  /* 23, TLS 1.2 */
+#define HTTPASM_TLS_EXT_COMPRESS_CERTIFICATE      15  /* 27, RFC 8879 */
+#define HTTPASM_TLS_EXT_RECORD_SIZE_LIMIT         16  /* 28, RFC 8449 */
+#define HTTPASM_TLS_EXT_DELEGATED_CREDENTIAL      17  /* 34, RFC 9345 */
+#define HTTPASM_TLS_EXT_SESSION_TICKET            18  /* 35, TLS 1.2 */
+#define HTTPASM_TLS_EXT_SUPPORTED_EKT_CIPHERS     19  /* 39 */
+#define HTTPASM_TLS_EXT_PRE_SHARED_KEY            20  /* 41 */
+#define HTTPASM_TLS_EXT_EARLY_DATA                21  /* 42 */
+#define HTTPASM_TLS_EXT_SUPPORTED_VERSIONS        22  /* 43 */
+#define HTTPASM_TLS_EXT_COOKIE                    23  /* 44 */
+#define HTTPASM_TLS_EXT_PSK_KEY_EXCHANGE_MODES    24  /* 45 */
+#define HTTPASM_TLS_EXT_CERTIFICATE_AUTHORITIES   25  /* 47 */
+#define HTTPASM_TLS_EXT_OID_FILTERS               26  /* 48 */
+#define HTTPASM_TLS_EXT_POST_HANDSHAKE_AUTH       27  /* 49 */
+#define HTTPASM_TLS_EXT_SIGNATURE_ALGORITHMS_CERT 28  /* 50 */
+#define HTTPASM_TLS_EXT_KEY_SHARE                 29  /* 51 */
+#define HTTPASM_TLS_EXT_TRANSPARENCY_INFO         30  /* 52, RFC 9162 */
+#define HTTPASM_TLS_EXT_EXTERNAL_ID_HASH          31  /* 55 */
+#define HTTPASM_TLS_EXT_EXTERNAL_SESSION_ID       32  /* 56 */
+#define HTTPASM_TLS_EXT_QUIC_TRANSPORT_PARAMETERS 33  /* 57, RFC 9001 */
+#define HTTPASM_TLS_EXT_TICKET_REQUEST            34  /* 58, RFC 9149 */
+#define HTTPASM_TLS_EXT_ECH_OUTER_EXTENSIONS      35  /* 0xFD00, RFC 9849 */
+#define HTTPASM_TLS_EXT_ENCRYPTED_CLIENT_HELLO    36  /* 0xFE0D, RFC 9849 */
+#define HTTPASM_TLS_EXT_RENEGOTIATION_INFO        37  /* 0xFF01, TLS 1.2 */
+#define HTTPASM_TLS_EXTENSIONS                    38
+
+/* An extension block as httpasm_tls_extensions_read found it (400 octets). */
+typedef struct httpasm_tls_extensions {
+    uint64_t present;                   /* bit i: the extension of index i was in the block */
+    uint32_t count;                     /* the block's extensions, known or not */
+    uint32_t last;                      /* the type of its last one */
+    const uint8_t *data[HTTPASM_TLS_EXTENSIONS];    /* each present one's extension_data */
+    uint16_t length[HTTPASM_TLS_EXTENSIONS];        /* and its octets */
+    uint16_t reserved[2];
+} httpasm_tls_extensions;
+
+/* A ClientHello or a ServerHello (a HelloRetryRequest among them) as httpasm_tls13_hello_read
+ * found it (464 octets): pointers into the body read. */
+typedef struct httpasm_tls13_hello {
+    const uint8_t *random;              /* 32 octets */
+    const uint8_t *session_id;          /* legacy_session_id (a ServerHello's echo) */
+    const uint8_t *cipher_suites;       /* a ClientHello's list: pairs of octets */
+    const uint8_t *compression;         /* a ClientHello's legacy_compression_methods */
+    const uint8_t *extensions_block;    /* the block's first octet, after its length (NULL: none) */
+    size_t extensions_length;
+    uint32_t cipher_suites_length;      /* octets of the list */
+    uint16_t legacy_version;
+    uint16_t cipher_suite;              /* a ServerHello's */
+    uint8_t session_id_length;
+    uint8_t compression_length;
+    uint8_t compression_method;         /* a ServerHello's */
+    uint8_t retry;                      /* 1: a ServerHello that is a HelloRetryRequest */
+    uint8_t reserved[4];
+    httpasm_tls_extensions extensions;
+} httpasm_tls13_hello;
+
+/* The handshake message at the start of in[0..length): its whole length (4 + the body's) with
+ * *type and *body_length set when all of it is there; 0 when more octets are needed. */
+int64_t httpasm_tls_message(const uint8_t *in, size_t length, uint32_t *type, size_t *body_length);
+
+/* Walks an extension block's octets (after its uint16 length) as found in message (one
+ * HTTPASM_TLS_IN_* bit): each known extension's data by index. Returns 0; DECODE_ERROR for an
+ * extension past the block; ILLEGAL_PARAMETER for a type twice (any of the 65,536), a known type
+ * the message may not carry (4.3's table), or a ClientHello's pre_shared_key not last. The data
+ * is not looked into (the message readers do that). */
+int httpasm_tls_extensions_read(httpasm_tls_extensions *ext, int message, const uint8_t *block,
+                                size_t length);
+
+/* A ClientHello's (type 1) or ServerHello's (type 2) body: its fields, its extension block
+ * walked, and the syntax of each extension the engine reads checked (decode_error; the value
+ * rules: illegal_parameter); a ClientHello offering TLS 1.3 must carry compression method 0
+ * alone, a ServerHello's must be 0; a ServerHello with HelloRetryRequest's random is one
+ * (hello->retry). The legacy_version is returned, not judged. Returns 0, minus an alert, or -1
+ * for another type. */
+int httpasm_tls13_hello_read(httpasm_tls13_hello *hello, int type, const uint8_t *body,
+                             size_t length);
+
+/* A body that is an extension block with its uint16 length (EncryptedExtensions: message
+ * HTTPASM_TLS_IN_EE), walked and checked. Returns 0 or minus an alert. */
+int httpasm_tls13_extensions_message_read(httpasm_tls_extensions *ext, int message,
+                                          const uint8_t *body, size_t length);
+
+/* A CertificateRequest: its context and its extensions, signature_algorithms among them (else
+ * MISSING_EXTENSION). Returns 0 or minus an alert. */
+int httpasm_tls13_certificate_request_read(httpasm_tls_extensions *ext, const uint8_t **context,
+                                           size_t *context_length, const uint8_t *body,
+                                           size_t length);
+
+/* A Certificate message: its context and its certificate_list, each entry's extensions checked.
+ * Returns the count of entries, or minus an alert; httpasm_tls13_certificate_entry reads them. */
+int64_t httpasm_tls13_certificate_read(const uint8_t *body, size_t length, const uint8_t **context,
+                                       size_t *context_length, const uint8_t **list,
+                                       size_t *list_length);
+
+/* The entry at list[offset..) of a list httpasm_tls13_certificate_read accepted: its cert_data
+ * and its extensions. Returns the next entry's offset (list_length after the last). The entry is
+ * judged again, not trusted: DECODE_ERROR for an offset at or past the end, an entry past the
+ * list or an empty cert_data; its extensions' alert otherwise. Reads nothing outside the list,
+ * wherever the caller keeps it. */
+int64_t httpasm_tls13_certificate_entry(const uint8_t *list, size_t list_length, size_t offset,
+                                        const uint8_t **cert, size_t *cert_length,
+                                        httpasm_tls_extensions *ext);
+
+/* A CertificateVerify: its SignatureScheme and signature. Returns 0 or DECODE_ERROR. */
+int httpasm_tls13_certificate_verify_read(const uint8_t *body, size_t length, uint32_t *scheme,
+                                          const uint8_t **signature, size_t *signature_length);
+
+/* A NewSessionTicket: *lifetime_age_add = ticket_lifetime | (uint64_t)ticket_age_add << 32;
+ * *nonce at the ticket_nonce's length octet, *ticket at the ticket's uint16 length; its
+ * extensions (NST's) in ext. Returns 0 or minus an alert. */
+int httpasm_tls13_new_session_ticket_read(httpasm_tls_extensions *ext, const uint8_t *body,
+                                          size_t length, uint64_t *lifetime_age_add,
+                                          const uint8_t **nonce, const uint8_t **ticket);
+
+/* A KeyUpdate: its request_update, 0 or 1; or DECODE_ERROR (another length), ILLEGAL_PARAMETER
+ * (another value). */
+int httpasm_tls13_key_update_read(const uint8_t *body, size_t length);
 
 /* ------------------------------------------------------------------------------------------
  * Field rules (RFC 9110 sections 5.1, 5.5, 5.6.2)
